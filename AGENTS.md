@@ -6,6 +6,15 @@
 - Smoke test: `timeout 5 ./target/release/option-term` (GApplication é single-instance —
   mate instâncias antigas antes: `pkill option-term`).
 - O warning `AdwTabBox reported min width -6` no startup é bug conhecido e inofensivo do libadwaita.
+- Testes: `PATH="/tmp/zig151/zig-0.15.2:$PATH" cargo test --release`.
+
+## Release / AUR
+- Publicado no AUR como **`option-term`** (`ssh://aur@aur.archlinux.org/option-term.git`).
+- `packaging/aur/` guarda uma cópia do `PKGBUILD`/`.SRCINFO` publicados (fonte da verdade é o repo do AUR).
+- O `PKGBUILD` baixa o tarball oficial do **Zig 0.15.2** porque `extra/zig` já é 0.16.
+- Fluxo de release: bump no `Cargo.toml` → `CHANGELOG.md` → commit → `git tag -a vX.Y.Z` →
+  `gh release create` → atualizar `pkgver`+`sha256sums` no `PKGBUILD` →
+  `makepkg --printsrcinfo > .SRCINFO` → `makepkg -f` (valida) → push no AUR.
 
 ## Arquitetura
 - `src/config.rs` — config próprio em `~/.option/terminal/config.toml` (TOML).
@@ -25,8 +34,8 @@
         e a mudanças no `gtk-decoration-layout` (posição/estilo dos botões de janela).
   - [ ] Respeitar `gtk-enable-animations`, fontes do sistema (`gtk-font-name`) no chrome,
         e escala de texto (`text-scaling-factor`).
-  - [ ] Suportar mais chaves do Ghostty: `window-theme = system`, `gtk-titlebar`,
-        `gtk-wide-tabs`, `window-decoration`, `background-opacity`.
+  - [ ] Suportar mais chaves do Ghostty: `gtk-titlebar`, `gtk-wide-tabs`,
+        `window-decoration`, `background-opacity` (`window-theme` já é suportado).
   - [ ] Recarregar o config automaticamente quando o arquivo mudar (GFileMonitor),
         como o Ghostty faz.
 - [ ] `gtk-tabs-location = bottom` (hoje mapeado para `top`).
