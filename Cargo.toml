@@ -1,0 +1,29 @@
+[package]
+name = "option-term"
+version = "0.1.0"
+edition = "2024"
+description = "optionTerm AI — GTK4 + libadwaita terminal powered by libghostty-vt"
+license = "Apache-2.0"
+repository = "https://github.com/fireflylabss/optionTerm"
+default-run = "option-term"
+
+[[bin]]
+name = "option-term"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+gtk4 = { version = "0.9", features = ["v4_14"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+libghostty-vt = { version = "0.2.1", features = ["tracing"] }
+nix = { version = "0.30", features = ["term", "fs", "process", "signal", "user", "ioctl", "poll"] }
+pangocairo = "0.20"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
