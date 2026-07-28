@@ -1,6 +1,6 @@
 [package]
 name = "option-term"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "optionTerm AI — GTK4 + libadwaita terminal powered by libghostty-vt"
 license = "Apache-2.0"
@@ -19,6 +19,7 @@ libadwaita = { version = "0.7", features = ["v1_5"] }
 libghostty-vt = { version = "0.2.1", features = ["tracing"] }
 nix = { version = "0.30", features = ["term", "fs", "process", "signal", "user", "ioctl", "poll"] }
 pangocairo = "0.20"
+png = "0.18"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

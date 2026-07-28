@@ -7,6 +7,7 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 ## Features
 
 - **Tabs, three ways** — top tab bar, left/right sidebar, or hidden tabs (`window.tabs`), each with a `+` button that doubles as a tiling dropdown.
+- **Kitty graphics protocol** — inline images (`timg`, `chafa --format=kitty`, plotting backends, previews), with PNG and raw pixel formats, scaling and z-layers.
 - **Accents & input methods** — dead keys and compose sequences work (`´` + `a` → `á`), plus CJK/IBus engines via `GtkIMMulticontext`.
 - **Persistent settings** — anything changed from the menus or Preferences is written straight back to `config.toml`.
 - **Clear & restart** — wipe the screen and scrollback (`Ctrl+Shift+K`) or respawn the shell in place keeping the split layout (`Ctrl+Shift+R`).

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-07-28
+
+### Added
+
+- **Kitty graphics protocol** — images sent with `ESC _G …` are decoded and rendered inline, so tools like `timg`, `chafa --format=kitty`, `matplotlib`'s kitty backend and image previews in file managers work. Supports PNG (`f=100`) plus raw RGB/RGBA/gray buffers, source rectangles, cell offsets, scaling and the three z-layers (below background, below text, above text). Decoded frames are cached as Cairo surfaces and evicted per frame.
+
+### Fixed
+
+- **Cursor did not blink with `cursor.blink = true`.** The config value was only kept application-side and never pushed into the VT, so the render snapshot always reported a static cursor and the blink timer was disabled. `cursor-style` and `cursor-style-blink` are now applied as the DECSCUSR defaults, both at startup and when toggled at runtime.
+
 ## [0.1.3] - 2026-07-28
 
 ### Added

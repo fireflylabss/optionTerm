@@ -15,6 +15,7 @@ use gtk4::{
 use libghostty_vt::{
     Terminal, TerminalOptions,
     fmt::{Formatter, FormatterOptions},
+    kitty::graphics::{Layer as KittyLayer, PlacementIterator},
     paste,
     render::{CellIterator, CursorVisualStyle, RenderState, RowIterator},
     screen::TrackedGridRef,
@@ -32,6 +33,7 @@ use libghostty_vt::{
 
 use crate::{
     config::{Config, CursorStyle},
+    graphics,
     input::Input,
     pty::{self, Child, Pty, PtyError},
 };
@@ -72,6 +74,9 @@ struct Session {
     blink_on: bool,
     blink_enabled: bool,
     fonts: Option<FontSet>,
+    /// Kitty graphics placement iterator, reused across frames.
+    kitty_iter: Option<PlacementIterator<'static>>,
+    image_cache: graphics::ImageCache,
     gesture: Gesture<'static>,
     sel_start: Option<TrackedGridRef>,
     sel_end: Option<TrackedGridRef>,
@@ -234,6 +239,11 @@ impl TerminalView {
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
         if let Some(session) = self.state.borrow_mut().as_mut() {
             f(&mut session.config);
+            // Cursor style/blink live in the VT state, not just our config.
+            let config = session.config.clone();
+            if let Err(err) = config.apply_cursor_to_terminal(&mut session.terminal) {
+                tracing::warn!("failed to apply cursor settings: {err:#}");
+            }
         }
         self.area.queue_draw();
     }
@@ -352,6 +362,13 @@ fn bootstrap_session(
 
     config.apply_to_terminal(&mut terminal)?;
 
+    // Kitty graphics protocol: a non-zero storage limit turns it on, and the
+    // PNG decoder is what makes `f=100` (the format most tools emit) work.
+    graphics::install_png_decoder();
+    if let Err(err) = terminal.set_kitty_image_storage_limit(graphics::STORAGE_LIMIT) {
+        tracing::warn!("could not enable kitty graphics: {err:?}");
+    }
+
     terminal
         .on_pty_write(move |_t, data| {
             pty::write_fd(pty_fd, data);
@@ -422,6 +439,10 @@ fn bootstrap_session(
         blink_on: true,
         blink_enabled: false,
         fonts: None,
+        kitty_iter: PlacementIterator::new()
+            .inspect_err(|err| tracing::warn!("kitty placement iterator unavailable: {err:?}"))
+            .ok(),
+        image_cache: graphics::ImageCache::default(),
         gesture: Gesture::new().map_err(|e| anyhow!("{e:?}"))?,
         sel_start: None,
         sel_end: None,
@@ -1114,6 +1135,32 @@ impl Session {
             .filter(|_| cursor_shown && matches!(cursor_style, CursorVisualStyle::Block))
             .map(|c| (c.x, c.y));
 
+        // Kitty images below the text. Cells with an explicit background still
+        // paint over them in the loop below, which is correct for `BelowBg`
+        // and an accepted approximation for `BelowText` (the common case is an
+        // image sitting on default-background cells).
+        let metrics = graphics::Metrics {
+            padding_x: pad_x,
+            padding_y: pad_y,
+            cell_width: cell_w,
+            cell_height: cell_h,
+            width: width as f64,
+            height: height as f64,
+        };
+        // Borrow the fields directly: `snapshot` still holds `&self.terminal`,
+        // so a `&mut self` method would conflict.
+        self.image_cache.begin_frame();
+        for layer in [KittyLayer::BelowBg, KittyLayer::BelowText] {
+            paint_images(
+                &self.terminal,
+                self.kitty_iter.as_mut(),
+                &mut self.image_cache,
+                cr,
+                metrics,
+                layer,
+            );
+        }
+
         let mut row_it = self.row_it.update(&snapshot).map_err(|e| anyhow!("{e:?}"))?;
         let mut row_idx = 0u16;
         let mut text = String::with_capacity(16);
@@ -1244,7 +1291,35 @@ impl Session {
             }
         }
 
+        // Kitty images that sit above the text layer (z >= 0).
+        drop(snapshot);
+        paint_images(
+            &self.terminal,
+            self.kitty_iter.as_mut(),
+            &mut self.image_cache,
+            cr,
+            metrics,
+            KittyLayer::AboveText,
+        );
+        self.image_cache.end_frame();
+
         Ok(())
+    }
+}
+
+/// Paint one Kitty graphics layer, logging (not propagating) failures so a bad
+/// placement never blanks the terminal.
+fn paint_images(
+    terminal: &Terminal<'static, 'static>,
+    iter: Option<&mut PlacementIterator<'static>>,
+    cache: &mut graphics::ImageCache,
+    cr: &cairo::Context,
+    metrics: graphics::Metrics,
+    layer: KittyLayer,
+) {
+    let Some(iter) = iter else { return };
+    if let Err(err) = graphics::draw(terminal, iter, cache, cr, metrics, layer) {
+        tracing::debug!("kitty graphics render failed: {err:#}");
     }
 }
 

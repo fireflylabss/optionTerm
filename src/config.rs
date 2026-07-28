@@ -418,9 +418,34 @@ palette = [
         cfg
     }
 
+    /// Push `cursor-style` / `cursor-style-blink` into the terminal so they
+    /// become the DECSCUSR defaults. Without this the VT reports a
+    /// non-blinking cursor and `cursor.blink = true` never takes effect.
+    pub fn apply_cursor_to_terminal(
+        &self,
+        terminal: &mut libghostty_vt::Terminal<'_, '_>,
+    ) -> Result<()> {
+        use anyhow::anyhow;
+        use libghostty_vt::terminal::CursorStyle as VtCursorStyle;
+        let style = match self.cursor_style {
+            CursorStyle::Block => VtCursorStyle::Block,
+            CursorStyle::Bar => VtCursorStyle::Bar,
+            CursorStyle::Underline => VtCursorStyle::Underline,
+            CursorStyle::BlockHollow => VtCursorStyle::BlockHollow,
+        };
+        terminal
+            .set_default_cursor_style(Some(style))
+            .map_err(|e| anyhow!("{e:?}"))?;
+        terminal
+            .set_default_cursor_blink(Some(self.cursor_blink))
+            .map_err(|e| anyhow!("{e:?}"))?;
+        Ok(())
+    }
+
     /// Apply colors onto a libghostty terminal.
     pub fn apply_to_terminal(&self, terminal: &mut libghostty_vt::Terminal<'_, '_>) -> Result<()> {
         use anyhow::anyhow;
+        self.apply_cursor_to_terminal(terminal)?;
         terminal
             .set_default_fg_color(Some(self.foreground))
             .map_err(|e| anyhow!("{e:?}"))?;
@@ -563,5 +588,32 @@ mod tests {
         assert_eq!(back.padding_y, cfg.padding_y);
         assert_eq!(back.palette[3], cfg.palette[3]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression: `cursor.blink = true` did nothing because the VT default
+    /// was never set, so the render snapshot always reported a static cursor.
+    #[test]
+    fn cursor_blink_reaches_the_terminal() {
+        use libghostty_vt::{Terminal, TerminalOptions, render::RenderState};
+
+        let make = || {
+            Terminal::new(TerminalOptions { cols: 20, rows: 5, max_scrollback: 0 })
+                .expect("terminal")
+        };
+
+        let mut cfg = Config::default();
+        cfg.cursor_blink = true;
+        let mut terminal = make();
+        cfg.apply_cursor_to_terminal(&mut terminal).expect("apply");
+        let mut state = RenderState::new().expect("render state");
+        let snapshot = state.update(&terminal).expect("snapshot");
+        assert_eq!(snapshot.cursor_blinking().unwrap(), true);
+
+        cfg.cursor_blink = false;
+        let mut terminal = make();
+        cfg.apply_cursor_to_terminal(&mut terminal).expect("apply");
+        let mut state = RenderState::new().expect("render state");
+        let snapshot = state.update(&terminal).expect("snapshot");
+        assert_eq!(snapshot.cursor_blinking().unwrap(), false);
     }
 }

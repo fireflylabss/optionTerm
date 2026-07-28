@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod graphics;
 mod input;
 mod pty;
 mod terminal;
