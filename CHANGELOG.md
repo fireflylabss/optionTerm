@@ -17,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Tab reordering** — drag sidebar rows onto each other.
 - **New splits inherit the focused pane's working directory.**
 - **GitHub Actions CI** — build, tests, `cargo fmt --check` and `cargo clippy -D warnings` on every push and pull request.
-- **AppImage and `.deb` release artifacts**, built and attached automatically on tag pushes.
+- **AppImage and `.deb` release artifacts**, built on Ubuntu 24.04 and attached automatically on tag pushes. The AppImage bundles GTK 4 and libadwaita (verified on a system without GTK 4 installed) and requires glibc 2.38+.
 
 ### Changed
 

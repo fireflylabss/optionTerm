@@ -8,6 +8,16 @@
 - O warning `AdwTabBox reported min width -6` no startup é bug conhecido e inofensivo do libadwaita.
 - Testes: `PATH="/tmp/zig151/zig-0.15.2:$PATH" cargo test --release`.
 
+## Empacotamento
+- `packaging/deb/build-deb.sh` — usa `dpkg-deb` quando existe, senão monta o `.deb`
+  com `ar`+`tar` (permite gerar em Arch/Fedora).
+- `packaging/appimage/build-appimage.sh` — linuxdeploy + plugin GTK.
+  `NO_STRIP=1` é obrigatório: o `strip` embutido não entende `.relr.dyn` moderno.
+  ⚠️ **Nunca construa o AppImage no Arch**: o resultado dá SIGSEGV no `ld.so`.
+  O `release.yml` fixa `ubuntu-24.04` (menor distro com GTK 4.14 + libadwaita 1.5);
+  isso define o piso de **glibc 2.38**.
+- `git` é makedepend real: o `build.rs` do `libghostty-vt-sys` clona o Ghostty.
+
 ## Release / AUR
 - Publicado no AUR como **`option-term`** (`ssh://aur@aur.archlinux.org/option-term.git`).
 - `packaging/aur/` guarda uma cópia do `PKGBUILD`/`.SRCINFO` publicados (fonte da verdade é o repo do AUR).

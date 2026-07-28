@@ -70,6 +70,11 @@ chmod +x optionTerm-*-x86_64.AppImage
 ./optionTerm-*-x86_64.AppImage
 ```
 
+The AppImage bundles GTK 4 and libadwaita, so it runs on desktops that ship
+an older GTK. It is built on Ubuntu 24.04 and therefore needs **glibc 2.38+**
+(Ubuntu 24.04+, Debian 13+, Fedora 39+); on older systems use the AUR package
+or build from source.
+
 ### From source
 
 The install script builds a release binary, copies it into your `PATH`, and installs the `.desktop` entry + icons.
