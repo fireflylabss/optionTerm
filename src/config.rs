@@ -23,6 +23,32 @@ pub enum TabsLocation {
     Hidden,
 }
 
+/// Interface color scheme (Ghostty `window-theme`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "light" => Theme::Light,
+            "dark" => Theme::Dark,
+            _ => Theme::System,
+        }
+    }
+}
+
 /// Visual + sizing settings we honor from Ghostty's config file.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -33,6 +59,7 @@ pub struct Config {
     pub tabs_location: TabsLocation,
     /// Show the tab sidebar even with a single tab.
     pub sidebar_always: bool,
+    pub theme: Theme,
     pub background: RgbColor,
     pub foreground: RgbColor,
     pub cursor: RgbColor,
@@ -54,6 +81,7 @@ impl Default for Config {
             cursor_blink: true,
             tabs_location: TabsLocation::Top,
             sidebar_always: false,
+            theme: Theme::System,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
             cursor: rgb(0xff, 0xff, 0xff),
@@ -165,6 +193,9 @@ impl Config {
         if let Some(v) = bool_at("window", "sidebar_always") {
             cfg.sidebar_always = v;
         }
+        if let Some(v) = str_at("window", "theme") {
+            cfg.theme = Theme::parse(&v);
+        }
         if let Some(v) = num_at("window", "padding_x") {
             cfg.padding_x = v;
         }
@@ -199,6 +230,18 @@ impl Config {
         }
 
         Ok(cfg)
+    }
+
+    /// Persist the current settings back to the file they were loaded from.
+    /// Called whenever a setting is changed from the UI so preferences
+    /// survive a restart.
+    pub fn save(&self) -> Result<()> {
+        let path = if self.source.as_os_str().is_empty() {
+            option_config_path()
+        } else {
+            self.source.clone()
+        };
+        self.write_to(&path)
     }
 
     /// Serialize as config.toml (with comments) and write it to `path`.
@@ -242,6 +285,7 @@ text = "{cursor_text}"
 [window]
 tabs = "{tabs}"     # top | left | right | hidden
 sidebar_always = {sidebar_always}   # show the sidebar even with a single tab
+theme = "{theme}"   # system | light | dark
 padding_x = {pad_x}
 padding_y = {pad_y}
 
@@ -257,6 +301,7 @@ palette = [
             family = self.font_family,
             size = self.font_size,
             sidebar_always = self.sidebar_always,
+            theme = self.theme.as_str(),
             blink = self.cursor_blink,
             cursor = hex(self.cursor),
             cursor_text = hex(self.cursor_text),
@@ -311,6 +356,9 @@ palette = [
                         // `bottom` is not supported; treat it as top.
                         _ => TabsLocation::Top,
                     };
+                }
+                "window-theme" => {
+                    cfg.theme = Theme::parse(value);
                 }
                 "cursor-style-blink" => {
                     if let Ok(v) = value.parse::<bool>() {
@@ -476,4 +524,44 @@ fn default_ansi() -> [RgbColor; 16] {
         rgb(0x4e, 0xc9, 0xb0),
         rgb(0xff, 0xff, 0xff),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Everything we persist must survive a save/load round trip, otherwise
+    /// preferences silently reset on the next start.
+    #[test]
+    fn config_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.font_family = "FiraCode Nerd Font".into();
+        cfg.font_size = 15.0;
+        cfg.cursor_style = CursorStyle::Bar;
+        cfg.cursor_blink = false;
+        cfg.tabs_location = TabsLocation::Right;
+        cfg.sidebar_always = true;
+        cfg.theme = Theme::Dark;
+        cfg.padding_x = 8.0;
+        cfg.padding_y = 6.0;
+        cfg.palette[3] = rgb(0x12, 0x34, 0x56);
+
+        let dir = std::env::temp_dir().join("option-term-config-test");
+        let path = dir.join("config.toml");
+        cfg.write_to(&path).expect("write config");
+        let text = std::fs::read_to_string(&path).expect("read config");
+        let back = Config::parse_toml(&text).expect("parse config");
+
+        assert_eq!(back.font_family, cfg.font_family);
+        assert_eq!(back.font_size, cfg.font_size);
+        assert_eq!(back.cursor_style, cfg.cursor_style);
+        assert_eq!(back.cursor_blink, cfg.cursor_blink);
+        assert_eq!(back.tabs_location, cfg.tabs_location);
+        assert_eq!(back.sidebar_always, cfg.sidebar_always);
+        assert_eq!(back.theme, cfg.theme);
+        assert_eq!(back.padding_x, cfg.padding_x);
+        assert_eq!(back.padding_y, cfg.padding_y);
+        assert_eq!(back.palette[3], cfg.palette[3]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

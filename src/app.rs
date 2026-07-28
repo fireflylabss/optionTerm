@@ -13,7 +13,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::{
-    config::{Config, CursorStyle, TabsLocation},
+    config::{Config, CursorStyle, TabsLocation, Theme},
     terminal::TerminalView,
     ui::{
         attach_context_menu, main_menu, show_about, show_command_palette, show_preferences,
@@ -42,6 +42,16 @@ pub fn run() -> anyhow::Result<()> {
     } else {
         anyhow::bail!("application exited with {code:?}")
     }
+}
+
+/// Apply a config theme to the Adwaita style manager.
+fn apply_theme(theme: Theme) {
+    let scheme = match theme {
+        Theme::Light => adw::ColorScheme::ForceLight,
+        Theme::Dark => adw::ColorScheme::ForceDark,
+        Theme::System => adw::ColorScheme::Default,
+    };
+    adw::StyleManager::default().set_color_scheme(scheme);
 }
 
 /// Swap `old` for `new` in old's parent (tab root Box or a Paned).
@@ -88,6 +98,19 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         config.borrow().font_size
     );
 
+    // Persist settings changed from the UI so they survive a restart.
+    let save_config: Rc<dyn Fn()> = {
+        let config = config.clone();
+        Rc::new(move || {
+            if let Err(err) = config.borrow().save() {
+                tracing::warn!("could not persist configuration: {err:#}");
+            }
+        })
+    };
+
+    // Honor the saved theme before the window is mapped to avoid a flash.
+    apply_theme(config.borrow().theme);
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("optionTerm")
@@ -121,9 +144,13 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     tab_bar.set_hexpand(true);
     header.set_title_widget(Some(&tab_bar));
 
-    let new_tab_btn = gtk4::Button::from_icon_name("tab-new-symbolic");
-    new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
-    new_tab_btn.add_css_class("flat");
+    // `+` with the 4-direction tiling dropdown, same as the sidebar variant,
+    // so splits are reachable with the tab bar on top too.
+    let new_tab_btn = adw::SplitButton::builder()
+        .icon_name("tab-new-symbolic")
+        .tooltip_text("New Tab (Ctrl+Shift+T)")
+        .menu_model(&tiling_menu())
+        .build();
     new_tab_btn.set_action_name(Some("win.new-tab"));
     header.pack_start(&new_tab_btn);
 
@@ -886,10 +913,40 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         ));
     }
 
+    {
+        let current_view = current_view.clone();
+        let toast = toast.clone();
+        window.add_action(&add_simple(
+            "clear-tab",
+            Box::new(move || {
+                if let Some(view) = current_view() {
+                    view.clear_screen();
+                    toast("Screen cleared");
+                }
+            }),
+        ));
+    }
+
+    {
+        let current_view = current_view.clone();
+        let toast = toast.clone();
+        window.add_action(&add_simple(
+            "restart-tab",
+            Box::new(move || {
+                if let Some(view) = current_view() {
+                    view.restart();
+                    view.focus();
+                    toast("Terminal restarted");
+                }
+            }),
+        ));
+    }
+
     let apply_zoom = {
         let pages = pages.clone();
         let config = config.clone();
         let toast = toast.clone();
+        let save_config = save_config.clone();
         Rc::new(move |size: f32| {
             let mut applied = size;
             for (_, views) in pages.borrow().iter() {
@@ -898,6 +955,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 }
             }
             config.borrow_mut().font_size = applied;
+            save_config();
             toast(&format!("Font: {applied:.0} pt"));
         })
     };
@@ -944,6 +1002,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                             view.apply_config(&new_cfg);
                         }
                     }
+                    apply_theme(new_cfg.theme);
                     set_tabs_location(new_cfg.tabs_location);
                     toast("Configuration reloaded");
                 }
@@ -961,6 +1020,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let pages = pages.clone();
         let apply_zoom = apply_zoom.clone();
         let set_tabs_location = set_tabs_location.clone();
+        let save_config = save_config.clone();
         window.add_action(&add_simple(
             "preferences",
             Box::new(move || {
@@ -970,6 +1030,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                     &pages,
                     apply_zoom.clone(),
                     set_tabs_location.clone(),
+                    save_config.clone(),
                 );
             }),
         ));
@@ -1000,6 +1061,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let update_all_cfg = {
         let pages = pages.clone();
         let config = config.clone();
+        let save_config = save_config.clone();
         Rc::new(move |f: Rc<dyn Fn(&mut Config)>| {
             f(&mut config.borrow_mut());
             for (_, views) in pages.borrow().iter() {
@@ -1007,6 +1069,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                     view.update_config(|cfg| f(cfg));
                 }
             }
+            save_config();
         })
     };
 
@@ -1014,18 +1077,20 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let theme_action = gio::SimpleAction::new_stateful(
         "theme",
         Some(glib::VariantTy::STRING),
-        &"system".to_variant(),
+        &config.borrow().theme.as_str().to_variant(),
     );
-    theme_action.connect_activate(|action, param| {
-        let value = param.and_then(|p| p.str()).unwrap_or("system");
-        let scheme = match value {
-            "light" => adw::ColorScheme::ForceLight,
-            "dark" => adw::ColorScheme::ForceDark,
-            _ => adw::ColorScheme::Default,
-        };
-        adw::StyleManager::default().set_color_scheme(scheme);
-        action.set_state(&value.to_variant());
-    });
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        theme_action.connect_activate(move |action, param| {
+            let value = param.and_then(|p| p.str()).unwrap_or("system");
+            let theme = Theme::parse(value);
+            apply_theme(theme);
+            config.borrow_mut().theme = theme;
+            save_config();
+            action.set_state(&value.to_variant());
+        });
+    }
     window.add_action(&theme_action);
 
     let tabs_pos_initial = match config.borrow().tabs_location {
@@ -1042,6 +1107,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     {
         let config = config.clone();
         let set_tabs_location = set_tabs_location.clone();
+        let save_config = save_config.clone();
         tabs_pos_action.connect_activate(move |action, param| {
             let value = param.and_then(|p| p.str()).unwrap_or("top");
             let location = match value {
@@ -1052,6 +1118,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             };
             config.borrow_mut().tabs_location = location;
             set_tabs_location(location);
+            save_config();
             action.set_state(&value.to_variant());
         });
     }
@@ -1105,6 +1172,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     {
         let config = config.clone();
         let refresh_tabs = refresh_tabs.clone();
+        let save_config = save_config.clone();
         sidebar_always_action.connect_activate(move |action, _| {
             let value = !action
                 .state()
@@ -1112,6 +1180,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 .unwrap_or(false);
             config.borrow_mut().sidebar_always = value;
             refresh_tabs();
+            save_config();
             action.set_state(&value.to_variant());
         });
     }
@@ -1125,6 +1194,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     app.set_accels_for_action("win.copy", &["<Control><Shift>c"]);
     app.set_accels_for_action("win.paste", &["<Control><Shift>v"]);
     app.set_accels_for_action("win.select-all", &["<Control><Shift>a"]);
+    app.set_accels_for_action("win.clear-tab", &["<Control><Shift>k"]);
+    app.set_accels_for_action("win.restart-tab", &["<Control><Shift>r"]);
     // Split bindings copied from Ghostty's Linux defaults (Config.zig).
     app.set_accels_for_action("win.split-right", &["<Control><Shift>o"]);
     app.set_accels_for_action("win.split-down", &["<Control><Shift>e"]);

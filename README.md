@@ -6,7 +6,10 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 
 ## Features
 
-- **Tabs, three ways** — top tab bar, left/right sidebar, or hidden tabs (`window.tabs`).
+- **Tabs, three ways** — top tab bar, left/right sidebar, or hidden tabs (`window.tabs`), each with a `+` button that doubles as a tiling dropdown.
+- **Accents & input methods** — dead keys and compose sequences work (`´` + `a` → `á`), plus CJK/IBus engines via `GtkIMMulticontext`.
+- **Persistent settings** — anything changed from the menus or Preferences is written straight back to `config.toml`.
+- **Clear & restart** — wipe the screen and scrollback (`Ctrl+Shift+K`) or respawn the shell in place keeping the split layout (`Ctrl+Shift+R`).
 - **Ghostty-style tiling** — split panes in any direction, directional focus, cycle focus, equalize, resize, and toggle zoom.
 - **Command palette** — `Ctrl+Shift+P` to search every action and its shortcut.
 - **Stylized cursor** — block, bar, underline, or hollow block; blinking and custom colors.
@@ -34,7 +37,17 @@ sudo pacman -S gtk4 libadwaita pango cairo pkgconf
 
 ## Install
 
-The easiest way to install optionTerm on your system is the provided install script. It builds a release binary, copies it into your `PATH`, and installs the `.desktop` entry + icons.
+### Arch Linux (AUR)
+
+```bash
+yay -S option-term
+# or
+paru -S option-term
+```
+
+### From source
+
+The install script builds a release binary, copies it into your `PATH`, and installs the `.desktop` entry + icons.
 
 ```bash
 # User install (no sudo) → ~/.local/bin, ~/.local/share/applications
@@ -98,7 +111,9 @@ family = "FiraCode Nerd Font"
 size = 13
 
 [window]
-tabs = "left"
+tabs = "left"            # top | left | right | hidden
+theme = "system"         # system | light | dark
+sidebar_always = false   # show the sidebar even with a single tab
 padding_x = 4
 padding_y = 4
 
@@ -119,7 +134,7 @@ palette = [
 ]
 ```
 
-Use `Ctrl+Shift+P` → “Reload Configuration” or the Preferences dialog to re-apply changes live.
+Use `Ctrl+Shift+P` → “Reload Configuration” or the Preferences dialog to re-apply changes live. Settings changed from the UI are saved back to this file automatically.
 
 ## Keyboard shortcuts
 
@@ -156,6 +171,8 @@ Use `Ctrl+Shift+P` → “Reload Configuration” or the Preferences dialog to r
 | Copy | `Ctrl+Shift+C` |
 | Paste | `Ctrl+Shift+V` |
 | Select all | `Ctrl+Shift+A` |
+| Clear terminal | `Ctrl+Shift+K` |
+| Restart terminal | `Ctrl+Shift+R` |
 | Increase font size | `Ctrl++` |
 | Decrease font size | `Ctrl+-` |
 | Reset font size | `Ctrl+0` |

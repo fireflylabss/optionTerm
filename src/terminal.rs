@@ -10,7 +10,7 @@ use gtk4::{
     cairo, gdk, glib, pango,
     prelude::*,
     DrawingArea, EventControllerFocus, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick,
+    EventControllerScrollFlags, GestureClick, IMMulticontext,
 };
 use libghostty_vt::{
     Terminal, TerminalOptions,
@@ -48,6 +48,10 @@ pub struct TerminalView {
     exit_cb: Rc<RefCell<Option<ExitCb>>>,
     focus_cb: Rc<RefCell<Option<FocusCb>>>,
     resize_cb: Rc<RefCell<Option<ResizeCb>>>,
+    /// Set once the PTY fd source is installed; cleared on restart.
+    watcher_attached: Rc<Cell<bool>>,
+    /// Live PTY fd source, so a restart can drop it before closing the fd.
+    watcher: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 struct Session {
@@ -90,6 +94,7 @@ impl TerminalView {
         let focus_cb: Rc<RefCell<Option<FocusCb>>> = Rc::new(RefCell::new(None));
         let grid = Rc::new(Cell::new((80u16, 24u16)));
         let watcher_attached = Rc::new(Cell::new(false));
+        let watcher: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
         let resize_cb: Rc<RefCell<Option<ResizeCb>>> = Rc::new(RefCell::new(None));
 
@@ -101,6 +106,7 @@ impl TerminalView {
             let exit_cb = exit_cb.clone();
             let resize_cb = resize_cb.clone();
             let watcher_attached = watcher_attached.clone();
+            let watcher = watcher.clone();
             area.set_draw_func(move |da, cr, width, height| {
                 let mut just_bootstrapped = false;
                 if state.borrow().is_none() {
@@ -117,7 +123,8 @@ impl TerminalView {
                     }
                 }
                 if !watcher_attached.get() && state.borrow().is_some() {
-                    attach_pty_watcher(da, &state, &title_cb, &exit_cb);
+                    *watcher.borrow_mut() =
+                        attach_pty_watcher(da, &state, &title_cb, &exit_cb, &watcher);
                     watcher_attached.set(true);
                 }
                 let mut resized = None;
@@ -183,6 +190,8 @@ impl TerminalView {
             exit_cb,
             focus_cb,
             resize_cb,
+            watcher_attached,
+            watcher,
         })
     }
 
@@ -261,6 +270,31 @@ impl TerminalView {
         }
         self.area.queue_draw();
         size
+    }
+
+    /// Clear the screen and the scrollback (Ghostty `clear_screen`).
+    pub fn clear_screen(&self) {
+        if let Some(session) = self.state.borrow_mut().as_mut() {
+            // Home the cursor, erase the display, then drop the scrollback.
+            session.terminal.vt_write(b"\x1b[H\x1b[2J\x1b[3J");
+            session.clear_selection();
+        }
+        self.area.queue_draw();
+    }
+
+    /// Kill the child process and start a fresh shell in this pane
+    /// (Ghostty `reset` + respawn). The split layout is preserved.
+    pub fn restart(&self) {
+        // Drop the fd source before the PTY closes, or the stale watcher
+        // would see HUP on a dead fd and report the pane as exited.
+        if let Some(source) = self.watcher.borrow_mut().take() {
+            source.remove();
+        }
+        self.watcher_attached.set(false);
+        // Dropping the session SIGHUPs the child; the draw handler then
+        // bootstraps a brand new session at the current size.
+        *self.state.borrow_mut() = None;
+        self.area.queue_draw();
     }
 
     /// Re-apply a freshly loaded config (colors, font, padding) at runtime.
@@ -400,16 +434,22 @@ fn attach_pty_watcher(
     state: &Rc<RefCell<Option<Session>>>,
     title_cb: &Rc<RefCell<Option<TitleCb>>>,
     exit_cb: &Rc<RefCell<Option<ExitCb>>>,
-) {
-    let Some(fd) = state.borrow().as_ref().map(|s| s.pty.as_raw_fd()) else {
-        return;
-    };
+    watcher: &Rc<RefCell<Option<glib::SourceId>>>,
+) -> Option<glib::SourceId> {
+    let fd = state.borrow().as_ref().map(|s| s.pty.as_raw_fd())?;
     let state = state.clone();
     let da = da.clone();
     let title_cb = title_cb.clone();
     let exit_cb = exit_cb.clone();
+    // When the source removes itself, forget the id so a later restart does
+    // not try to remove an already-finished source.
+    let watcher = watcher.clone();
+    let finish = move || {
+        let _ = watcher.borrow_mut().take();
+        glib::ControlFlow::Break
+    };
 
-    glib::unix_fd_add_local(fd, glib::IOCondition::IN | glib::IOCondition::HUP, move |_fd, cond| {
+    Some(glib::unix_fd_add_local(fd, glib::IOCondition::IN | glib::IOCondition::HUP, move |_fd, cond| {
         let mut close = cond.contains(glib::IOCondition::HUP);
         if !close {
             if let Ok(mut borrow) = state.try_borrow_mut() {
@@ -441,7 +481,7 @@ fn attach_pty_watcher(
                                 if let Some(cb) = exit_cb.borrow().as_ref() {
                                     cb();
                                 }
-                                glib::ControlFlow::Break
+                                finish()
                             } else {
                                 glib::ControlFlow::Continue
                             };
@@ -455,11 +495,11 @@ fn attach_pty_watcher(
             if let Some(cb) = exit_cb.borrow().as_ref() {
                 cb();
             }
-            glib::ControlFlow::Break
+            finish()
         } else {
             glib::ControlFlow::Continue
         }
-    });
+    }))
 }
 
 fn attach_input(
@@ -467,17 +507,80 @@ fn attach_input(
     state: &Rc<RefCell<Option<Session>>>,
     focus_cb: &Rc<RefCell<Option<FocusCb>>>,
 ) {
+    // Input method: makes dead keys / compose sequences work, so `´` + `a`
+    // produces `á` instead of two separate keystrokes. Also covers CJK IMEs.
+    let im = IMMulticontext::new();
+    im.set_client_widget(Some(area));
+
+    // While `filter_keypress` runs, commits land here so they can be fed to
+    // the libghostty encoder as the event text (preserving key protocols).
+    // Commits that arrive asynchronously (IBus engines) are written directly.
+    let im_pending: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let im_filtering = Rc::new(Cell::new(false));
+    {
+        let state = state.clone();
+        let area = area.clone();
+        let im_pending = im_pending.clone();
+        let im_filtering = im_filtering.clone();
+        im.connect_commit(move |_, text| {
+            if text.is_empty() {
+                return;
+            }
+            if im_filtering.get() {
+                im_pending.borrow_mut().replace(text.to_string());
+                return;
+            }
+            if let Ok(mut borrow) = state.try_borrow_mut() {
+                if let Some(session) = borrow.as_mut() {
+                    session.blink_on = true;
+                    session.pty.write_all(text.as_bytes());
+                }
+            }
+            area.queue_draw();
+        });
+    }
+
     let key = EventControllerKey::new();
     {
         let state = state.clone();
         let area = area.clone();
-        key.connect_key_pressed(move |_, keyval, keycode, modifier| {
+        let im = im.clone();
+        let im_pending = im_pending.clone();
+        let im_filtering = im_filtering.clone();
+        key.connect_key_pressed(move |ctrl, keyval, keycode, modifier| {
             // Let window-level actions handle their accelerators.
             if is_window_shortcut(keyval, modifier) {
                 return glib::Propagation::Proceed;
             }
 
-            let im_text = keyval.to_unicode().map(|c| c.to_string());
+            // Only route plain typing through the IM. Ctrl/Alt/Super combos
+            // must reach the encoder untouched (Ctrl+C, Alt+B, ...).
+            let mut im_text = None;
+            if !modifier.intersects(
+                gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SUPER_MASK,
+            ) {
+                if let Some(event) = ctrl.current_event() {
+                    im_pending.borrow_mut().take();
+                    im_filtering.set(true);
+                    let handled = im.filter_keypress(&event);
+                    im_filtering.set(false);
+                    let committed = im_pending.borrow_mut().take();
+                    match (handled, committed) {
+                        // Composed text (accents, IME): encode it as the event text.
+                        (_, Some(text)) => im_text = Some(text),
+                        // Dead key / preedit in progress: swallow, nothing to send yet.
+                        (true, None) => {
+                            area.queue_draw();
+                            return glib::Propagation::Stop;
+                        }
+                        (false, None) => {}
+                    }
+                }
+            }
+            let im_text = im_text.or_else(|| keyval.to_unicode().map(|c| c.to_string()));
+
             if let Ok(mut borrow) = state.try_borrow_mut() {
                 if let Some(session) = borrow.as_mut() {
                     session.blink_on = true;
@@ -501,9 +604,16 @@ fn attach_input(
     }
     {
         let state = state.clone();
-        key.connect_key_released(move |_, keyval, keycode, modifier| {
+        let im = im.clone();
+        key.connect_key_released(move |ctrl, keyval, keycode, modifier| {
             if is_window_shortcut(keyval, modifier) {
                 return;
+            }
+            // Keep the IM in sync with releases (some engines need them).
+            if let Some(event) = ctrl.current_event() {
+                if im.filter_keypress(&event) {
+                    return;
+                }
             }
             if let Ok(mut borrow) = state.try_borrow_mut() {
                 if let Some(session) = borrow.as_mut() {
@@ -528,7 +638,9 @@ fn attach_input(
     {
         let area = area.clone();
         let focus_cb = focus_cb.clone();
+        let im = im.clone();
         focus.connect_enter(move |_| {
+            im.focus_in();
             if let Some(cb) = focus_cb.borrow().as_ref() {
                 cb();
             }
@@ -537,7 +649,11 @@ fn attach_input(
     }
     {
         let area = area.clone();
-        focus.connect_leave(move |_| area.queue_draw());
+        let im = im.clone();
+        focus.connect_leave(move |_| {
+            im.focus_out();
+            area.queue_draw();
+        });
     }
     area.add_controller(focus);
 
@@ -782,6 +898,13 @@ impl Session {
                 self.sel_rectangle = false;
             }
         }
+    }
+
+    /// Drop any active selection (tracked refs die with the erased rows).
+    fn clear_selection(&mut self) {
+        let _ = self.terminal.set_selection(None);
+        self.set_selection_points(None);
+        self.gesture.reset(&self.terminal);
     }
 
     fn selection_press(&mut self, x: f64, y: f64, time_ms: u32) {

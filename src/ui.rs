@@ -10,7 +10,7 @@ use libadwaita::prelude::*;
 
 use crate::{
     app::Pages,
-    config::{Config, CursorStyle, TabsLocation},
+    config::{Config, CursorStyle, TabsLocation, Theme},
     terminal::TerminalView,
 };
 
@@ -35,6 +35,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Copy", "win.copy", "Ctrl+Shift+C"),
     ("Paste", "win.paste", "Ctrl+Shift+V"),
     ("Select All", "win.select-all", "Ctrl+Shift+A"),
+    ("Clear Terminal", "win.clear-tab", "Ctrl+Shift+K"),
+    ("Restart Terminal", "win.restart-tab", "Ctrl+Shift+R"),
     ("Increase Font Size", "win.zoom-in", "Ctrl++"),
     ("Decrease Font Size", "win.zoom-out", "Ctrl+-"),
     ("Default Font Size", "win.zoom-reset", "Ctrl+0"),
@@ -62,6 +64,14 @@ pub fn tiling_menu() -> gio::Menu {
     menu
 }
 
+/// Actions that act on the terminal currently in focus.
+fn terminal_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Clear Terminal"), Some("win.clear-tab"));
+    menu.append(Some("Restart Terminal"), Some("win.restart-tab"));
+    menu
+}
+
 pub fn main_menu() -> gio::Menu {
     let menu = gio::Menu::new();
 
@@ -69,8 +79,18 @@ pub fn main_menu() -> gio::Menu {
     let tabs = gio::Menu::new();
     tabs.append(Some("New Tab"), Some("win.new-tab"));
     tabs.append(Some("Close Tab"), Some("win.close-tab"));
+    tabs.append(Some("Next Tab"), Some("win.next-tab"));
+    tabs.append(Some("Previous Tab"), Some("win.prev-tab"));
     menu.append_section(None, &tabs);
     menu.append_submenu(Some("Split"), &splits_menu());
+
+    // --- Current terminal ---
+    let edit = gio::Menu::new();
+    edit.append(Some("Copy"), Some("win.copy"));
+    edit.append(Some("Paste"), Some("win.paste"));
+    edit.append(Some("Select All"), Some("win.select-all"));
+    menu.append_section(Some("Edit"), &edit);
+    menu.append_section(Some("Terminal"), &terminal_menu());
 
     // --- Appearance (submenu with live radios) ---
     let appearance = gio::Menu::new();
@@ -115,7 +135,7 @@ pub fn main_menu() -> gio::Menu {
     let help = gio::Menu::new();
     help.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
     help.append(Some("About optionTerm"), Some("win.about"));
-    menu.append_section(None, &help);
+    menu.append_section(Some("Help"), &help);
 
     let quit = gio::Menu::new();
     quit.append(Some("Quit"), Some("win.quit"));
@@ -134,6 +154,7 @@ fn context_menu() -> gio::Menu {
     menu.append_section(None, &edit);
 
     menu.append_section(None, &splits_menu());
+    menu.append_section(None, &terminal_menu());
 
     let tabs = gio::Menu::new();
     tabs.append(Some("New Tab"), Some("win.new-tab"));
@@ -287,6 +308,7 @@ pub fn show_preferences(
     pages: &Pages,
     apply_zoom: Rc<dyn Fn(f32)>,
     set_tabs_location: Rc<dyn Fn(TabsLocation)>,
+    save_config: Rc<dyn Fn()>,
 ) {
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
@@ -300,6 +322,7 @@ pub fn show_preferences(
     let update_all = {
         let pages = pages.clone();
         let config = config.clone();
+        let save_config = save_config.clone();
         Rc::new(move |f: Rc<dyn Fn(&mut Config)>| {
             f(&mut config.borrow_mut());
             for (_, views) in pages.borrow().iter() {
@@ -307,31 +330,42 @@ pub fn show_preferences(
                     view.update_config(|cfg| f(cfg));
                 }
             }
+            save_config();
         })
     };
 
     // --- Appearance ---
     let appearance = adw::PreferencesGroup::builder().title("Appearance").build();
 
-    let style_manager = adw::StyleManager::default();
     let theme_row = adw::ComboRow::builder()
         .title("Theme")
         .subtitle("Application interface style")
         .model(&gtk4::StringList::new(&["System", "Light", "Dark"]))
         .build();
-    theme_row.set_selected(match style_manager.color_scheme() {
-        adw::ColorScheme::ForceLight | adw::ColorScheme::PreferLight => 1,
-        adw::ColorScheme::ForceDark | adw::ColorScheme::PreferDark => 2,
-        _ => 0,
+    theme_row.set_selected(match config.borrow().theme {
+        Theme::Light => 1,
+        Theme::Dark => 2,
+        Theme::System => 0,
     });
-    theme_row.connect_selected_notify(move |row| {
-        let scheme = match row.selected() {
-            1 => adw::ColorScheme::ForceLight,
-            2 => adw::ColorScheme::ForceDark,
-            _ => adw::ColorScheme::Default,
-        };
-        adw::StyleManager::default().set_color_scheme(scheme);
-    });
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        theme_row.connect_selected_notify(move |row| {
+            let theme = match row.selected() {
+                1 => Theme::Light,
+                2 => Theme::Dark,
+                _ => Theme::System,
+            };
+            let scheme = match theme {
+                Theme::Light => adw::ColorScheme::ForceLight,
+                Theme::Dark => adw::ColorScheme::ForceDark,
+                Theme::System => adw::ColorScheme::Default,
+            };
+            adw::StyleManager::default().set_color_scheme(scheme);
+            config.borrow_mut().theme = theme;
+            save_config();
+        });
+    }
     appearance.add(&theme_row);
 
     let tabs_row = adw::ComboRow::builder()
@@ -353,6 +387,7 @@ pub fn show_preferences(
     {
         let config = config.clone();
         let set_tabs_location = set_tabs_location.clone();
+        let save_config = save_config.clone();
         tabs_row.connect_selected_notify(move |row| {
             let location = match row.selected() {
                 1 => TabsLocation::Left,
@@ -362,6 +397,7 @@ pub fn show_preferences(
             };
             config.borrow_mut().tabs_location = location;
             set_tabs_location(location);
+            save_config();
         });
     }
     appearance.add(&tabs_row);
@@ -374,10 +410,12 @@ pub fn show_preferences(
     {
         let config = config.clone();
         let set_tabs_location = set_tabs_location.clone();
+        let save_config = save_config.clone();
         sidebar_always_row.connect_active_notify(move |row| {
             config.borrow_mut().sidebar_always = row.is_active();
             let location = config.borrow().tabs_location;
             set_tabs_location(location);
+            save_config();
         });
     }
     appearance.add(&sidebar_always_row);
