@@ -32,7 +32,30 @@ sudo pacman -S gtk4 libadwaita pango cairo pkgconf
 # export PATH="/tmp/zig151/zig-0.15.2:$PATH"
 ```
 
-## Build & run
+## Install
+
+The easiest way to install optionTerm on your system is the provided install script. It builds a release binary, copies it into your `PATH`, and installs the `.desktop` entry + icons.
+
+```bash
+# User install (no sudo) → ~/.local/bin, ~/.local/share/applications
+./scripts/install.sh
+
+# System-wide install (needs sudo) → /usr/local/bin, /usr/local/share
+sudo ./scripts/install.sh --system
+
+# If Zig 0.15.x is not on PATH, point to it:
+./scripts/install.sh --zig /tmp/zig151/zig-0.15.2/zig
+```
+
+After installing, launch from the terminal:
+
+```bash
+option-term
+```
+
+Or from your applications menu / launcher (it appears as **optionTerm**).
+
+## Build & run (development)
 
 ```bash
 cargo run --release
@@ -45,7 +68,7 @@ export GHOSTTY_SOURCE_DIR=/path/to/ghostty
 cargo run --release
 ```
 
-There is also a convenience script that ensures Zig 0.15.2 is on `PATH`:
+There is also a convenience script that ensures Zig 0.15.2 is on `PATH` for a quick dev run:
 
 ```bash
 ./scripts/run.sh
@@ -53,13 +76,13 @@ There is also a convenience script that ensures Zig 0.15.2 is on `PATH`:
 
 ## Desktop integration
 
-To install the application icon and `.desktop` entry locally:
+`./scripts/install.sh` already installs the `.desktop` entry and icons. If you only want to refresh the desktop files without rebuilding:
 
 ```bash
 ./scripts/install-desktop.sh
 ```
 
-This copies icon sizes to `~/.local/share/icons/hicolor/` and the `.desktop` file to `~/.local/share/applications/`.
+That copies icon sizes to `~/.local/share/icons/hicolor/` and the `.desktop` file to `~/.local/share/applications/`.
 
 > The public release uses the generic `utilities-terminal` icon; custom icon assets are kept under `assets/` if you want to install them manually.
 
