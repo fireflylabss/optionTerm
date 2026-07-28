@@ -25,17 +25,36 @@
   Tiling copiado dos defaults Linux do Ghostty (`Config.zig`): new_split (Ctrl+Shift+O/E),
   goto_split (Ctrl+Alt+setas, Ctrl+Super+[/]), resize_split (Ctrl+Shift+Super+setas, 10px),
   toggle_split_zoom (Ctrl+Shift+Enter), equalize_splits (peso por nº de folhas).
-- `src/ui.rs` — menus (main/contexto/tiling) e diálogos (palette, preferences, shortcuts, about).
+- `src/ui.rs` — menus (main/contexto/tiling), diálogos (palette, preferences, shortcuts, about)
+  e a `SearchBar` (busca no scrollback).
 - `src/pty.rs` — PTY com leitura limitada por dispatch (anti-flood) e escrita com poll (pastes grandes).
+  `Pty::spawn` aceita um `cwd` (usado por splits e restauração de sessão).
+- `src/graphics.rs` — Kitty graphics protocol: decoder PNG próprio (o `RustPngDecoder` do
+  libghostty é quebrado — só faz `reserve`, nunca `resize`), conversão para BGRA
+  premultiplicado e cache de `cairo::ImageSurface` por frame.
+  ⚠️ `set_png_decoder` é **thread-local**: instale por thread, nunca com `Once`.
+- `src/session.rs` — `~/.option/terminal/session.toml` (abas, nº de painéis, cwd, títulos).
+  Só a forma do workspace é salva; nunca o scrollback.
+
+## Detalhes que já morderam
+- `cursor.blink` só funciona se for empurrado para o VT via `set_default_cursor_blink`
+  (`Config::apply_cursor_to_terminal`); o snapshot de render lê o estado DECSCUSR, não o config.
+- OSC 7 devolve `file://host/path` — use `pwd_to_path` antes de usar como diretório.
+- O `GFileMonitor` do config dispara também nas **nossas** escritas; há um guard
+  (`SELF_WRITE_GRACE`) para não entrar em loop de reload.
+- SIGTERM não dispara `close-request`; a sessão é salva também por `unix_signal_add_local`.
+- `cargo clippy --fix` converte `if` aninhados em let-chains e **desformata** o código:
+  rode `cargo fmt` **depois** do clippy.
 
 ## TODO
-- [ ] **Obedecer muito bem a configuração do sistema (GTK/Adwaita), estilo Ghostty**:
-  - [ ] Reagir em runtime a mudanças de tema claro/escuro do sistema (`AdwStyleManager::dark`)
-        e a mudanças no `gtk-decoration-layout` (posição/estilo dos botões de janela).
-  - [ ] Respeitar `gtk-enable-animations`, fontes do sistema (`gtk-font-name`) no chrome,
-        e escala de texto (`text-scaling-factor`).
-  - [ ] Suportar mais chaves do Ghostty: `gtk-titlebar`, `gtk-wide-tabs`,
-        `window-decoration`, `background-opacity` (`window-theme` já é suportado).
-  - [ ] Recarregar o config automaticamente quando o arquivo mudar (GFileMonitor),
-        como o Ghostty faz.
+- [ ] **Renderer GPU** (`GskRenderNode`/`snapshot` no lugar do Cairo). É uma reescrita
+      completa do `Session::paint` (glifos, seleção, cursor, imagens kitty) e deve ser
+      feita **isolada, na sua própria release**, com comparação de frame antes/depois.
+      O Cairo vira gargalo com imagens grandes e scroll rápido.
+- [ ] Respeitar `gtk-enable-animations`, `gtk-font-name` no chrome e `text-scaling-factor`.
+- [ ] `gtk-decoration-layout` dinâmico (hoje só o padrão do sistema no startup).
+- [ ] Mais chaves do Ghostty: `gtk-titlebar`, `gtk-wide-tabs`, `window-decoration`.
 - [ ] `gtk-tabs-location = bottom` (hoje mapeado para `top`).
+- [ ] Salvar a **geometria** dos splits na sessão (hoje só o nº de painéis; tudo volta
+      como splits horizontais).
+- [ ] Realçar todos os matches da busca no render, não só o atual.

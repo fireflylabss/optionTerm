@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-07-28
+
+### Added
+
+- **Clickable links** — `Ctrl+click` opens OSC 8 hyperlinks, bare URLs (`https://`, `www.`, `user@host`) and filesystem paths. Paths only become links when they actually exist, resolved against the shell's OSC 7 directory, so ordinary words and version numbers stay inert.
+- **Scrollback search** (`Ctrl+Shift+F`) — case-insensitive search across the screen and scrollback with a match counter, `Enter` / `Shift+Enter` to step (wrapping), and hits scrolled into view and selected. `Escape` closes and returns focus to the terminal.
+- **`background_opacity`** (`0.15`–`1.0`) — translucent window background, also read from Ghostty's `background-opacity`. Cell backgrounds stay opaque so text remains readable.
+- **Automatic config reload** — `config.toml` is watched with a `GFileMonitor` and re-applied on external edits (debounced, and rename/replace aware for editors that write atomically). Writes made from the UI are ignored so saving a preference cannot loop.
+- **Session restore** (`window.session_restore`) — reopens tabs, their pane count and each pane's working directory from `~/.option/terminal/session.toml`. Only workspace shape is stored, never scrollback contents. Saved on window close and on `SIGTERM`/`SIGINT` so a logout does not lose it.
+- **Tab renaming** — `F2` or double-click a sidebar row. A renamed tab keeps its title instead of following the shell; clearing the name restores automatic titles.
+- **Tab reordering** — drag sidebar rows onto each other.
+- **New splits inherit the focused pane's working directory.**
+- **GitHub Actions CI** — build, tests, `cargo fmt --check` and `cargo clippy -D warnings` on every push and pull request.
+- **AppImage and `.deb` release artifacts**, built and attached automatically on tag pushes.
+
+### Changed
+
+- `window.theme = "system"` now genuinely follows the desktop light/dark preference at runtime.
+- Codebase is `cargo fmt` clean and free of `clippy` warnings, both enforced by CI.
+
 ## [0.1.4] - 2026-07-28
 
 ### Added

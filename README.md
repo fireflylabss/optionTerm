@@ -11,6 +11,10 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 - **Accents & input methods** — dead keys and compose sequences work (`´` + `a` → `á`), plus CJK/IBus engines via `GtkIMMulticontext`.
 - **Persistent settings** — anything changed from the menus or Preferences is written straight back to `config.toml`.
 - **Clear & restart** — wipe the screen and scrollback (`Ctrl+Shift+K`) or respawn the shell in place keeping the split layout (`Ctrl+Shift+R`).
+- **Clickable links** — `Ctrl+click` opens OSC 8 hyperlinks, bare URLs and existing file paths.
+- **Scrollback search** — `Ctrl+Shift+F`, with match counter and wrap-around navigation.
+- **Session restore** — reopen tabs, panes and their working directories on start.
+- **Translucent background** — `background_opacity`, plus automatic config reload when `config.toml` changes.
 - **Ghostty-style tiling** — split panes in any direction, directional focus, cycle focus, equalize, resize, and toggle zoom.
 - **Command palette** — `Ctrl+Shift+P` to search every action and its shortcut.
 - **Stylized cursor** — block, bar, underline, or hollow block; blinking and custom colors.
@@ -112,9 +116,11 @@ family = "FiraCode Nerd Font"
 size = 13
 
 [window]
-tabs = "left"            # top | left | right | hidden
-theme = "system"         # system | light | dark
-sidebar_always = false   # show the sidebar even with a single tab
+tabs = "left"              # top | left | right | hidden
+theme = "system"           # system | light | dark
+sidebar_always = false     # show the sidebar even with a single tab
+background_opacity = 1.0   # 0.15 .. 1.0, needs a compositor
+session_restore = false    # reopen tabs/panes and their cwd on start
 padding_x = 4
 padding_y = 4
 
@@ -135,7 +141,9 @@ palette = [
 ]
 ```
 
-Use `Ctrl+Shift+P` → “Reload Configuration” or the Preferences dialog to re-apply changes live. Settings changed from the UI are saved back to this file automatically.
+The file is watched: editing it in any editor re-applies the settings immediately. Settings changed from the menus or Preferences are saved back to it automatically.
+
+With `session_restore = true`, the open tabs, their pane count and each pane's working directory are written to `~/.option/terminal/session.toml` on exit and restored on the next start. Scrollback contents are never stored.
 
 ## Keyboard shortcuts
 
@@ -147,6 +155,7 @@ Use `Ctrl+Shift+P` → “Reload Configuration” or the Preferences dialog to r
 | Close tab | `Ctrl+Shift+W` |
 | Next tab | `Ctrl+Tab` / `Ctrl+PageDown` |
 | Previous tab | `Ctrl+Shift+Tab` / `Ctrl+PageUp` |
+| Rename tab | `F2` (or double-click a sidebar row) |
 
 ### Tiling
 
@@ -174,6 +183,8 @@ Use `Ctrl+Shift+P` → “Reload Configuration” or the Preferences dialog to r
 | Select all | `Ctrl+Shift+A` |
 | Clear terminal | `Ctrl+Shift+K` |
 | Restart terminal | `Ctrl+Shift+R` |
+| Find in scrollback | `Ctrl+Shift+F` |
+| Open link under cursor | `Ctrl+Click` |
 | Increase font size | `Ctrl++` |
 | Decrease font size | `Ctrl+-` |
 | Reset font size | `Ctrl+0` |

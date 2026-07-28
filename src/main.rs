@@ -5,6 +5,7 @@ mod config;
 mod graphics;
 mod input;
 mod pty;
+mod session;
 mod terminal;
 mod ui;
 

@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
     rc::{Rc, Weak},
 };
 
@@ -14,14 +15,18 @@ use libadwaita::prelude::*;
 
 use crate::{
     config::{Config, CursorStyle, TabsLocation, Theme},
+    session::{Session as SessionState, TabState},
     terminal::TerminalView,
     ui::{
-        attach_context_menu, main_menu, show_about, show_command_palette, show_preferences,
-        show_shortcuts, tiling_menu,
+        SearchBar, attach_context_menu, main_menu, show_about, show_command_palette,
+        show_preferences, show_shortcuts, tiling_menu,
     },
 };
 
 const APP_ID: &str = "labs.firefly.optionTerm";
+
+/// How long after our own `config.toml` write the file monitor stays quiet.
+const SELF_WRITE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 pub type Pages = Rc<RefCell<Vec<(adw::TabPage, Vec<Rc<TerminalView>>)>>>;
 type Toast = Rc<dyn Fn(&str)>;
@@ -45,6 +50,9 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Apply a config theme to the Adwaita style manager.
+///
+/// `System` leaves `ColorScheme::Default` in place, which is what makes
+/// libadwaita follow the desktop's light/dark preference live.
 fn apply_theme(theme: Theme) {
     let scheme = match theme {
         Theme::Light => adw::ColorScheme::ForceLight,
@@ -52,6 +60,82 @@ fn apply_theme(theme: Theme) {
         Theme::System => adw::ColorScheme::Default,
     };
     adw::StyleManager::default().set_color_scheme(scheme);
+}
+
+/// Make the window itself translucent when `background-opacity < 1`.
+///
+/// The terminal already paints its own background with alpha; without
+/// clearing the Adwaita window background the compositor would still see an
+/// opaque surface underneath.
+fn apply_window_opacity(window: &adw::ApplicationWindow, opacity: f64) {
+    const CSS_CLASS: &str = "transparent-bg";
+    if opacity >= 1.0 {
+        window.remove_css_class(CSS_CLASS);
+    } else {
+        window.add_css_class(CSS_CLASS);
+    }
+}
+
+/// Install the stylesheet backing `apply_window_opacity` once per display.
+fn install_css(display: &gdk::Display) {
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(
+        "window.transparent-bg,
+         window.transparent-bg > * ,
+         window.transparent-bg .terminal { background-color: transparent; }",
+    );
+    gtk4::style_context_add_provider_for_display(
+        display,
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+/// Key used to remember that the user renamed a tab by hand.
+const RENAMED_KEY: &str = "option-term-renamed";
+
+/// Whether the user gave this tab a custom title, in which case the shell's
+/// OSC title updates must not overwrite it.
+fn tab_is_renamed(page: &adw::TabPage) -> bool {
+    // SAFETY: the key is only ever written with a `bool` below.
+    unsafe { page.data::<bool>(RENAMED_KEY).map(|v| *v.as_ref()) }.unwrap_or(false)
+}
+
+fn set_tab_renamed(page: &adw::TabPage, renamed: bool) {
+    unsafe { page.set_data(RENAMED_KEY, renamed) };
+}
+
+/// Ask for a new tab title. Clearing the field restores the shell's title.
+fn rename_tab_dialog(anchor: &impl IsA<gtk4::Widget>, page: &adw::TabPage) {
+    let dialog = adw::AlertDialog::new(Some("Rename Tab"), None);
+    let entry = gtk4::Entry::builder()
+        .text(page.title())
+        .activates_default(true)
+        .build();
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("rename", "Rename");
+    dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("rename"));
+    dialog.set_close_response("cancel");
+
+    let page = page.clone();
+    let entry_c = entry.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "rename" {
+            return;
+        }
+        let title = entry_c.text().trim().to_string();
+        if title.is_empty() {
+            // Empty means "go back to following the shell".
+            set_tab_renamed(&page, false);
+        } else {
+            set_tab_renamed(&page, true);
+            page.set_title(&title);
+        }
+    });
+    dialog.present(Some(anchor));
+    entry.grab_focus();
 }
 
 /// Swap `old` for `new` in old's parent (tab root Box or a Paned).
@@ -71,7 +155,9 @@ fn replace_in_parent(old: &gtk4::Widget, new: &gtk4::Widget) {
 
 /// Remove a terminal widget from its split, collapsing the Paned around it.
 fn collapse_split(widget: &gtk4::Widget) {
-    let Some(parent) = widget.parent() else { return };
+    let Some(parent) = widget.parent() else {
+        return;
+    };
     if let Some(paned) = parent.downcast_ref::<gtk4::Paned>() {
         let sibling = if paned.start_child().as_ref() == Some(widget) {
             paned.end_child()
@@ -98,10 +184,16 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         config.borrow().font_size
     );
 
+    // Timestamp of our own last write to config.toml, so the file monitor can
+    // ignore the change it causes instead of reloading in a loop.
+    let self_write = Rc::new(Cell::new(std::time::Instant::now() - SELF_WRITE_GRACE));
+
     // Persist settings changed from the UI so they survive a restart.
     let save_config: Rc<dyn Fn()> = {
         let config = config.clone();
+        let self_write = self_write.clone();
         Rc::new(move || {
+            self_write.set(std::time::Instant::now());
             if let Err(err) = config.borrow().save() {
                 tracing::warn!("could not persist configuration: {err:#}");
             }
@@ -110,6 +202,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     // Honor the saved theme before the window is mapped to avoid a flash.
     apply_theme(config.borrow().theme);
+    if let Some(display) = gdk::Display::default() {
+        install_css(&display);
+    }
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -117,6 +212,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         .default_width(960)
         .default_height(640)
         .build();
+    apply_window_opacity(&window, config.borrow().background_opacity);
 
     let toolbar = adw::ToolbarView::new();
 
@@ -168,8 +264,12 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     menu_btn.set_menu_model(Some(&main_menu()));
     header.pack_end(&menu_btn);
 
+    // Search bar sits above the tabs so it spans whichever pane is focused.
+    let content_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    content_box.append(&tab_view);
+
     let toast_overlay = adw::ToastOverlay::new();
-    toast_overlay.set_child(Some(&tab_view));
+    toast_overlay.set_child(Some(&content_box));
 
     // Tabs-as-sidebar support (Ghostty `gtk-tabs-location = left|right`).
     let sidebar_list = gtk4::ListBox::new();
@@ -261,6 +361,49 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 }
                 row.add_suffix(&close);
 
+                // Double-click a row to rename the tab.
+                {
+                    let page = page.clone();
+                    let row_weak = row.downgrade();
+                    let gesture = gtk4::GestureClick::new();
+                    gesture.set_button(gdk::BUTTON_PRIMARY);
+                    gesture.connect_pressed(move |_, n, _, _| {
+                        if n == 2
+                            && let Some(row) = row_weak.upgrade()
+                        {
+                            rename_tab_dialog(&row, &page);
+                        }
+                    });
+                    row.add_controller(gesture);
+                }
+
+                // Drag a row onto another to reorder the tab.
+                {
+                    let source = gtk4::DragSource::new();
+                    source.set_actions(gdk::DragAction::MOVE);
+                    let idx = i;
+                    source.connect_prepare(move |_, _, _| {
+                        Some(gdk::ContentProvider::for_value(&idx.to_value()))
+                    });
+                    row.add_controller(source);
+
+                    let target = gtk4::DropTarget::new(i32::static_type(), gdk::DragAction::MOVE);
+                    let tab_view = tab_view.clone();
+                    let dest = i;
+                    target.connect_drop(move |_, value, _, _| {
+                        let Ok(from) = value.get::<i32>() else {
+                            return false;
+                        };
+                        if from == dest || from < 0 || from >= tab_view.n_pages() {
+                            return false;
+                        }
+                        let page = tab_view.nth_page(from);
+                        tab_view.reorder_page(&page, dest);
+                        true
+                    });
+                    row.add_controller(target);
+                }
+
                 // Keep the row title in sync without keeping the row alive.
                 {
                     let weak_row = glib::object::WeakRef::<adw::ActionRow>::new();
@@ -320,8 +463,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let config = config.clone();
         Rc::new(move |location: TabsLocation| {
             let sidebar_mode = matches!(location, TabsLocation::Left | TabsLocation::Right);
-            let show_sidebar = sidebar_mode
-                && (config.borrow().sidebar_always || tab_view.n_pages() > 1);
+            let show_sidebar =
+                sidebar_mode && (config.borrow().sidebar_always || tab_view.n_pages() > 1);
             // When the sidebar is visible the whole header moves into it
             // (system window controls, new tab, palette, menu).
             header.set_visible(!show_sidebar);
@@ -421,6 +564,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     // Build a TerminalView wired to a page (title/exit/focus/context menu).
     let make_view = {
         let unzoom = unzoom.clone();
+        let toast = toast.clone();
         let show_resize = show_resize.clone();
         let tab_view = tab_view.clone();
         let config = config.clone();
@@ -428,9 +572,28 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let window = window.clone();
         let focused = focused.clone();
         Rc::new(
-            move |page_slot: Rc<RefCell<Option<adw::TabPage>>>| -> anyhow::Result<Rc<TerminalView>> {
-                let view = Rc::new(TerminalView::new(config.borrow().clone())?);
+            move |page_slot: Rc<RefCell<Option<adw::TabPage>>>,
+                  cwd: Option<PathBuf>|
+                  -> anyhow::Result<Rc<TerminalView>> {
+                let view = Rc::new(TerminalView::new(config.borrow().clone(), cwd)?);
                 attach_context_menu(&view);
+
+                {
+                    // Ctrl+click on a hyperlink / URL / existing path.
+                    let toast = toast.clone();
+                    view.set_on_link(move |uri| {
+                        match gio::AppInfo::launch_default_for_uri(
+                            &uri,
+                            gio::AppLaunchContext::NONE,
+                        ) {
+                            Ok(()) => toast(&format!("Opening {uri}")),
+                            Err(err) => {
+                                tracing::warn!("could not open {uri}: {err}");
+                                toast("No application to open that link");
+                            }
+                        }
+                    });
+                }
 
                 {
                     let view_weak = Rc::downgrade(&view);
@@ -466,6 +629,10 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                     let tab_view = tab_view.clone();
                     view.set_on_title_changed(move |title| {
                         if let Some(page) = page_slot.borrow().as_ref() {
+                            // A hand-renamed tab keeps its title.
+                            if tab_is_renamed(page) {
+                                return;
+                            }
                             page.set_title(&title);
                             if tab_view.selected_page().as_ref() == Some(page) {
                                 window.set_title(Some(&title));
@@ -490,9 +657,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                         };
                         let remaining = {
                             let mut pgs = pages.borrow_mut();
-                            if let Some((_, views)) =
-                                pgs.iter_mut().find(|(p, _)| p == &page)
-                            {
+                            if let Some((_, views)) = pgs.iter_mut().find(|(p, _)| p == &page) {
                                 views.retain(|v| !Rc::ptr_eq(v, &view));
                                 views.first().cloned()
                             } else {
@@ -521,23 +686,25 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let tab_view = tab_view.clone();
         let pages = pages.clone();
         let make_view = make_view.clone();
-        Rc::new(move || -> anyhow::Result<()> {
-            let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
-            let view = make_view(page_slot.clone())?;
+        Rc::new(
+            move |cwd: Option<PathBuf>| -> anyhow::Result<adw::TabPage> {
+                let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
+                let view = make_view(page_slot.clone(), cwd)?;
 
-            let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            root.append(view.widget());
+                let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                root.append(view.widget());
 
-            let page = tab_view.append(&root);
-            page.set_title("Terminal");
-            page.set_live_thumbnail(true);
-            *page_slot.borrow_mut() = Some(page.clone());
+                let page = tab_view.append(&root);
+                page.set_title("Terminal");
+                page.set_live_thumbnail(true);
+                *page_slot.borrow_mut() = Some(page.clone());
 
-            pages.borrow_mut().push((page.clone(), vec![view.clone()]));
-            tab_view.set_selected_page(&page);
-            view.focus();
-            Ok(())
-        })
+                pages.borrow_mut().push((page.clone(), vec![view.clone()]));
+                tab_view.set_selected_page(&page);
+                view.focus();
+                Ok(page)
+            },
+        )
     };
 
     // Currently focused terminal of the selected page.
@@ -549,14 +716,22 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             let page = tab_view.selected_page()?;
             let pgs = pages.borrow();
             let (_, views) = pgs.iter().find(|(p, _)| p == &page)?;
-            if let Some(f) = focused.borrow().as_ref().and_then(Weak::upgrade) {
-                if views.iter().any(|v| Rc::ptr_eq(v, &f)) {
-                    return Some(f);
-                }
+            if let Some(f) = focused.borrow().as_ref().and_then(Weak::upgrade)
+                && views.iter().any(|v| Rc::ptr_eq(v, &f))
+            {
+                return Some(f);
             }
             views.first().cloned()
         })
     };
+
+    let search_bar = Rc::new(SearchBar::new({
+        let current_view = current_view.clone();
+        Rc::new(move || current_view())
+    }));
+    content_box.prepend(&search_bar.widget);
+    // Deliberately no `set_key_capture_widget`: in a terminal every keystroke
+    // belongs to the shell, so the bar only opens via its explicit action.
 
     // Split the focused pane. `before` puts the new terminal on the
     // left/top side; splits nest arbitrarily (Paned inside Paned).
@@ -573,7 +748,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             };
             let Some(target) = current_view() else { return };
             let page_slot = Rc::new(RefCell::new(Some(page.clone())));
-            let Ok(new_view) = make_view(page_slot) else {
+            // A new split inherits the focused pane's directory.
+            let cwd = target.pwd().map(PathBuf::from);
+            let Ok(new_view) = make_view(page_slot, cwd) else {
                 return;
             };
 
@@ -631,12 +808,13 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 }
                 match dir {
                     "previous" | "next" => {
-                        let idx = views
-                            .iter()
-                            .position(|v| Rc::ptr_eq(v, &cur))
-                            .unwrap_or(0);
+                        let idx = views.iter().position(|v| Rc::ptr_eq(v, &cur)).unwrap_or(0);
                         let n = views.len();
-                        let t = if dir == "next" { (idx + 1) % n } else { (idx + n - 1) % n };
+                        let t = if dir == "next" {
+                            (idx + 1) % n
+                        } else {
+                            (idx + n - 1) % n
+                        };
                         views.get(t).cloned()
                     }
                     _ => {
@@ -690,7 +868,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 if let Some(paned) = parent.downcast_ref::<gtk4::Paned>() {
                     let is_horizontal = paned.orientation() == gtk4::Orientation::Horizontal;
                     if is_horizontal == horizontal {
-                        let delta = if matches!(dir, "left" | "up") { -10 } else { 10 };
+                        let delta = if matches!(dir, "left" | "up") {
+                            -10
+                        } else {
+                            10
+                        };
                         paned.set_position(paned.position() + delta);
                         return;
                     }
@@ -750,7 +932,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         window.add_action(&add_simple(
             "new-tab",
             Box::new(move || {
-                if let Err(err) = add_tab() {
+                if let Err(err) = add_tab(None) {
                     tracing::error!("new tab failed: {err:#}");
                 }
             }),
@@ -845,12 +1027,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         window.add_action(&add_simple(
             "equalize-splits",
             Box::new(move || {
-                if let Some(page) = tab_view.selected_page() {
-                    if let Some(root) = page.child().downcast_ref::<gtk4::Box>() {
-                        if let Some(first) = root.first_child() {
-                            equalize_splits(&first);
-                        }
-                    }
+                if let Some(page) = tab_view.selected_page()
+                    && let Some(root) = page.child().downcast_ref::<gtk4::Box>()
+                    && let Some(first) = root.first_child()
+                {
+                    equalize_splits(&first);
                 }
             }),
         ));
@@ -985,33 +1166,98 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         ));
     }
 
-    {
+    // Re-read config.toml and push it into every live pane. Shared by the
+    // explicit action and the file-monitor auto-reload.
+    let reload_config: Rc<dyn Fn(bool)> = {
         let config = config.clone();
         let pages = pages.clone();
         let toast = toast.clone();
         let base_font_size = base_font_size.clone();
         let set_tabs_location = set_tabs_location.clone();
-        window.add_action(&add_simple(
-            "reload-config",
-            Box::new(move || match Config::load() {
-                Ok(new_cfg) => {
-                    base_font_size.set(new_cfg.font_size);
-                    *config.borrow_mut() = new_cfg.clone();
-                    for (_, views) in pages.borrow().iter() {
-                        for view in views {
-                            view.apply_config(&new_cfg);
-                        }
+        let window_c = window.clone();
+        Rc::new(move |notify: bool| match Config::load() {
+            Ok(new_cfg) => {
+                base_font_size.set(new_cfg.font_size);
+                *config.borrow_mut() = new_cfg.clone();
+                for (_, views) in pages.borrow().iter() {
+                    for view in views {
+                        view.apply_config(&new_cfg);
                     }
-                    apply_theme(new_cfg.theme);
-                    set_tabs_location(new_cfg.tabs_location);
+                }
+                apply_theme(new_cfg.theme);
+                apply_window_opacity(&window_c, new_cfg.background_opacity);
+                set_tabs_location(new_cfg.tabs_location);
+                tracing::info!(
+                    "configuration reloaded (font={} size={})",
+                    new_cfg.font_family,
+                    new_cfg.font_size
+                );
+                if notify {
                     toast("Configuration reloaded");
                 }
-                Err(err) => {
-                    tracing::error!("config reload failed: {err:#}");
+            }
+            Err(err) => {
+                tracing::error!("config reload failed: {err:#}");
+                if notify {
                     toast("Failed to reload configuration");
                 }
-            }),
+            }
+        })
+    };
+
+    {
+        let reload_config = reload_config.clone();
+        window.add_action(&add_simple(
+            "reload-config",
+            Box::new(move || reload_config(true)),
         ));
+    }
+
+    // Watch config.toml and pick up external edits automatically, like
+    // Ghostty does. Editors write via rename/replace, so CHANGED alone is not
+    // enough — react to created/renamed too, and debounce the burst.
+    {
+        let path = config.borrow().source.clone();
+        let file = gio::File::for_path(&path);
+        match file.monitor_file(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) {
+            Ok(monitor) => {
+                let reload_config = reload_config.clone();
+                let toast = toast.clone();
+                let self_write = self_write.clone();
+                let pending = Rc::new(Cell::new(false));
+                monitor.connect_changed(move |_, _, _, event| {
+                    use gio::FileMonitorEvent as Ev;
+                    if !matches!(
+                        event,
+                        Ev::ChangesDoneHint | Ev::Created | Ev::MovedIn | Ev::Renamed
+                    ) {
+                        return;
+                    }
+                    // Ignore the write we just made from the UI.
+                    if self_write.get().elapsed() < SELF_WRITE_GRACE {
+                        return;
+                    }
+                    if pending.replace(true) {
+                        return;
+                    }
+                    let reload_config = reload_config.clone();
+                    let toast = toast.clone();
+                    let pending = pending.clone();
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(150),
+                        move || {
+                            pending.set(false);
+                            reload_config(false);
+                            toast("Configuration reloaded");
+                        },
+                    );
+                });
+                // The monitor must outlive this scope to keep firing.
+                std::mem::forget(monitor);
+                tracing::info!("watching {} for changes", path.display());
+            }
+            Err(err) => tracing::warn!("could not watch {}: {err}", path.display()),
+        }
     }
 
     {
@@ -1045,8 +1291,29 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     }
 
     {
+        let search_bar = search_bar.clone();
+        window.add_action(&add_simple("find", Box::new(move || search_bar.open())));
+    }
+
+    {
+        let tab_view = tab_view.clone();
         let window_c = window.clone();
-        window.add_action(&add_simple("about", Box::new(move || show_about(&window_c))));
+        window.add_action(&add_simple(
+            "rename-tab",
+            Box::new(move || {
+                if let Some(page) = tab_view.selected_page() {
+                    rename_tab_dialog(&window_c, &page);
+                }
+            }),
+        ));
+    }
+
+    {
+        let window_c = window.clone();
+        window.add_action(&add_simple(
+            "about",
+            Box::new(move || show_about(&window_c)),
+        ));
     }
 
     {
@@ -1149,15 +1416,15 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     }
     window.add_action(&cursor_action);
 
-    let blink_action =
-        gio::SimpleAction::new_stateful("cursor-blink", None, &config.borrow().cursor_blink.to_variant());
+    let blink_action = gio::SimpleAction::new_stateful(
+        "cursor-blink",
+        None,
+        &config.borrow().cursor_blink.to_variant(),
+    );
     {
         let update_all_cfg = update_all_cfg.clone();
         blink_action.connect_activate(move |action, _| {
-            let value = !action
-                .state()
-                .and_then(|s| s.get::<bool>())
-                .unwrap_or(true);
+            let value = !action.state().and_then(|s| s.get::<bool>()).unwrap_or(true);
             update_all_cfg(Rc::new(move |cfg| cfg.cursor_blink = value));
             action.set_state(&value.to_variant());
         });
@@ -1213,6 +1480,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     app.set_accels_for_action("win.resize-split-right", &["<Control><Shift><Super>Right"]);
     app.set_accels_for_action("win.toggle-split-zoom", &["<Control><Shift>Return"]);
     app.set_accels_for_action("win.command-palette", &["<Control><Shift>p"]);
+    app.set_accels_for_action("win.find", &["<Control><Shift>f"]);
+    app.set_accels_for_action("win.rename-tab", &["F2"]);
     app.set_accels_for_action(
         "win.zoom-in",
         &["<Control>plus", "<Control>equal", "<Control>KP_Add"],
@@ -1260,7 +1529,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     {
         let css = gtk4::CssProvider::new();
         let cfg = config.borrow();
-        let family = cfg.font_family.replace('\'', "").replace('"', "");
+        let family = cfg.font_family.replace(['\'', '"'], "");
         css.load_from_string(&format!(
             ".terminal {{ font-family: \"{family}\"; font-size: {}pt; }}",
             cfg.font_size
@@ -1274,12 +1543,111 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         }
     }
 
-    // Apply the configured tab layout, then open the first tab.
+    // Persist the workspace so the next start can restore it.
+    let save_session: Rc<dyn Fn()> = {
+        let config = config.clone();
+        let tab_view = tab_view.clone();
+        let pages = pages.clone();
+        // SIGTERM saves and then closes the window, which would otherwise run
+        // the same work again through `close-request`.
+        let saved = Cell::new(false);
+        Rc::new(move || {
+            if saved.replace(true) {
+                return;
+            }
+            if !config.borrow().session_restore {
+                SessionState::clear();
+                return;
+            }
+            let session = capture_session(&tab_view, &pages);
+            match session.save() {
+                Ok(()) => {
+                    tracing::info!("saved {} tab(s) for the next session", session.tabs.len())
+                }
+                Err(err) => tracing::warn!("could not save session: {err:#}"),
+            }
+        })
+    };
+
+    {
+        let save_session = save_session.clone();
+        window.connect_close_request(move |_| {
+            save_session();
+            glib::Propagation::Proceed
+        });
+    }
+
+    // A logout or `systemctl --user stop` sends SIGTERM, which bypasses
+    // `close-request` and would silently lose the session; shut down cleanly.
+    for signal in [nix::libc::SIGTERM, nix::libc::SIGINT] {
+        let save_session = save_session.clone();
+        let window_c = window.clone();
+        glib::unix_signal_add_local(signal, move || {
+            save_session();
+            window_c.close();
+            glib::ControlFlow::Break
+        });
+    }
+
+    // Apply the configured tab layout, then open the tabs.
     set_tabs_location(config.borrow().tabs_location);
-    add_tab()?;
+    let restored = config
+        .borrow()
+        .session_restore
+        .then(SessionState::load)
+        .flatten();
+
+    match restored {
+        Some(session) => {
+            for tab in &session.tabs {
+                let mut panes = tab.panes.iter();
+                let first = panes.next().cloned().flatten().map(PathBuf::from);
+                let page = add_tab(first)?;
+                if let Some(title) = &tab.title {
+                    set_tab_renamed(&page, true);
+                    page.set_title(title);
+                }
+                // Extra panes are recreated as splits to the right. The
+                // original geometry is not stored, only the pane count.
+                for _ in panes {
+                    split(gtk4::Orientation::Horizontal, false);
+                }
+            }
+            let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
+            let page = tab_view.nth_page(index as i32);
+            tab_view.set_selected_page(&page);
+            tracing::info!(
+                "restored {} tab(s) from the last session",
+                session.tabs.len()
+            );
+        }
+        None => {
+            add_tab(None)?;
+        }
+    }
 
     window.present();
     Ok(())
+}
+
+/// Snapshot the open tabs, their custom titles and each pane's directory.
+fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
+    let mut tabs = Vec::new();
+    for i in 0..tab_view.n_pages() {
+        let page = tab_view.nth_page(i);
+        let Some((_, views)) = pages.borrow().iter().find(|(p, _)| p == &page).cloned() else {
+            continue;
+        };
+        tabs.push(TabState {
+            title: tab_is_renamed(&page).then(|| page.title().to_string()),
+            panes: views.iter().map(|v| v.pwd()).collect(),
+        });
+    }
+    let active = tab_view
+        .selected_page()
+        .map(|p| tab_view.page_position(&p).max(0) as usize)
+        .unwrap_or(0);
+    SessionState { tabs, active }
 }
 
 /// Leaf-weighted split equalization, like Ghostty's `equalize_splits`:
@@ -1288,7 +1656,10 @@ fn equalize_splits(widget: &gtk4::Widget) -> i32 {
     let Some(paned) = widget.downcast_ref::<gtk4::Paned>() else {
         return 1;
     };
-    let start = paned.start_child().map(|c| equalize_splits(&c)).unwrap_or(0);
+    let start = paned
+        .start_child()
+        .map(|c| equalize_splits(&c))
+        .unwrap_or(0);
     let end = paned.end_child().map(|c| equalize_splits(&c)).unwrap_or(0);
     let total = (start + end).max(1);
     let size = match paned.orientation() {
@@ -1314,4 +1685,3 @@ fn cycle_tab(tab_view: &adw::TabView, dir: i32) {
     let page = tab_view.nth_page(next);
     tab_view.set_selected_page(&page);
 }
-

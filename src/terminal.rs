@@ -2,15 +2,14 @@
 
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
     rc::Rc,
 };
 
 use anyhow::{Context, Result, anyhow};
 use gtk4::{
-    cairo, gdk, glib, pango,
-    prelude::*,
     DrawingArea, EventControllerFocus, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, IMMulticontext,
+    EventControllerScrollFlags, GestureClick, IMMulticontext, cairo, gdk, glib, pango, prelude::*,
 };
 use libghostty_vt::{
     Terminal, TerminalOptions,
@@ -20,7 +19,7 @@ use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, RenderState, RowIterator},
     screen::TrackedGridRef,
     selection::{
-        Selection,
+        SelectWordOptions, Selection,
         gesture::{DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent},
     },
     style::{RgbColor, Underline},
@@ -38,10 +37,19 @@ use crate::{
     pty::{self, Child, Pty, PtyError},
 };
 
+/// A scrollback search hit, in screen coordinates (scrollback included).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Match {
+    pub row: u32,
+    pub col: u16,
+    pub width: u16,
+}
+
 type TitleCb = Rc<dyn Fn(String)>;
 type ExitCb = Rc<dyn Fn()>;
 type FocusCb = Rc<dyn Fn()>;
 type ResizeCb = Rc<dyn Fn(u16, u16)>;
+type LinkCb = Rc<dyn Fn(String)>;
 
 pub struct TerminalView {
     area: DrawingArea,
@@ -50,6 +58,7 @@ pub struct TerminalView {
     exit_cb: Rc<RefCell<Option<ExitCb>>>,
     focus_cb: Rc<RefCell<Option<FocusCb>>>,
     resize_cb: Rc<RefCell<Option<ResizeCb>>>,
+    link_cb: Rc<RefCell<Option<LinkCb>>>,
     /// Set once the PTY fd source is installed; cleared on restart.
     watcher_attached: Rc<Cell<bool>>,
     /// Live PTY fd source, so a restart can drop it before closing the fd.
@@ -84,7 +93,7 @@ struct Session {
 }
 
 impl TerminalView {
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: Config, cwd: Option<PathBuf>) -> Result<Self> {
         let area = DrawingArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -102,6 +111,7 @@ impl TerminalView {
         let watcher: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
         let resize_cb: Rc<RefCell<Option<ResizeCb>>> = Rc::new(RefCell::new(None));
+        let link_cb: Rc<RefCell<Option<LinkCb>>> = Rc::new(RefCell::new(None));
 
         {
             let state = state.clone();
@@ -115,7 +125,7 @@ impl TerminalView {
             area.set_draw_func(move |da, cr, width, height| {
                 let mut just_bootstrapped = false;
                 if state.borrow().is_none() {
-                    match bootstrap_session(&config, &grid, width, height, da) {
+                    match bootstrap_session(&config, &grid, width, height, da, cwd.as_deref()) {
                         Ok(session) => {
                             *state.borrow_mut() = Some(session);
                             just_bootstrapped = true;
@@ -133,15 +143,15 @@ impl TerminalView {
                     watcher_attached.set(true);
                 }
                 let mut resized = None;
-                if let Ok(mut borrow) = state.try_borrow_mut() {
-                    if let Some(session) = borrow.as_mut() {
-                        match session.ensure_size(da, width, height, &grid) {
-                            Ok(changed) => resized = changed,
-                            Err(err) => tracing::warn!("resize failed: {err:#}"),
-                        }
-                        if let Err(err) = session.paint(da, cr, width, height) {
-                            tracing::warn!("paint failed: {err:#}");
-                        }
+                if let Ok(mut borrow) = state.try_borrow_mut()
+                    && let Some(session) = borrow.as_mut()
+                {
+                    match session.ensure_size(da, width, height, &grid) {
+                        Ok(changed) => resized = changed,
+                        Err(err) => tracing::warn!("resize failed: {err:#}"),
+                    }
+                    if let Err(err) = session.paint(da, cr, width, height) {
+                        tracing::warn!("paint failed: {err:#}");
                     }
                 }
                 // A freshly split/opened pane starts at its final size, so
@@ -162,7 +172,7 @@ impl TerminalView {
             });
         }
 
-        attach_input(&area, &state, &focus_cb);
+        attach_input(&area, &state, &focus_cb, &link_cb);
 
         // Cursor blink timer. Stops on its own once the widget is destroyed.
         {
@@ -173,15 +183,15 @@ impl TerminalView {
                 let Some(area) = weak_area.upgrade() else {
                     return glib::ControlFlow::Break;
                 };
-                if let Ok(mut borrow) = state.try_borrow_mut() {
-                    if let Some(session) = borrow.as_mut() {
-                        if session.blink_enabled {
-                            session.blink_on = !session.blink_on;
-                            area.queue_draw();
-                        } else if !session.blink_on {
-                            session.blink_on = true;
-                            area.queue_draw();
-                        }
+                if let Ok(mut borrow) = state.try_borrow_mut()
+                    && let Some(session) = borrow.as_mut()
+                {
+                    if session.blink_enabled {
+                        session.blink_on = !session.blink_on;
+                        area.queue_draw();
+                    } else if !session.blink_on {
+                        session.blink_on = true;
+                        area.queue_draw();
                     }
                 }
                 glib::ControlFlow::Continue
@@ -195,6 +205,7 @@ impl TerminalView {
             exit_cb,
             focus_cb,
             resize_cb,
+            link_cb,
             watcher_attached,
             watcher,
         })
@@ -282,6 +293,39 @@ impl TerminalView {
         size
     }
 
+    /// Called with a URI when the user Ctrl+clicks a link.
+    pub fn set_on_link(&self, cb: impl Fn(String) + 'static) {
+        *self.link_cb.borrow_mut() = Some(Rc::new(cb));
+    }
+
+    /// The shell's working directory, as a filesystem path.
+    ///
+    /// OSC 7 reports a `file://host/path` URI, so it has to be decoded rather
+    /// than used verbatim.
+    pub fn pwd(&self) -> Option<String> {
+        let borrow = self.state.borrow();
+        let session = borrow.as_ref()?;
+        let raw = session.terminal.pwd().ok().filter(|p| !p.is_empty())?;
+        Some(pwd_to_path(raw))
+    }
+
+    /// Find every occurrence of `needle` (case-insensitive) in the scrollback.
+    pub fn search(&self, needle: &str) -> Vec<Match> {
+        self.state
+            .borrow_mut()
+            .as_mut()
+            .map(|s| s.search(needle))
+            .unwrap_or_default()
+    }
+
+    /// Scroll a match into view and select it.
+    pub fn reveal_match(&self, m: &Match) {
+        if let Some(session) = self.state.borrow_mut().as_mut() {
+            session.reveal_match(m);
+        }
+        self.area.queue_draw();
+    }
+
     /// Clear the screen and the scrollback (Ghostty `clear_screen`).
     pub fn clear_screen(&self) {
         if let Some(session) = self.state.borrow_mut().as_mut() {
@@ -328,6 +372,7 @@ fn bootstrap_session(
     width: i32,
     height: i32,
     da: &DrawingArea,
+    cwd: Option<&std::path::Path>,
 ) -> Result<Session> {
     let mut config = config.clone();
     config.font_family = resolve_font_family(&da.pango_context(), &config.font_family);
@@ -344,6 +389,7 @@ fn bootstrap_session(
         rows,
         cell_w.round() as u16,
         cell_h.round() as u16,
+        cwd,
     )
     .context("spawn pty")?;
 
@@ -470,63 +516,67 @@ fn attach_pty_watcher(
         glib::ControlFlow::Break
     };
 
-    Some(glib::unix_fd_add_local(fd, glib::IOCondition::IN | glib::IOCondition::HUP, move |_fd, cond| {
-        let mut close = cond.contains(glib::IOCondition::HUP);
-        if !close {
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    match session.pty.read_into(&mut session.terminal) {
-                        Ok(()) => {}
-                        Err(PtyError::EndOfStream) => {
-                            if let Child::Active(pid) = session.child {
-                                session.child = Child::Exited(pid);
-                            }
-                            close = true;
+    Some(glib::unix_fd_add_local(
+        fd,
+        glib::IOCondition::IN | glib::IOCondition::HUP,
+        move |_fd, cond| {
+            let mut close = cond.contains(glib::IOCondition::HUP);
+            if !close
+                && let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                match session.pty.read_into(&mut session.terminal) {
+                    Ok(()) => {}
+                    Err(PtyError::EndOfStream) => {
+                        if let Child::Active(pid) = session.child {
+                            session.child = Child::Exited(pid);
                         }
-                        Err(PtyError::Other(err)) => {
-                            tracing::error!("pty read error: {err}");
-                            close = true;
-                        }
+                        close = true;
                     }
-                    if let Ok(title) = session.terminal.title() {
-                        let title = sanitize_title(title);
-                        if !title.is_empty() && title != session.title {
-                            session.title = title;
-                            let t = session.title.clone();
-                            drop(borrow);
-                            if let Some(cb) = title_cb.borrow().as_ref() {
-                                cb(t);
-                            }
-                            da.queue_draw();
-                            return if close {
-                                if let Some(cb) = exit_cb.borrow().as_ref() {
-                                    cb();
-                                }
-                                finish()
-                            } else {
-                                glib::ControlFlow::Continue
-                            };
+                    Err(PtyError::Other(err)) => {
+                        tracing::error!("pty read error: {err}");
+                        close = true;
+                    }
+                }
+                if let Ok(title) = session.terminal.title() {
+                    let title = sanitize_title(title);
+                    if !title.is_empty() && title != session.title {
+                        session.title = title;
+                        let t = session.title.clone();
+                        drop(borrow);
+                        if let Some(cb) = title_cb.borrow().as_ref() {
+                            cb(t);
                         }
+                        da.queue_draw();
+                        return if close {
+                            if let Some(cb) = exit_cb.borrow().as_ref() {
+                                cb();
+                            }
+                            finish()
+                        } else {
+                            glib::ControlFlow::Continue
+                        };
                     }
                 }
             }
-        }
-        da.queue_draw();
-        if close {
-            if let Some(cb) = exit_cb.borrow().as_ref() {
-                cb();
+            da.queue_draw();
+            if close {
+                if let Some(cb) = exit_cb.borrow().as_ref() {
+                    cb();
+                }
+                finish()
+            } else {
+                glib::ControlFlow::Continue
             }
-            finish()
-        } else {
-            glib::ControlFlow::Continue
-        }
-    }))
+        },
+    ))
 }
 
 fn attach_input(
     area: &DrawingArea,
     state: &Rc<RefCell<Option<Session>>>,
     focus_cb: &Rc<RefCell<Option<FocusCb>>>,
+    link_cb: &Rc<RefCell<Option<LinkCb>>>,
 ) {
     // Input method: makes dead keys / compose sequences work, so `´` + `a`
     // produces `á` instead of two separate keystrokes. Also covers CJK IMEs.
@@ -551,11 +601,11 @@ fn attach_input(
                 im_pending.borrow_mut().replace(text.to_string());
                 return;
             }
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    session.blink_on = true;
-                    session.pty.write_all(text.as_bytes());
-                }
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                session.blink_on = true;
+                session.pty.write_all(text.as_bytes());
             }
             area.queue_draw();
         });
@@ -581,42 +631,41 @@ fn attach_input(
                 gdk::ModifierType::CONTROL_MASK
                     | gdk::ModifierType::ALT_MASK
                     | gdk::ModifierType::SUPER_MASK,
-            ) {
-                if let Some(event) = ctrl.current_event() {
-                    im_pending.borrow_mut().take();
-                    im_filtering.set(true);
-                    let handled = im.filter_keypress(&event);
-                    im_filtering.set(false);
-                    let committed = im_pending.borrow_mut().take();
-                    match (handled, committed) {
-                        // Composed text (accents, IME): encode it as the event text.
-                        (_, Some(text)) => im_text = Some(text),
-                        // Dead key / preedit in progress: swallow, nothing to send yet.
-                        (true, None) => {
-                            area.queue_draw();
-                            return glib::Propagation::Stop;
-                        }
-                        (false, None) => {}
+            ) && let Some(event) = ctrl.current_event()
+            {
+                im_pending.borrow_mut().take();
+                im_filtering.set(true);
+                let handled = im.filter_keypress(&event);
+                im_filtering.set(false);
+                let committed = im_pending.borrow_mut().take();
+                match (handled, committed) {
+                    // Composed text (accents, IME): encode it as the event text.
+                    (_, Some(text)) => im_text = Some(text),
+                    // Dead key / preedit in progress: swallow, nothing to send yet.
+                    (true, None) => {
+                        area.queue_draw();
+                        return glib::Propagation::Stop;
                     }
+                    (false, None) => {}
                 }
             }
             let im_text = im_text.or_else(|| keyval.to_unicode().map(|c| c.to_string()));
 
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    session.blink_on = true;
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                session.blink_on = true;
+                session.input.buf.clear();
+                let _ = session.input.encode_press(
+                    &session.terminal,
+                    keyval,
+                    keycode,
+                    modifier,
+                    im_text.as_deref(),
+                );
+                if !session.input.buf.is_empty() {
+                    session.pty.write_all(&session.input.buf);
                     session.input.buf.clear();
-                    let _ = session.input.encode_press(
-                        &session.terminal,
-                        keyval,
-                        keycode,
-                        modifier,
-                        im_text.as_deref(),
-                    );
-                    if !session.input.buf.is_empty() {
-                        session.pty.write_all(&session.input.buf);
-                        session.input.buf.clear();
-                    }
                 }
             }
             area.queue_draw();
@@ -631,24 +680,21 @@ fn attach_input(
                 return;
             }
             // Keep the IM in sync with releases (some engines need them).
-            if let Some(event) = ctrl.current_event() {
-                if im.filter_keypress(&event) {
-                    return;
-                }
+            if let Some(event) = ctrl.current_event()
+                && im.filter_keypress(&event)
+            {
+                return;
             }
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                session.input.buf.clear();
+                let _ = session
+                    .input
+                    .encode_release(&session.terminal, keyval, keycode, modifier);
+                if !session.input.buf.is_empty() {
+                    session.pty.write_all(&session.input.buf);
                     session.input.buf.clear();
-                    let _ = session.input.encode_release(
-                        &session.terminal,
-                        keyval,
-                        keycode,
-                        modifier,
-                    );
-                    if !session.input.buf.is_empty() {
-                        session.pty.write_all(&session.input.buf);
-                        session.input.buf.clear();
-                    }
                 }
             }
         });
@@ -683,14 +729,14 @@ fn attach_input(
         let state = state.clone();
         let area = area.clone();
         scroll.connect_scroll(move |_, _dx, dy| {
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    let delta = (dy * 3.0).round() as isize;
-                    if delta != 0 {
-                        session
-                            .terminal
-                            .scroll_viewport(ScrollViewport::Delta(delta));
-                    }
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                let delta = (dy * 3.0).round() as isize;
+                if delta != 0 {
+                    session
+                        .terminal
+                        .scroll_viewport(ScrollViewport::Delta(delta));
                 }
             }
             area.queue_draw();
@@ -705,13 +751,31 @@ fn attach_input(
     {
         let state = state.clone();
         let area = area.clone();
+        let link_cb = link_cb.clone();
         click.connect_pressed(move |gesture, _n, x, y| {
             area.grab_focus();
-            let time = gesture.current_event_time();
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    session.selection_press(x, y, time);
+            // Ctrl+click opens the link under the pointer instead of starting
+            // a selection (OSC 8 hyperlink, URL, or an existing path).
+            if gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::CONTROL_MASK)
+            {
+                let uri = state
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut b| b.as_mut().and_then(|s| s.link_at(x, y)));
+                if let Some(uri) = uri {
+                    if let Some(cb) = link_cb.borrow().as_ref() {
+                        cb(uri);
+                    }
+                    return;
                 }
+            }
+            let time = gesture.current_event_time();
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                session.selection_press(x, y, time);
             }
             area.queue_draw();
         });
@@ -720,10 +784,10 @@ fn attach_input(
         let state = state.clone();
         let area = area.clone();
         click.connect_released(move |_, _n, x, y| {
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    session.selection_release(x, y);
-                }
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                session.selection_release(x, y);
             }
             area.queue_draw();
         });
@@ -742,10 +806,10 @@ fn attach_input(
             if !held {
                 return;
             }
-            if let Ok(mut borrow) = state.try_borrow_mut() {
-                if let Some(session) = borrow.as_mut() {
-                    session.selection_drag(x, y);
-                }
+            if let Ok(mut borrow) = state.try_borrow_mut()
+                && let Some(session) = borrow.as_mut()
+            {
+                session.selection_drag(x, y);
             }
             area.queue_draw();
         });
@@ -866,7 +930,11 @@ fn font_key(config: &Config) -> (String, u32) {
 /// OSC titles come straight from the child process: strip control characters
 /// and keep them short so they cannot mangle the UI.
 fn sanitize_title(title: &str) -> String {
-    title.chars().filter(|c| !c.is_control()).take(256).collect()
+    title
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(256)
+        .collect()
 }
 
 /// Screen-space endpoints of a selection, used to persist it across borrows.
@@ -895,6 +963,76 @@ impl Session {
             .floor()
             .clamp(0.0, (self.rows - 1) as f64) as u32;
         PointCoordinate { x: col, y: row }
+    }
+
+    /// URI under the pointer: an explicit OSC 8 hyperlink if the cell carries
+    /// one, otherwise a URL or existing path detected in the word there.
+    fn link_at(&mut self, x: f64, y: f64) -> Option<String> {
+        if let Some(uri) = self.hyperlink_at(x, y) {
+            return Some(uri);
+        }
+        let word = self.word_at(x, y)?;
+        let pwd = self.terminal.pwd().ok().map(pwd_to_path);
+        detect_link(&word, pwd.as_deref())
+    }
+
+    /// OSC 8 hyperlink URI under the given widget coordinates, if any.
+    fn hyperlink_at(&self, x: f64, y: f64) -> Option<String> {
+        let coord = self.cell_coord(x, y);
+        let grid_ref = self.terminal.grid_ref(Point::Viewport(coord)).ok()?;
+        // An empty buffer just reports the length; 0 means "no hyperlink".
+        let len = grid_ref.hyperlink_uri(&mut []).ok()?;
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let written = grid_ref.hyperlink_uri(&mut buf).ok()?;
+        buf.truncate(written);
+        String::from_utf8(buf).ok().filter(|s| !s.is_empty())
+    }
+
+    /// Text of the whitespace-delimited word under the cursor, used to detect
+    /// bare URLs and paths in output that does not emit OSC 8.
+    fn word_at(&mut self, x: f64, y: f64) -> Option<String> {
+        let coord = self.cell_coord(x, y);
+        let grid_ref = self.terminal.grid_ref(Point::Viewport(coord)).ok()?;
+        // Only whitespace ends a word here: the default boundary set breaks on
+        // `/`, `:` and `.`, which would chop every URL into pieces.
+        const BOUNDARIES: &[char] = &[' ', '\t', '\n', '\r', '"', '\'', '`', '<', '>', '|'];
+        let sel = self
+            .terminal
+            .select_word(SelectWordOptions::new(grid_ref).with_boundary_codepoints(BOUNDARIES))
+            .ok()??;
+        let opts = FormatterOptions::new().with_selection(&sel).with_trim(true);
+        let mut formatter = Formatter::new(&self.terminal, opts).ok()?;
+        let bytes = formatter.format_alloc(None).ok()?;
+        let text = String::from_utf8_lossy(&bytes).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn search(&mut self, needle: &str) -> Vec<Match> {
+        search_terminal(&self.terminal, self.cols, needle)
+    }
+
+    fn reveal_match(&mut self, m: &Match) {
+        let end_col = m.col.saturating_add(m.width.saturating_sub(1));
+        let (Ok(start), Ok(end)) = (
+            self.terminal
+                .grid_ref(Point::Screen(PointCoordinate { x: m.col, y: m.row })),
+            self.terminal.grid_ref(Point::Screen(PointCoordinate {
+                x: end_col.min(self.cols.saturating_sub(1)),
+                y: m.row,
+            })),
+        ) else {
+            return;
+        };
+        let sel = Selection::new(start, end, false);
+        let points = selection_points(&self.terminal, Some(&sel));
+        let _ = self.terminal.set_selection(Some(&sel));
+        self.set_selection_points(points);
+        // Centre the hit instead of pinning it to the top row.
+        let target = (m.row as usize).saturating_sub(self.rows as usize / 2);
+        self.terminal.scroll_viewport(ScrollViewport::Row(target));
     }
 
     fn geometry(&self) -> Geometry {
@@ -944,7 +1082,6 @@ impl Session {
             .flatten();
         let points = selection_points(&self.terminal, sel.as_ref());
         let _ = self.terminal.set_selection(sel.as_ref());
-        drop(sel);
         self.set_selection_points(points);
     }
 
@@ -965,7 +1102,6 @@ impl Session {
         if let Some(sel) = sel {
             let points = selection_points(&self.terminal, Some(&sel));
             let _ = self.terminal.set_selection(Some(&sel));
-            drop(sel);
             self.set_selection_points(points);
         }
     }
@@ -982,7 +1118,6 @@ impl Session {
         let sel = self.terminal.select_all().ok().flatten();
         let points = selection_points(&self.terminal, sel.as_ref());
         let _ = self.terminal.set_selection(sel.as_ref());
-        drop(sel);
         self.set_selection_points(points);
     }
 
@@ -1059,10 +1194,25 @@ impl Session {
         Ok(Some((cols, rows)))
     }
 
-    fn paint(&mut self, da: &DrawingArea, cr: &cairo::Context, width: i32, height: i32) -> Result<()> {
+    fn paint(
+        &mut self,
+        da: &DrawingArea,
+        cr: &cairo::Context,
+        width: i32,
+        height: i32,
+    ) -> Result<()> {
         let bg = self.config.background;
-        cr.set_source_rgb(bg.r as f64 / 255.0, bg.g as f64 / 255.0, bg.b as f64 / 255.0);
+        // `background-opacity` only dims the default background; explicit cell
+        // backgrounds stay opaque so text remains readable, like Ghostty.
+        cr.set_operator(cairo::Operator::Source);
+        cr.set_source_rgba(
+            bg.r as f64 / 255.0,
+            bg.g as f64 / 255.0,
+            bg.b as f64 / 255.0,
+            self.config.background_opacity,
+        );
         cr.paint().ok();
+        cr.set_operator(cairo::Operator::Over);
         let _ = (width, height);
 
         // Grab cached font descriptions before `render_state` borrows self.
@@ -1161,7 +1311,10 @@ impl Session {
             );
         }
 
-        let mut row_it = self.row_it.update(&snapshot).map_err(|e| anyhow!("{e:?}"))?;
+        let mut row_it = self
+            .row_it
+            .update(&snapshot)
+            .map_err(|e| anyhow!("{e:?}"))?;
         let mut row_idx = 0u16;
         let mut text = String::with_capacity(16);
 
@@ -1175,9 +1328,8 @@ impl Session {
                 let selected = cell.is_selected().unwrap_or(false);
                 let graphemes = cell.graphemes_len().unwrap_or(0);
                 let style = cell.style().unwrap_or_default();
-                let at_block_cursor =
-                    block_cursor_cell.map(|(cx, cy)| (cx as u32, cy as u32))
-                        == Some((col_idx as u32, row_idx as u32));
+                let at_block_cursor = block_cursor_cell.map(|(cx, cy)| (cx as u32, cy as u32))
+                    == Some((col_idx as u32, row_idx as u32));
                 let (mut fg, bg_cell) = if selected {
                     (
                         self.config.selection_foreground,
@@ -1262,37 +1414,37 @@ impl Session {
         }
 
         // Thin cursor shapes drawn on top (they don't obscure the glyph).
-        if cursor_shown && !matches!(cursor_style, CursorVisualStyle::Block) {
-            if let Some(cursor) = cursor_pos {
-                let x = pad_x + cursor.x as f64 * cell_w;
-                let y = pad_y + cursor.y as f64 * cell_h;
-                cr.set_source_rgb(
-                    cursor_color.r as f64 / 255.0,
-                    cursor_color.g as f64 / 255.0,
-                    cursor_color.b as f64 / 255.0,
-                );
-                match cursor_style {
-                    CursorVisualStyle::Bar => {
-                        cr.rectangle(x, y, (cell_w * 0.15).clamp(1.0, 2.0), cell_h);
-                        cr.fill().ok();
-                    }
-                    CursorVisualStyle::Underline => {
-                        let thickness = (cell_h * 0.08).clamp(1.0, 2.0);
-                        cr.rectangle(x, y + cell_h - thickness, cell_w, thickness);
-                        cr.fill().ok();
-                    }
-                    _ => {
-                        // Hollow block (also used when unfocused).
-                        cr.set_line_width(1.0);
-                        cr.rectangle(x + 0.5, y + 0.5, cell_w - 1.0, cell_h - 1.0);
-                        cr.stroke().ok();
-                    }
+        if cursor_shown
+            && !matches!(cursor_style, CursorVisualStyle::Block)
+            && let Some(cursor) = cursor_pos
+        {
+            let x = pad_x + cursor.x as f64 * cell_w;
+            let y = pad_y + cursor.y as f64 * cell_h;
+            cr.set_source_rgb(
+                cursor_color.r as f64 / 255.0,
+                cursor_color.g as f64 / 255.0,
+                cursor_color.b as f64 / 255.0,
+            );
+            match cursor_style {
+                CursorVisualStyle::Bar => {
+                    cr.rectangle(x, y, (cell_w * 0.15).clamp(1.0, 2.0), cell_h);
+                    cr.fill().ok();
+                }
+                CursorVisualStyle::Underline => {
+                    let thickness = (cell_h * 0.08).clamp(1.0, 2.0);
+                    cr.rectangle(x, y + cell_h - thickness, cell_w, thickness);
+                    cr.fill().ok();
+                }
+                _ => {
+                    // Hollow block (also used when unfocused).
+                    cr.set_line_width(1.0);
+                    cr.rectangle(x + 0.5, y + 0.5, cell_w - 1.0, cell_h - 1.0);
+                    cr.stroke().ok();
                 }
             }
         }
 
         // Kitty images that sit above the text layer (z >= 0).
-        drop(snapshot);
         paint_images(
             &self.terminal,
             self.kitty_iter.as_mut(),
@@ -1305,6 +1457,142 @@ impl Session {
 
         Ok(())
     }
+}
+
+/// Case-insensitive substring search over the whole screen + scrollback.
+///
+/// Rows are formatted one at a time so every hit keeps its exact
+/// `(row, column)` coordinates, which is what `reveal_match` needs to scroll
+/// to and select it.
+fn search_terminal(terminal: &Terminal<'_, '_>, cols: u16, needle: &str) -> Vec<Match> {
+    /// Bail out rather than freeze the UI on a pathological scrollback.
+    const MAX_MATCHES: usize = 2_000;
+
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let needle_lower = needle.to_lowercase();
+    let width = needle.chars().count() as u16;
+    let Ok(total) = terminal.total_rows() else {
+        return Vec::new();
+    };
+    let last_col = cols.saturating_sub(1);
+
+    let mut matches = Vec::new();
+    let mut line = String::new();
+    for row in 0..total as u32 {
+        line.clear();
+        if !row_text(terminal, row, last_col, &mut line) {
+            continue;
+        }
+        let haystack = line.to_lowercase();
+        let mut from = 0usize;
+        while let Some(rel) = haystack[from..].find(&needle_lower) {
+            let byte = from + rel;
+            // The grid is indexed by cell, so convert the byte offset to a
+            // character count before reporting a column.
+            let col = line[..byte].chars().count() as u16;
+            matches.push(Match { row, col, width });
+            if matches.len() >= MAX_MATCHES {
+                return matches;
+            }
+            from = byte + needle_lower.len().max(1);
+            if from >= haystack.len() {
+                break;
+            }
+        }
+    }
+    matches
+}
+
+/// Format a single screen row (scrollback included) into `out`.
+fn row_text(terminal: &Terminal<'_, '_>, y: u32, last_col: u16, out: &mut String) -> bool {
+    let (Ok(start), Ok(end)) = (
+        terminal.grid_ref(Point::Screen(PointCoordinate { x: 0, y })),
+        terminal.grid_ref(Point::Screen(PointCoordinate { x: last_col, y })),
+    ) else {
+        return false;
+    };
+    let sel = Selection::new(start, end, false);
+    let opts = FormatterOptions::new().with_selection(&sel).with_trim(true);
+    let Ok(mut formatter) = Formatter::new(terminal, opts) else {
+        return false;
+    };
+    let Ok(bytes) = formatter.format_alloc(None) else {
+        return false;
+    };
+    out.push_str(String::from_utf8_lossy(&bytes).trim_end_matches('\n'));
+    !out.is_empty()
+}
+
+/// Decode the shell's OSC 7 report into a plain filesystem path.
+///
+/// Shells emit `file://<host>/<percent-encoded path>`; the host part must be
+/// dropped and the path unescaped, otherwise restored sessions would try to
+/// `chdir` into something like `file://myhost/home/me`.
+pub fn pwd_to_path(raw: &str) -> String {
+    if !raw.starts_with("file://") {
+        return raw.to_string();
+    }
+    gtk4::gio::File::for_uri(raw)
+        .path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// Turn a word grabbed from the screen into an openable URI.
+///
+/// Recognises explicit schemes, bare `www.` hosts, and filesystem paths that
+/// actually exist (relative ones resolved against the shell's reported pwd).
+/// Returns `None` for ordinary words so Ctrl+click stays a no-op on prose.
+pub fn detect_link(word: &str, pwd: Option<&str>) -> Option<String> {
+    // Terminal output is full of trailing punctuation: `see https://x.dev.`
+    let word = word.trim_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\''
+            )
+    });
+    let word = word.trim_end_matches(['.', ':']);
+    if word.is_empty() {
+        return None;
+    }
+
+    const SCHEMES: &[&str] = &[
+        "http://", "https://", "ftp://", "file://", "mailto:", "ssh://", "git://",
+    ];
+    if SCHEMES.iter().any(|s| word.starts_with(s)) {
+        return Some(word.to_string());
+    }
+    if let Some(rest) = word.strip_prefix("www.")
+        && rest.contains('.')
+    {
+        return Some(format!("https://{word}"));
+    }
+    // A bare `user@host` reads as an email address.
+    if !word.contains('/') && word.matches('@').count() == 1 {
+        let (user, host) = word.split_once('@')?;
+        if !user.is_empty() && host.contains('.') && !host.starts_with('.') {
+            return Some(format!("mailto:{word}"));
+        }
+    }
+
+    // Paths: only offer them when they resolve to something real, otherwise
+    // every dotted word would look like a file.
+    let expanded = match word.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()?.join(rest),
+        None => std::path::PathBuf::from(word),
+    };
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::path::PathBuf::from(pwd.filter(|p| !p.is_empty())?).join(expanded)
+    };
+    candidate
+        .exists()
+        .then(|| format!("file://{}", candidate.display()))
 }
 
 /// Paint one Kitty graphics layer, logging (not propagating) failures so a bad
@@ -1331,9 +1619,10 @@ fn resolve_font_family(pango_ctx: &pango::Context, requested: &str) -> String {
     if requested_trimmed.eq_ignore_ascii_case("monospace") {
         return "monospace".into();
     }
-    let found = pango_ctx.list_families().into_iter().find(|f| {
-        f.name().eq_ignore_ascii_case(requested_trimmed)
-    });
+    let found = pango_ctx
+        .list_families()
+        .into_iter()
+        .find(|f| f.name().eq_ignore_ascii_case(requested_trimmed));
     match found {
         Some(f) if f.is_monospace() => requested_trimmed.to_string(),
         Some(_) => {
@@ -1387,4 +1676,114 @@ fn paint_error(cr: &cairo::Context, width: i32, height: i32, err: &anyhow::Error
     layout.set_width(width * pango::SCALE);
     pangocairo::functions::show_layout(cr, &layout);
     let _ = height;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_explicit_urls() {
+        assert_eq!(
+            detect_link("https://ghostty.org", None).as_deref(),
+            Some("https://ghostty.org")
+        );
+        // Trailing sentence punctuation must not end up in the URL.
+        assert_eq!(
+            detect_link("https://ghostty.org/docs.", None).as_deref(),
+            Some("https://ghostty.org/docs")
+        );
+        assert_eq!(
+            detect_link("(https://a.dev/x)", None).as_deref(),
+            Some("https://a.dev/x")
+        );
+        assert_eq!(
+            detect_link("www.example.com", None).as_deref(),
+            Some("https://www.example.com")
+        );
+        assert_eq!(
+            detect_link("dev@example.com", None).as_deref(),
+            Some("mailto:dev@example.com")
+        );
+    }
+
+    /// Ordinary words must not become links, otherwise Ctrl+click would fire
+    /// on prose and version numbers.
+    #[test]
+    fn ignores_plain_words() {
+        for word in ["hello", "0.1.5", "src/main.rs:12", "-rw-r--r--", "@reboot"] {
+            assert_eq!(detect_link(word, None), None, "{word} should not be a link");
+        }
+    }
+
+    /// Paths only become links when they actually exist on disk.
+    #[test]
+    fn detects_existing_paths_only() {
+        let dir = std::env::temp_dir().join("option-term-link-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("real.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        let abs = file.display().to_string();
+        assert_eq!(
+            detect_link(&abs, None).as_deref(),
+            Some(format!("file://{abs}").as_str())
+        );
+
+        // Same name, resolved relative to the shell's pwd.
+        let pwd = dir.display().to_string();
+        assert_eq!(
+            detect_link("real.txt", Some(&pwd)).as_deref(),
+            Some(format!("file://{}", file.display()).as_str())
+        );
+
+        assert_eq!(detect_link("ghost.txt", Some(&pwd)), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const COLS: u16 = 40;
+
+    fn terminal_with_text(lines: &[&str]) -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: COLS,
+            rows: 6,
+            max_scrollback: 100,
+        })
+        .unwrap();
+        terminal.resize(COLS, 6, 8, 16).unwrap();
+        for line in lines {
+            terminal.vt_write(line.as_bytes());
+            terminal.vt_write(b"\r\n");
+        }
+        terminal
+    }
+
+    #[test]
+    fn finds_matches_case_insensitively_with_coordinates() {
+        let terminal = terminal_with_text(&["hello world", "no match here", "Hello again"]);
+        let matches = search_terminal(&terminal, COLS, "hello");
+
+        assert_eq!(matches.len(), 2, "both rows should match: {matches:?}");
+        assert_eq!(matches[0].col, 0);
+        assert_eq!(matches[0].width, 5);
+        // Rows are distinct and ordered top to bottom.
+        assert!(matches[0].row < matches[1].row);
+    }
+
+    #[test]
+    fn finds_repeated_matches_on_one_row() {
+        let terminal = terminal_with_text(&["ab ab ab"]);
+        let matches = search_terminal(&terminal, COLS, "ab");
+        assert_eq!(matches.len(), 3);
+        assert_eq!(
+            matches.iter().map(|m| m.col).collect::<Vec<_>>(),
+            vec![0, 3, 6]
+        );
+    }
+
+    #[test]
+    fn empty_query_matches_nothing() {
+        let terminal = terminal_with_text(&["anything"]);
+        assert!(search_terminal(&terminal, COLS, "   ").is_empty());
+    }
 }

@@ -60,6 +60,10 @@ pub struct Config {
     /// Show the tab sidebar even with a single tab.
     pub sidebar_always: bool,
     pub theme: Theme,
+    /// Window/terminal background alpha, 0.0..=1.0 (Ghostty `background-opacity`).
+    pub background_opacity: f64,
+    /// Restore tabs/splits and their working directories on start.
+    pub session_restore: bool,
     pub background: RgbColor,
     pub foreground: RgbColor,
     pub cursor: RgbColor,
@@ -82,6 +86,8 @@ impl Default for Config {
             tabs_location: TabsLocation::Top,
             sidebar_always: false,
             theme: Theme::System,
+            background_opacity: 1.0,
+            session_restore: false,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
             cursor: rgb(0xff, 0xff, 0xff),
@@ -113,7 +119,10 @@ impl Config {
         cfg.tabs_location = TabsLocation::Left;
         cfg.source = path.clone();
         if let Err(err) = cfg.write_to(&path) {
-            tracing::warn!("could not write default config to {}: {err:#}", path.display());
+            tracing::warn!(
+                "could not write default config to {}: {err:#}",
+                path.display()
+            );
         } else {
             tracing::info!("generated default config at {}", path.display());
         }
@@ -155,10 +164,10 @@ impl Config {
             table.get(section)?.as_table()?.get(key)?.as_bool()
         };
 
-        if let Some(v) = str_at("font", "family") {
-            if !v.is_empty() {
-                cfg.font_family = v;
-            }
+        if let Some(v) = str_at("font", "family")
+            && !v.is_empty()
+        {
+            cfg.font_family = v;
         }
         if let Some(v) = num_at("font", "size") {
             cfg.font_size = v as f32;
@@ -195,6 +204,12 @@ impl Config {
         }
         if let Some(v) = str_at("window", "theme") {
             cfg.theme = Theme::parse(&v);
+        }
+        if let Some(v) = num_at("window", "background_opacity") {
+            cfg.background_opacity = v.clamp(0.15, 1.0);
+        }
+        if let Some(v) = bool_at("window", "session_restore") {
+            cfg.session_restore = v;
         }
         if let Some(v) = num_at("window", "padding_x") {
             cfg.padding_x = v;
@@ -286,6 +301,8 @@ text = "{cursor_text}"
 tabs = "{tabs}"     # top | left | right | hidden
 sidebar_always = {sidebar_always}   # show the sidebar even with a single tab
 theme = "{theme}"   # system | light | dark
+background_opacity = {opacity}   # 0.15 .. 1.0
+session_restore = {session_restore}   # restore tabs/splits and cwd on start
 padding_x = {pad_x}
 padding_y = {pad_y}
 
@@ -302,6 +319,8 @@ palette = [
             size = self.font_size,
             sidebar_always = self.sidebar_always,
             theme = self.theme.as_str(),
+            opacity = self.background_opacity,
+            session_restore = self.session_restore,
             blink = self.cursor_blink,
             cursor = hex(self.cursor),
             cursor_text = hex(self.cursor_text),
@@ -360,6 +379,11 @@ palette = [
                 "window-theme" => {
                     cfg.theme = Theme::parse(value);
                 }
+                "background-opacity" => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        cfg.background_opacity = v.clamp(0.15, 1.0);
+                    }
+                }
                 "cursor-style-blink" => {
                     if let Ok(v) = value.parse::<bool>() {
                         cfg.cursor_blink = v;
@@ -406,10 +430,10 @@ palette = [
                     }
                 }
                 "palette" => {
-                    if let Some((idx, color)) = parse_palette_entry(value) {
-                        if idx < 16 {
-                            cfg.palette[idx] = color;
-                        }
+                    if let Some((idx, color)) = parse_palette_entry(value)
+                        && idx < 16
+                    {
+                        cfg.palette[idx] = color;
                     }
                 }
                 _ => {}
@@ -559,16 +583,20 @@ mod tests {
     /// preferences silently reset on the next start.
     #[test]
     fn config_round_trips_through_toml() {
-        let mut cfg = Config::default();
-        cfg.font_family = "FiraCode Nerd Font".into();
-        cfg.font_size = 15.0;
-        cfg.cursor_style = CursorStyle::Bar;
-        cfg.cursor_blink = false;
-        cfg.tabs_location = TabsLocation::Right;
-        cfg.sidebar_always = true;
-        cfg.theme = Theme::Dark;
-        cfg.padding_x = 8.0;
-        cfg.padding_y = 6.0;
+        let mut cfg = Config {
+            font_family: "FiraCode Nerd Font".into(),
+            font_size: 15.0,
+            cursor_style: CursorStyle::Bar,
+            cursor_blink: false,
+            tabs_location: TabsLocation::Right,
+            sidebar_always: true,
+            theme: Theme::Dark,
+            background_opacity: 0.85,
+            session_restore: true,
+            padding_x: 8.0,
+            padding_y: 6.0,
+            ..Config::default()
+        };
         cfg.palette[3] = rgb(0x12, 0x34, 0x56);
 
         let dir = std::env::temp_dir().join("option-term-config-test");
@@ -584,6 +612,8 @@ mod tests {
         assert_eq!(back.tabs_location, cfg.tabs_location);
         assert_eq!(back.sidebar_always, cfg.sidebar_always);
         assert_eq!(back.theme, cfg.theme);
+        assert_eq!(back.background_opacity, cfg.background_opacity);
+        assert_eq!(back.session_restore, cfg.session_restore);
         assert_eq!(back.padding_x, cfg.padding_x);
         assert_eq!(back.padding_y, cfg.padding_y);
         assert_eq!(back.palette[3], cfg.palette[3]);
@@ -597,23 +627,29 @@ mod tests {
         use libghostty_vt::{Terminal, TerminalOptions, render::RenderState};
 
         let make = || {
-            Terminal::new(TerminalOptions { cols: 20, rows: 5, max_scrollback: 0 })
-                .expect("terminal")
+            Terminal::new(TerminalOptions {
+                cols: 20,
+                rows: 5,
+                max_scrollback: 0,
+            })
+            .expect("terminal")
         };
 
-        let mut cfg = Config::default();
-        cfg.cursor_blink = true;
+        let mut cfg = Config {
+            cursor_blink: true,
+            ..Config::default()
+        };
         let mut terminal = make();
         cfg.apply_cursor_to_terminal(&mut terminal).expect("apply");
         let mut state = RenderState::new().expect("render state");
         let snapshot = state.update(&terminal).expect("snapshot");
-        assert_eq!(snapshot.cursor_blinking().unwrap(), true);
+        assert!(snapshot.cursor_blinking().unwrap());
 
         cfg.cursor_blink = false;
         let mut terminal = make();
         cfg.apply_cursor_to_terminal(&mut terminal).expect("apply");
         let mut state = RenderState::new().expect("render state");
         let snapshot = state.update(&terminal).expect("snapshot");
-        assert_eq!(snapshot.cursor_blinking().unwrap(), false);
+        assert!(!snapshot.cursor_blinking().unwrap());
     }
 }

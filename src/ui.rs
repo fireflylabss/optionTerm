@@ -1,6 +1,9 @@
 //! Menus, context menu and dialogs (palette, preferences, shortcuts, about).
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gtk4::gdk;
 use gtk4::gio;
@@ -11,7 +14,7 @@ use libadwaita::prelude::*;
 use crate::{
     app::Pages,
     config::{Config, CursorStyle, TabsLocation, Theme},
-    terminal::TerminalView,
+    terminal::{Match, TerminalView},
 };
 
 /// (label, action, accel) for menus and the command palette.
@@ -24,7 +27,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Split Down", "win.split-down", "Ctrl+Shift+E"),
     ("Split Left", "win.split-left", "Ctrl+Shift+L"),
     ("Split Up", "win.split-up", "Ctrl+Shift+U"),
-    ("Toggle Split Zoom", "win.toggle-split-zoom", "Ctrl+Shift+Enter"),
+    (
+        "Toggle Split Zoom",
+        "win.toggle-split-zoom",
+        "Ctrl+Shift+Enter",
+    ),
     ("Equalize Splits", "win.equalize-splits", ""),
     ("Focus Split Left", "win.focus-split-left", "Ctrl+Alt+←"),
     ("Focus Split Right", "win.focus-split-right", "Ctrl+Alt+→"),
@@ -40,6 +47,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Increase Font Size", "win.zoom-in", "Ctrl++"),
     ("Decrease Font Size", "win.zoom-out", "Ctrl+-"),
     ("Default Font Size", "win.zoom-reset", "Ctrl+0"),
+    ("Find in Scrollback", "win.find", "Ctrl+Shift+F"),
+    ("Rename Tab", "win.rename-tab", "F2"),
     ("Reload Configuration", "win.reload-config", ""),
     ("Preferences", "win.preferences", "Ctrl+,"),
     ("Keyboard Shortcuts", "win.shortcuts", ""),
@@ -79,6 +88,7 @@ pub fn main_menu() -> gio::Menu {
     let tabs = gio::Menu::new();
     tabs.append(Some("New Tab"), Some("win.new-tab"));
     tabs.append(Some("Close Tab"), Some("win.close-tab"));
+    tabs.append(Some("Rename Tab"), Some("win.rename-tab"));
     tabs.append(Some("Next Tab"), Some("win.next-tab"));
     tabs.append(Some("Previous Tab"), Some("win.prev-tab"));
     menu.append_section(None, &tabs);
@@ -112,7 +122,10 @@ pub fn main_menu() -> gio::Menu {
     let cursor = gio::Menu::new();
     cursor.append(Some("Block Cursor"), Some("win.cursor-shape::block"));
     cursor.append(Some("Bar Cursor"), Some("win.cursor-shape::bar"));
-    cursor.append(Some("Underline Cursor"), Some("win.cursor-shape::underline"));
+    cursor.append(
+        Some("Underline Cursor"),
+        Some("win.cursor-shape::underline"),
+    );
     cursor.append(Some("Blinking Cursor"), Some("win.cursor-blink"));
     appearance.append_section(Some("Cursor"), &cursor);
 
@@ -127,6 +140,7 @@ pub fn main_menu() -> gio::Menu {
     // --- Tools ---
     let tools = gio::Menu::new();
     tools.append(Some("Command Palette"), Some("win.command-palette"));
+    tools.append(Some("Find in Scrollback"), Some("win.find"));
     tools.append(Some("Reload Configuration"), Some("win.reload-config"));
     tools.append(Some("Preferences"), Some("win.preferences"));
     menu.append_section(None, &tools);
@@ -162,6 +176,7 @@ fn context_menu() -> gio::Menu {
     menu.append_section(None, &tabs);
 
     let misc = gio::Menu::new();
+    misc.append(Some("Find in Scrollback"), Some("win.find"));
     misc.append(Some("Command Palette"), Some("win.command-palette"));
     misc.append(Some("Preferences"), Some("win.preferences"));
     menu.append_section(None, &misc);
@@ -190,6 +205,159 @@ pub fn attach_context_menu(view: &Rc<TerminalView>) {
         });
     }
     view.widget().add_controller(gesture);
+}
+
+/// Scrollback search bar (`Ctrl+Shift+F`).
+///
+/// Returned widget is meant to live in a `gtk::Revealer` above the terminal;
+/// `current_view` is queried lazily so the bar always searches the focused
+/// pane, even after the user switches tabs with the bar open.
+pub struct SearchBar {
+    pub widget: gtk4::SearchBar,
+    entry: gtk4::SearchEntry,
+}
+
+impl SearchBar {
+    pub fn new(current_view: Rc<dyn Fn() -> Option<Rc<TerminalView>>>) -> Self {
+        let entry = gtk4::SearchEntry::new();
+        entry.set_placeholder_text(Some("Search scrollback…"));
+        entry.set_hexpand(true);
+
+        let counter = gtk4::Label::new(None);
+        counter.add_css_class("dim-label");
+        counter.add_css_class("numeric");
+
+        let prev = gtk4::Button::from_icon_name("go-up-symbolic");
+        prev.set_tooltip_text(Some("Previous match (Shift+Enter)"));
+        prev.add_css_class("flat");
+        let next = gtk4::Button::from_icon_name("go-down-symbolic");
+        next.set_tooltip_text(Some("Next match (Enter)"));
+        next.add_css_class("flat");
+
+        let boxed = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+        boxed.append(&entry);
+        boxed.append(&counter);
+        boxed.append(&prev);
+        boxed.append(&next);
+
+        let bar = gtk4::SearchBar::builder()
+            .search_mode_enabled(false)
+            .show_close_button(true)
+            .child(&boxed)
+            .build();
+        bar.connect_entry(&entry);
+
+        // Matches are computed once per query and then just indexed into, so
+        // stepping through hits never re-scans the scrollback.
+        let matches: Rc<RefCell<Vec<Match>>> = Rc::new(RefCell::new(Vec::new()));
+        let index = Rc::new(Cell::new(0usize));
+
+        let refresh_counter = {
+            let counter = counter.clone();
+            let matches = matches.clone();
+            let index = index.clone();
+            Rc::new(move |query_empty: bool| {
+                let total = matches.borrow().len();
+                counter.set_text(&if query_empty {
+                    String::new()
+                } else if total == 0 {
+                    "0/0".into()
+                } else {
+                    format!("{}/{}", index.get() + 1, total)
+                });
+            })
+        };
+
+        let step = {
+            let matches = matches.clone();
+            let index = index.clone();
+            let current_view = current_view.clone();
+            let refresh_counter = refresh_counter.clone();
+            Rc::new(move |delta: isize| {
+                let total = matches.borrow().len();
+                if total == 0 {
+                    return;
+                }
+                let cur = index.get() as isize;
+                // Wrap around in both directions.
+                let next = (cur + delta).rem_euclid(total as isize) as usize;
+                index.set(next);
+                if let (Some(view), Some(m)) = (current_view(), matches.borrow().get(next).copied())
+                {
+                    view.reveal_match(&m);
+                }
+                refresh_counter(false);
+            })
+        };
+
+        {
+            let matches = matches.clone();
+            let index = index.clone();
+            let current_view = current_view.clone();
+            let refresh_counter = refresh_counter.clone();
+            entry.connect_search_changed(move |e| {
+                let query = e.text().to_string();
+                let found = match current_view() {
+                    Some(view) if !query.trim().is_empty() => view.search(&query),
+                    _ => Vec::new(),
+                };
+                let first = found.first().copied();
+                *matches.borrow_mut() = found;
+                index.set(0);
+                if let (Some(view), Some(m)) = (current_view(), first) {
+                    view.reveal_match(&m);
+                }
+                refresh_counter(query.trim().is_empty());
+            });
+        }
+        {
+            let step = step.clone();
+            entry.connect_activate(move |_| step(1));
+        }
+        {
+            let step = step.clone();
+            next.connect_clicked(move |_| step(1));
+        }
+        {
+            let step = step.clone();
+            prev.connect_clicked(move |_| step(-1));
+        }
+        {
+            // Shift+Enter walks backwards; Escape closes and returns focus to
+            // the terminal. The bar has no key-capture widget, so both have to
+            // be handled here.
+            let step = step.clone();
+            let bar_weak = bar.downgrade();
+            let current_view = current_view.clone();
+            let key = gtk4::EventControllerKey::new();
+            key.connect_key_pressed(move |_, keyval, _, modifier| {
+                if keyval == gdk::Key::Return && modifier.contains(gdk::ModifierType::SHIFT_MASK) {
+                    step(-1);
+                    return gtk4::glib::Propagation::Stop;
+                }
+                if keyval == gdk::Key::Escape {
+                    if let Some(bar) = bar_weak.upgrade() {
+                        bar.set_search_mode(false);
+                    }
+                    if let Some(view) = current_view() {
+                        view.focus();
+                    }
+                    return gtk4::glib::Propagation::Stop;
+                }
+                gtk4::glib::Propagation::Proceed
+            });
+            entry.add_controller(key);
+        }
+
+        Self { widget: bar, entry }
+    }
+
+    /// Open the bar and focus the entry; re-running the query if there is one.
+    pub fn open(&self) {
+        self.widget.set_search_mode(true);
+        self.entry.grab_focus();
+        self.entry.select_region(0, -1);
+    }
 }
 
 pub fn show_command_palette(window: &adw::ApplicationWindow) {
@@ -447,7 +615,38 @@ pub fn show_preferences(
         });
     }
     appearance.add(&padding_row);
+
+    let opacity_row = adw::SpinRow::with_range(15.0, 100.0, 5.0);
+    opacity_row.set_title("Background Opacity");
+    opacity_row.set_subtitle("Requires a compositor; applies on reload");
+    opacity_row.set_value(config.borrow().background_opacity * 100.0);
+    {
+        let update_all = update_all.clone();
+        opacity_row.connect_value_notify(move |row| {
+            let v = (row.value() / 100.0).clamp(0.15, 1.0);
+            update_all(Rc::new(move |cfg| cfg.background_opacity = v));
+        });
+    }
+    appearance.add(&opacity_row);
     page.add(&appearance);
+
+    // --- Session ---
+    let session_group = adw::PreferencesGroup::builder().title("Session").build();
+    let restore_row = adw::SwitchRow::builder()
+        .title("Restore Tabs on Start")
+        .subtitle("Reopens tabs, panes and their working directories")
+        .build();
+    restore_row.set_active(config.borrow().session_restore);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        restore_row.connect_active_notify(move |row| {
+            config.borrow_mut().session_restore = row.is_active();
+            save_config();
+        });
+    }
+    session_group.add(&restore_row);
+    page.add(&session_group);
 
     // --- Cursor ---
     let cursor_group = adw::PreferencesGroup::builder().title("Cursor").build();
@@ -508,7 +707,8 @@ pub fn show_preferences(
     {
         let uri = format!("file://{}", source.display());
         open_btn.connect_clicked(move |_| {
-            if let Err(err) = gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE)
+            if let Err(err) =
+                gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE)
             {
                 tracing::warn!("failed to open config file: {err}");
             }

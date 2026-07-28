@@ -104,7 +104,10 @@ fn to_cairo_bgra(data: &[u8], width: u32, height: u32, stride: usize) -> Option<
     let pixels = w.checked_mul(h)?;
     // The stored format is not always what `Image::format` reports (PNGs are
     // decoded to RGBA), so derive the channel count from the buffer length.
-    let channels = data.len().checked_div(pixels).filter(|c| (1..=4).contains(c))?;
+    let channels = data
+        .len()
+        .checked_div(pixels)
+        .filter(|c| (1..=4).contains(c))?;
 
     let mut out = vec![0u8; stride * h];
     for y in 0..h {
@@ -237,8 +240,7 @@ fn cached_surface<'a>(
         if width == 0 || height == 0 {
             return None;
         }
-        let stride =
-            cairo::Format::ARgb32.stride_for_width(width).ok()? as usize;
+        let stride = cairo::Format::ARgb32.stride_for_width(width).ok()? as usize;
         let bgra = to_cairo_bgra(data, width, height, stride)?;
         let surface = cairo::ImageSurface::create_for_data(
             bgra,
@@ -337,8 +339,7 @@ mod tests {
         let mut iter = PlacementIterator::new().expect("iterator");
         let mut cache = ImageCache::default();
 
-        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 64, 64)
-            .expect("surface");
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 64, 64).expect("surface");
         let cr = cairo::Context::new(&surface).expect("context");
         // Paint it black so any image pixel is a visible change.
         cr.set_source_rgb(0.0, 0.0, 0.0);

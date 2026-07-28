@@ -34,7 +34,13 @@ pub enum PtyError {
 }
 
 impl Pty {
-    pub fn spawn(cols: u16, rows: u16, cell_width: u16, cell_height: u16) -> std::io::Result<(Self, Child)> {
+    pub fn spawn(
+        cols: u16,
+        rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+        cwd: Option<&std::path::Path>,
+    ) -> std::io::Result<(Self, Child)> {
         let winsize = Winsize {
             ws_row: rows,
             ws_col: cols,
@@ -52,11 +58,17 @@ impl Pty {
                     },
                 };
                 let arg0 = shell.file_name().unwrap_or(shell.as_os_str());
-                let _ = Command::new(&shell)
+                let mut command = Command::new(&shell);
+                command
                     .env("TERM", "xterm-ghostty")
                     .env("COLORTERM", "truecolor")
-                    .arg0(arg0)
-                    .exec();
+                    .arg0(arg0);
+                // Restored sessions start where they left off; a stale
+                // directory must not stop the shell from launching.
+                if let Some(cwd) = cwd.filter(|p| p.is_dir()) {
+                    command.current_dir(cwd);
+                }
+                let _ = command.exec();
                 std::process::exit(127);
             }
             ForkptyResult::Parent { child, master } => {

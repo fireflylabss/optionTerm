@@ -93,12 +93,11 @@ impl Input {
             .encode_to_vec(&self.event, &mut self.buf)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-        if self.buf.is_empty() {
-            if let Some(t) = text {
-                if !mods.intersects(key::Mods::CTRL | key::Mods::ALT | key::Mods::SUPER) {
-                    self.buf.extend_from_slice(t.as_bytes());
-                }
-            }
+        if self.buf.is_empty()
+            && let Some(t) = text
+            && !mods.intersects(key::Mods::CTRL | key::Mods::ALT | key::Mods::SUPER)
+        {
+            self.buf.extend_from_slice(t.as_bytes());
         }
         Ok(())
     }
@@ -143,10 +142,10 @@ fn gdk_mods(state: gdk::ModifierType) -> key::Mods {
 }
 
 fn unshifted_codepoint(keyval: gdk::Key, text: Option<&str>) -> char {
-    if let Some(t) = text {
-        if let Some(c) = t.chars().next() {
-            return c.to_ascii_lowercase();
-        }
+    if let Some(t) = text
+        && let Some(c) = t.chars().next()
+    {
+        return c.to_ascii_lowercase();
     }
     keyval
         .to_unicode()
@@ -312,7 +311,10 @@ fn gdk_to_key(keyval: gdk::Key) -> Key {
         return Key::Numpad9;
     }
 
-    let name = keyval.name().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+    let name = keyval
+        .name()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
     match name.as_str() {
         "a" => Key::A,
         "b" => Key::B,
