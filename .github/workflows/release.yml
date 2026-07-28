@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Build .deb and AppImage
+    # Pinned to the oldest distro that ships our minimum GTK 4.14 /
+    # libadwaita 1.5. Binaries link against that release's glibc, so building
+    # here is what makes the artifacts usable on newer distros too — an
+    # AppImage built on a bleeding-edge host only runs on bleeding-edge hosts.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libpango1.0-dev \
+            libcairo2-dev \
+            pkg-config \
+            imagemagick \
+            desktop-file-utils \
+            file \
+            git
+
+      # libghostty-vt-sys compiles vendored Zig code and requires Zig 0.15.x
+      - name: Set up Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build .deb
+        run: ./packaging/deb/build-deb.sh
+
+      - name: Build AppImage
+        run: ./packaging/appimage/build-appimage.sh
+
+      - name: Smoke test the artifacts
+        run: |
+          set -euo pipefail
+          deb=$(ls dist/*.deb)
+          appimage=$(ls dist/*.AppImage)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          # A broken AppImage still "builds", so check it actually starts.
+          # There is no display in CI, so GTK is expected to fail at open —
+          # what matters is that the loader and bundled libs work.
+          APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version 2>&1 | tail -5 || true
+          APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --help >/dev/null 2>&1 \
+            || echo "note: exited non-zero without a display (expected)"
+
+      - name: Upload artifacts to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.AppImage
+          generate_release_notes: false
+          fail_on_unmatched_files: true

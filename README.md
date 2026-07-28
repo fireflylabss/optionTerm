@@ -29,13 +29,14 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 
 - Rust **1.90+**
 - Zig **0.15.x** (required by `libghostty-vt-sys`; 0.16 will not work)
+- `git` (the `libghostty-vt-sys` build script fetches the Ghostty sources)
 - GTK **4.14+**, libadwaita **1.5+**
 - pkg-config, pango, cairo
 
 ### Arch / CachyOS
 
 ```bash
-sudo pacman -S gtk4 libadwaita pango cairo pkgconf
+sudo pacman -S gtk4 libadwaita pango cairo pkgconf git
 # Make sure zig 0.15.x is on PATH, e.g.:
 # export PATH="/tmp/zig151/zig-0.15.2:$PATH"
 ```
@@ -48,6 +49,25 @@ sudo pacman -S gtk4 libadwaita pango cairo pkgconf
 yay -S option-term
 # or
 paru -S option-term
+```
+
+### Debian / Ubuntu
+
+Download the `.deb` from the [latest release](https://github.com/fireflylabss/optionTerm/releases) and install it:
+
+```bash
+sudo apt install ./option-term_*_amd64.deb
+```
+
+Requires GTK 4.14+ and libadwaita 1.5+ (Ubuntu 24.04+, Debian 13+).
+
+### AppImage
+
+Grab the `.AppImage` from the [latest release](https://github.com/fireflylabss/optionTerm/releases), make it executable and run it:
+
+```bash
+chmod +x optionTerm-*-x86_64.AppImage
+./optionTerm-*-x86_64.AppImage
 ```
 
 ### From source
