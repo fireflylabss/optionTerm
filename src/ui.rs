@@ -542,6 +542,7 @@ pub fn show_shortcuts(window: &adw::ApplicationWindow) {
 pub fn show_about(window: &adw::ApplicationWindow) {
     let about = adw::AboutDialog::builder()
         .application_name("optionTerm")
+        .application_icon("utilities-terminal")
         .developer_name("AE Firefly Labs")
         .version(env!("CARGO_PKG_VERSION"))
         .license_type(gtk4::License::Apache20)
