@@ -26,12 +26,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Application icon assets under `assets/` and a `scripts/install-desktop.sh` helper for local icon/desktop installation.
 - `AGENTS.md` documenting architecture, build setup, and smoke-test workflow.
 
-### Changed
-
-- License: **MIT → Apache-2.0**.
-- Repository links updated to `https://github.com/fireflylabss/optionTerm`.
-- Reverted the `.desktop`/app icon to `utilities-terminal` for the public release; custom assets remain available under `assets/` for local installs.
-
 ### Notes
 
 - Requires **Zig 0.15.2** in `PATH` at build time (`libghostty-vt-sys`).
