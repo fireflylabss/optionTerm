@@ -24,6 +24,10 @@ pub enum Phase {
     ImagesBelow,
     /// The row/cell loop: backgrounds, glyphs, decorations.
     Cells,
+    /// Nested inside `Cells`: only the Pango layout + `show_layout` per cell.
+    /// Timing this costs two `Instant::now()` per glyph, so it inflates `cells`
+    /// by a percent or so; it is here to size the win from batching/caching.
+    Glyphs,
     /// Non-block cursor shapes drawn on top.
     Cursor,
     /// Kitty placements above the text layer.
@@ -31,11 +35,12 @@ pub enum Phase {
 }
 
 impl Phase {
-    const ALL: [Phase; 6] = [
+    const ALL: [Phase; 7] = [
         Self::Clear,
         Self::Setup,
         Self::ImagesBelow,
         Self::Cells,
+        Self::Glyphs,
         Self::Cursor,
         Self::ImagesAbove,
     ];
@@ -46,6 +51,7 @@ impl Phase {
             Self::Setup => "setup",
             Self::ImagesBelow => "img_below",
             Self::Cells => "cells",
+            Self::Glyphs => "  └ pango",
             Self::Cursor => "cursor",
             Self::ImagesAbove => "img_above",
         }
@@ -87,6 +93,18 @@ impl Frame {
         let now = Instant::now();
         self.sample.phases[phase as usize] += now - last;
         self.last = Some(now);
+    }
+
+    /// Opens a nested measurement; pair with [`Frame::add`].
+    pub fn nested(&mut self) -> Option<Instant> {
+        self.start.map(|_| Instant::now())
+    }
+
+    /// Charges a nested block to `phase` without disturbing the mark cursor.
+    pub fn add(&mut self, phase: Phase, since: Option<Instant>) {
+        if let Some(at) = since {
+            self.sample.phases[phase as usize] += at.elapsed();
+        }
     }
 
     pub fn count_cell(&mut self) {
@@ -256,10 +274,18 @@ mod tests {
 
     #[test]
     fn percentiles_track_the_sorted_input() {
-        let s = Stats::of((1..=100).map(|n| Duration::from_millis(n)));
-        assert_eq!(s.p50, 50.0);
-        assert_eq!(s.max, 100.0);
+        // Nearest-rank over indices 0..=99: p50 lands on index 50, not 49.
+        let s = Stats::of((1..=100).map(Duration::from_millis));
+        assert_eq!(s.p50, 51.0);
         assert_eq!(s.p99, 99.0);
+        assert_eq!(s.max, 100.0);
+        assert_eq!(s.sum, (1..=100).sum::<u64>() as f64);
+    }
+
+    #[test]
+    fn an_empty_window_is_all_zeroes() {
+        let s = Stats::of(std::iter::empty());
+        assert_eq!((s.p50, s.p99, s.max, s.sum), (0.0, 0.0, 0.0, 0.0));
     }
 
     #[test]

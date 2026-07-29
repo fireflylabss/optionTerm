@@ -1396,11 +1396,13 @@ impl Session {
                             (false, false) => font,
                         };
                         frame.count_glyph();
+                        let timed = frame.nested();
                         layout.set_font_description(Some(desc));
                         layout.set_text(&text);
                         // Monospace terminals left-align glyphs in the cell.
                         cr.move_to(x, y);
                         pangocairo::functions::show_layout(cr, &layout);
+                        frame.add(Phase::Glyphs, timed);
 
                         if style.underline != Underline::None {
                             cr.set_line_width(1.0);

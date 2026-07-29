@@ -8,6 +8,25 @@
 - O warning `AdwTabBox reported min width -6` no startup é bug conhecido e inofensivo do libadwaita.
 - Testes: `PATH="/tmp/zig151/zig-0.15.2:$PATH" cargo test --release`.
 
+## Medindo o render
+- `OPTION_TERM_PROFILE=1` liga o `src/profile.rs`: resumo por fase de `Session::paint`
+  (p50/p99, células e glifos por frame) a cada 120 frames **ou** 1,5 s. Desligado, custa
+  um `bool`. O `Drop` não é garantido (a `Session` fica presa em closures do GTK), por isso
+  o gatilho por tempo existe.
+- `scripts/bench-render.sh [static|scroll|flood] [--ansi]` — usa um `HOME` isolado em
+  `target/bench/home` para gerar config/sessão do zero, então a janela sempre abre em
+  960x640 e o grid (86x24) é comparável entre runs. `$SHELL` aponta pro
+  `scripts/bench-workload.py`, que se dimensiona pelo PTY e não usa RNG nem relógio.
+- **Baseline 0.1.5 (86x24, 2064 células, monospace 13):** `paint` p50 ≈ **10,2 ms**,
+  dos quais **97% é o Pango** (`layout.set_text` + `show_layout` por célula, ~4,8 µs
+  por glifo). Cairo puro (fundo, retângulos, decorações, imagens) é ~3%.
+  Cores ANSI a cada 8 células não mudam nada (9,66 vs 9,92 ms): o custo é **por célula**,
+  não por troca de estilo.
+  ⚠️ Conclusão: trocar Cairo→GSK **não resolve** — `Snapshot::append_layout` também
+  recebe um `pango::Layout`. O ganho está em agrupar runs e cachear glifos.
+- No modo `flood` a fonte fd do PTY **starva o frame clock**: ~1 fps, 2 frames em 1,5 s.
+  Throughput e latência de render são problemas separados; não meça um com o outro.
+
 ## Empacotamento
 - `packaging/deb/build-deb.sh` — usa `dpkg-deb` quando existe, senão monta o `.deb`
   com `ar`+`tar` (permite gerar em Arch/Fedora).
@@ -57,10 +76,21 @@
   rode `cargo fmt` **depois** do clippy.
 
 ## TODO
-- [ ] **Renderer GPU** (`GskRenderNode`/`snapshot` no lugar do Cairo). É uma reescrita
-      completa do `Session::paint` (glifos, seleção, cursor, imagens kitty) e deve ser
-      feita **isolada, na sua própria release**, com comparação de frame antes/depois.
-      O Cairo vira gargalo com imagens grandes e scroll rápido.
+- [ ] **Pipeline de texto** (mede-se com `scripts/bench-render.sh`, ver "Medindo o render").
+      Ordem definida pela medição, do maior retorno pro menor:
+      1. Agrupar células contíguas de mesmo `(estilo, fg)` numa única run de
+         `set_text`/`show_layout`, e os fundos em retângulos por run. Só vale pra
+         células de largura 1 com avanço == `cell_w`; CJK/emoji continuam per-cell.
+      2. Cache de glifos por `(grafema, estilo)` guardando o `GlyphString`, desenhado
+         com `show_glyph_string`. Tira o shaping do frame — e é a infra que permite
+         ligaduras (hoje há um `disable_ligatures()` porque o modelo é per-cell).
+      3. Damage tracking: os 20+ `queue_draw()` repintam a superfície inteira; até o
+         piscar do cursor custa um frame cheio.
+      4. Só então **GSK/GPU** (`GskRenderNode`/`snapshot` no lugar do Cairo), release
+         isolada, com comparação de frame antes/depois. Exige um widget próprio
+         (`ObjectSubclass` + `WidgetImpl::snapshot`): `DrawingArea` só expõe Cairo, e
+         hoje ele está cravado em ~14 assinaturas de `terminal.rs`. Vale pelas imagens
+         Kitty (texture nodes) e pelo atlas de glifos do GSK, **não** pelos 97% do Pango.
 - [ ] Respeitar `gtk-enable-animations`, `gtk-font-name` no chrome e `text-scaling-factor`.
 - [ ] `gtk-decoration-layout` dinâmico (hoje só o padrão do sistema no startup).
 - [ ] Mais chaves do Ghostty: `gtk-titlebar`, `gtk-wide-tabs`, `window-decoration`.
