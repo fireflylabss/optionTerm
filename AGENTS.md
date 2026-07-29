@@ -18,12 +18,22 @@
   960x640 e o grid (86x24) é comparável entre runs. `$SHELL` aponta pro
   `scripts/bench-workload.py`, que se dimensiona pelo PTY e não usa RNG nem relógio.
 - **Baseline 0.1.5 (86x24, 2064 células, monospace 13):** `paint` p50 ≈ **10,2 ms**,
-  dos quais **97% é o Pango** (`layout.set_text` + `show_layout` por célula, ~4,8 µs
+  dos quais **97% era o Pango** (`layout.set_text` + `show_layout` por célula, ~4,8 µs
   por glifo). Cairo puro (fundo, retângulos, decorações, imagens) é ~3%.
-  Cores ANSI a cada 8 células não mudam nada (9,66 vs 9,92 ms): o custo é **por célula**,
-  não por troca de estilo.
-  ⚠️ Conclusão: trocar Cairo→GSK **não resolve** — `Snapshot::append_layout` também
+  ⚠️ Conclusão: trocar Cairo→GSK **não resolveria** — `Snapshot::append_layout` também
   recebe um `pango::Layout`. O ganho está em agrupar runs e cachear glifos.
+- **Depois do agrupamento em runs** (`BgRuns`/`TextRuns` em `terminal.rs`), mesmo grid:
+
+  | workload | antes | depois | runs/frame |
+  |---|---|---|---|
+  | `static` | 10,23 ms | **1,14 ms** | 2063 → 24 (uma por linha) |
+  | `scroll` | 9,70 ms | **1,05 ms** | 1977 → 23 |
+  | `static --ansi` | 9,98 ms | **2,41 ms** | 2063 → 264 |
+
+  `glyphs/frame` não muda em nenhum caso — nada deixou de ser desenhado.
+  Cor não custa nada por si: no baseline ANSI dava 9,66 vs 9,92 ms. Ela só importa
+  **agora**, porque troca de estilo quebra run (264 runs em vez de 24). É o teto que
+  o cache de glifos vai remover.
 - No modo `flood` a fonte fd do PTY **starva o frame clock**: ~1 fps, 2 frames em 1,5 s.
   Throughput e latência de render são problemas separados; não meça um com o outro.
 
@@ -78,9 +88,14 @@
 ## TODO
 - [ ] **Pipeline de texto** (mede-se com `scripts/bench-render.sh`, ver "Medindo o render").
       Ordem definida pela medição, do maior retorno pro menor:
-      1. Agrupar células contíguas de mesmo `(estilo, fg)` numa única run de
-         `set_text`/`show_layout`, e os fundos em retângulos por run. Só vale pra
-         células de largura 1 com avanço == `cell_w`; CJK/emoji continuam per-cell.
+      1. ~~Agrupar células contíguas em runs~~ — feito (`BgRuns`/`TextRuns`).
+         `is_batchable` decide: só grafema único de largura 1 e sem decoração entra
+         numa run; CJK, clusters compostos, sublinhado e tachado seguem no caminho
+         per-cell, que ficou intacto. Células vazias viram `gap` e só materializam
+         espaços se a run continuar, então tela vazia continua de graça.
+         O loop agora faz **duas passadas por linha** (fundos, depois texto): assim
+         nenhum glifo é cortado pelo fundo da célula seguinte, o que a ordem
+         intercalada antiga permitia.
       2. Cache de glifos por `(grafema, estilo)` guardando o `GlyphString`, desenhado
          com `show_glyph_string`. Tira o shaping do frame — e é a infra que permite
          ligaduras (hoje há um `disable_ligatures()` porque o modelo é per-cell).

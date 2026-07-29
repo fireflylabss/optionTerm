@@ -67,8 +67,11 @@ struct Sample {
     /// Wall clock since the previous frame, i.e. the effective repaint period.
     interval: Duration,
     cells: u32,
-    /// Pango layout + `show_layout` round trips, the cost we suspect dominates.
+    /// Cells that drew text. Independent of how they were batched.
     glyphs: u32,
+    /// Pango round trips: `set_text` + `show_layout`. This is the cost that
+    /// dominates a frame, so `glyphs / runs` is the batching win.
+    runs: u32,
 }
 
 /// Accumulates one frame's timings. Inert unless profiling is on.
@@ -116,6 +119,12 @@ impl Frame {
     pub fn count_glyph(&mut self) {
         if self.start.is_some() {
             self.sample.glyphs += 1;
+        }
+    }
+
+    pub fn count_run(&mut self) {
+        if self.start.is_some() {
+            self.sample.runs += 1;
         }
     }
 }
@@ -195,9 +204,16 @@ impl Profiler {
         );
         let cells = self.samples.iter().map(|s| s.cells as u64).sum::<u64>() / n as u64;
         let glyphs = self.samples.iter().map(|s| s.glyphs as u64).sum::<u64>() / n as u64;
+        let runs = self.samples.iter().map(|s| s.runs as u64).sum::<u64>() / n as u64;
+        let batch = if runs > 0 {
+            glyphs as f64 / runs as f64
+        } else {
+            0.0
+        };
 
         tracing::info!(
             "frames={n} grid={cols}x{rows} cells/frame={cells} glyphs/frame={glyphs} \
+             runs/frame={runs} ({batch:.1} glyphs/run) \
              paint p50={:.2}ms p99={:.2}ms max={:.2}ms | period p50={:.2}ms (~{:.0} fps)",
             total.p50,
             total.p99,

@@ -29,8 +29,9 @@ mkdir -p "$OUT"
 SHIM="$OUT/bench-shell.sh"
 cat > "$SHIM" <<EOF
 #!/bin/sh
-# Stands in for \$SHELL so the workload runs without any interaction.
-exec python3 "$ROOT/scripts/bench-workload.py" $MODE $*
+# Stands in for \$SHELL so the workload runs without any interaction. Its stderr
+# would otherwise land on the PTY, where it is invisible to the harness.
+exec python3 "$ROOT/scripts/bench-workload.py" $MODE $* 2>"$OUT/workload.err"
 EOF
 chmod +x "$SHIM"
 

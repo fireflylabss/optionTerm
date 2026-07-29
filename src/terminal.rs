@@ -22,19 +22,20 @@ use libghostty_vt::{
         SelectWordOptions, Selection,
         gesture::{DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent},
     },
-    style::{RgbColor, Underline},
+    style::{RgbColor, Style, Underline},
     terminal::{
         ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, ModeKind,
         Point, PointCoordinate, PointSpace, PrimaryDeviceAttributes, ScrollViewport,
         SecondaryDeviceAttributes, SizeReportSize,
     },
+    unicode::codepoint_width,
 };
 
 use crate::{
     config::{Config, CursorStyle},
     graphics,
     input::Input,
-    profile::{Phase, Profiler},
+    profile::{Frame, Phase, Profiler},
     pty::{self, Child, Pty, PtyError},
 };
 
@@ -1324,103 +1325,121 @@ impl Session {
             .map_err(|e| anyhow!("{e:?}"))?;
         let mut row_idx = 0u16;
         let mut text = String::with_capacity(16);
+        let mut bgs = BgRuns::new(cr, cell_h);
+        let mut runs = TextRuns::new(cr, &layout, [font, font_bold, font_italic, font_bi]);
 
         while let Some(row) = row_it.next() {
             let y = pad_y + row_idx as f64 * cell_h;
+            let cursor_col = block_cursor_cell
+                .filter(|(_, cy)| u32::from(*cy) == u32::from(row_idx))
+                .map(|(cx, _)| u32::from(cx));
+
+            // Pass 1: every background on the row, merged into as few rectangles
+            // as possible. Covering the whole row first also means a glyph can no
+            // longer be clipped by the next cell's background, which the old
+            // interleaved order allowed.
+            {
+                let mut cell_it = self.cell_it.update(row).map_err(|e| anyhow!("{e:?}"))?;
+                let mut col_idx = 0u16;
+                while let Some(cell) = cell_it.next() {
+                    let bg = if cursor_col == Some(u32::from(col_idx)) {
+                        Some(cursor_color)
+                    } else if cell.is_selected().unwrap_or(false) {
+                        Some(self.config.selection_background)
+                    } else {
+                        cell.bg_color().ok().flatten()
+                    };
+                    bgs.push(pad_x + col_idx as f64 * cell_w, y, cell_w, bg);
+                    col_idx = col_idx.saturating_add(1);
+                }
+                bgs.flush();
+            }
+
+            // Pass 2: text.
             let mut cell_it = self.cell_it.update(row).map_err(|e| anyhow!("{e:?}"))?;
             let mut col_idx = 0u16;
-
             while let Some(cell) = cell_it.next() {
                 frame.count_cell();
                 let x = pad_x + col_idx as f64 * cell_w;
-                let selected = cell.is_selected().unwrap_or(false);
-                let graphemes = cell.graphemes_len().unwrap_or(0);
+                let at_block_cursor = cursor_col == Some(u32::from(col_idx));
+
+                if cell.graphemes_len().unwrap_or(0) == 0 {
+                    runs.blank();
+                    col_idx = col_idx.saturating_add(1);
+                    continue;
+                }
+                text.clear();
+                let _ = cell.graphemes_utf8(&mut text);
+                if text.is_empty() || text == " " {
+                    runs.blank();
+                    col_idx = col_idx.saturating_add(1);
+                    continue;
+                }
+
                 let style = cell.style().unwrap_or_default();
-                let at_block_cursor = block_cursor_cell.map(|(cx, cy)| (cx as u32, cy as u32))
-                    == Some((col_idx as u32, row_idx as u32));
-                let (mut fg, bg_cell) = if selected {
-                    (
-                        self.config.selection_foreground,
-                        Some(self.config.selection_background),
-                    )
+                let mut draw_fg = if at_block_cursor {
+                    self.config.cursor_text
+                } else if cell.is_selected().unwrap_or(false) {
+                    self.config.selection_foreground
                 } else {
-                    (
-                        cell.fg_color().ok().flatten().unwrap_or(colors.foreground),
-                        cell.bg_color().ok().flatten(),
-                    )
+                    cell.fg_color().ok().flatten().unwrap_or(colors.foreground)
                 };
-
-                if let Some(bgc) = bg_cell {
-                    cr.set_source_rgb(
-                        bgc.r as f64 / 255.0,
-                        bgc.g as f64 / 255.0,
-                        bgc.b as f64 / 255.0,
-                    );
-                    cr.rectangle(x, y, cell_w, cell_h);
-                    cr.fill().ok();
+                if style.faint {
+                    draw_fg = RgbColor {
+                        r: draw_fg.r / 2,
+                        g: draw_fg.g / 2,
+                        b: draw_fg.b / 2,
+                    };
                 }
 
-                if at_block_cursor {
-                    cr.set_source_rgb(
-                        cursor_color.r as f64 / 255.0,
-                        cursor_color.g as f64 / 255.0,
-                        cursor_color.b as f64 / 255.0,
-                    );
-                    cr.rectangle(x, y, cell_w, cell_h);
-                    cr.fill().ok();
-                    fg = self.config.cursor_text;
+                let pen = Pen {
+                    fg: draw_fg,
+                    bold: style.bold,
+                    italic: style.italic,
+                };
+                frame.count_glyph();
+                if is_batchable(&text, &style) {
+                    runs.push(x, y, pen, &text, &mut frame);
+                    col_idx = col_idx.saturating_add(1);
+                    continue;
                 }
 
-                if graphemes > 0 {
-                    text.clear();
-                    let _ = cell.graphemes_utf8(&mut text);
-                    if !text.is_empty() && text != " " {
-                        let mut draw_fg = fg;
-                        if style.faint {
-                            draw_fg = RgbColor {
-                                r: draw_fg.r / 2,
-                                g: draw_fg.g / 2,
-                                b: draw_fg.b / 2,
-                            };
-                        }
-                        cr.set_source_rgb(
-                            draw_fg.r as f64 / 255.0,
-                            draw_fg.g as f64 / 255.0,
-                            draw_fg.b as f64 / 255.0,
-                        );
+                // Decorated, wide or composed cells keep the per-cell path, so
+                // they stay pixel-identical to before.
+                runs.flush(&mut frame);
+                frame.count_run();
+                let timed = frame.nested();
+                cr.set_source_rgb(
+                    draw_fg.r as f64 / 255.0,
+                    draw_fg.g as f64 / 255.0,
+                    draw_fg.b as f64 / 255.0,
+                );
+                layout.set_font_description(Some(
+                    [font, font_bold, font_italic, font_bi][pen.font()],
+                ));
+                layout.set_text(&text);
+                // Monospace terminals left-align glyphs in the cell.
+                cr.move_to(x, y);
+                pangocairo::functions::show_layout(cr, &layout);
+                frame.add(Phase::Glyphs, timed);
 
-                        let desc = match (style.bold, style.italic) {
-                            (true, true) => font_bi,
-                            (true, false) => font_bold,
-                            (false, true) => font_italic,
-                            (false, false) => font,
-                        };
-                        frame.count_glyph();
-                        let timed = frame.nested();
-                        layout.set_font_description(Some(desc));
-                        layout.set_text(&text);
-                        // Monospace terminals left-align glyphs in the cell.
-                        cr.move_to(x, y);
-                        pangocairo::functions::show_layout(cr, &layout);
-                        frame.add(Phase::Glyphs, timed);
-
-                        if style.underline != Underline::None {
-                            cr.set_line_width(1.0);
-                            cr.move_to(x, y + cell_h - 1.0);
-                            cr.line_to(x + cell_w, y + cell_h - 1.0);
-                            cr.stroke().ok();
-                        }
-                        if style.strikethrough {
-                            cr.set_line_width(1.0);
-                            cr.move_to(x, y + cell_h / 2.0);
-                            cr.line_to(x + cell_w, y + cell_h / 2.0);
-                            cr.stroke().ok();
-                        }
-                    }
+                if style.underline != Underline::None {
+                    cr.set_line_width(1.0);
+                    cr.move_to(x, y + cell_h - 1.0);
+                    cr.line_to(x + cell_w, y + cell_h - 1.0);
+                    cr.stroke().ok();
+                }
+                if style.strikethrough {
+                    cr.set_line_width(1.0);
+                    cr.move_to(x, y + cell_h / 2.0);
+                    cr.line_to(x + cell_w, y + cell_h / 2.0);
+                    cr.stroke().ok();
                 }
 
                 col_idx = col_idx.saturating_add(1);
             }
+            // Runs never span rows.
+            runs.flush(&mut frame);
             row_idx = row_idx.saturating_add(1);
         }
         frame.mark(Phase::Cells);
@@ -1473,6 +1492,172 @@ impl Session {
         let (cols, rows) = (self.cols, self.rows);
         self.profiler.end(frame, cols, rows);
         Ok(())
+    }
+}
+
+/// Merges horizontally adjacent cells that share a background into one
+/// rectangle, instead of one `rectangle`+`fill` per cell.
+struct BgRuns<'a> {
+    cr: &'a cairo::Context,
+    cell_height: f64,
+    /// `(x, y, width, colour)` of the run being accumulated.
+    open: Option<(f64, f64, f64, RgbColor)>,
+}
+
+impl<'a> BgRuns<'a> {
+    fn new(cr: &'a cairo::Context, cell_height: f64) -> Self {
+        Self {
+            cr,
+            cell_height,
+            open: None,
+        }
+    }
+
+    fn push(&mut self, x: f64, y: f64, width: f64, color: Option<RgbColor>) {
+        match (&mut self.open, color) {
+            // Same colour and butted up against the previous cell: extend.
+            (Some((_, run_y, run_w, run_c)), Some(c))
+                if *run_c == c && (*run_y - y).abs() < f64::EPSILON =>
+            {
+                *run_w += width;
+            }
+            (_, Some(c)) => {
+                self.flush();
+                self.open = Some((x, y, width, c));
+            }
+            (_, None) => self.flush(),
+        }
+    }
+
+    fn flush(&mut self) {
+        let Some((x, y, w, c)) = self.open.take() else {
+            return;
+        };
+        self.cr
+            .set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0);
+        self.cr.rectangle(x, y, w, self.cell_height);
+        self.cr.fill().ok();
+    }
+}
+
+/// Batches adjacent cells that share a colour and font into a single Pango run.
+///
+/// Shaping once per run rather than once per cell is the whole point: the
+/// per-cell round trip was measured at 97% of a frame. Only cells that are
+/// guaranteed to advance by exactly one cell width may join a run, so the
+/// grid stays intact; anything else is drawn by the caller's slow path.
+struct TextRuns<'a> {
+    cr: &'a cairo::Context,
+    layout: &'a pango::Layout,
+    /// Indexed by `bold as usize | (italic as usize) << 1`.
+    fonts: [&'a pango::FontDescription; 4],
+    text: String,
+    open: Option<OpenRun>,
+}
+
+/// Everything that has to match for two cells to share a run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Pen {
+    fg: RgbColor,
+    bold: bool,
+    italic: bool,
+}
+
+impl Pen {
+    fn font(self) -> usize {
+        usize::from(self.bold) | usize::from(self.italic) << 1
+    }
+}
+
+struct OpenRun {
+    x: f64,
+    y: f64,
+    pen: Pen,
+    /// Blank cells seen since the last glyph. Only turned into spaces if the
+    /// run actually continues, so trailing blanks cost nothing — which matters
+    /// because a mostly empty screen is mostly blanks.
+    gap: usize,
+}
+
+impl<'a> TextRuns<'a> {
+    fn new(
+        cr: &'a cairo::Context,
+        layout: &'a pango::Layout,
+        fonts: [&'a pango::FontDescription; 4],
+    ) -> Self {
+        Self {
+            cr,
+            layout,
+            fonts,
+            text: String::with_capacity(256),
+            open: None,
+        }
+    }
+
+    /// A cell with nothing to draw. Keeps the run alive so `a  b` stays one run.
+    fn blank(&mut self) {
+        if let Some(run) = self.open.as_mut() {
+            run.gap += 1;
+        }
+    }
+
+    fn push(&mut self, x: f64, y: f64, pen: Pen, grapheme: &str, frame: &mut Frame) {
+        let extends = self
+            .open
+            .as_ref()
+            .is_some_and(|run| run.pen == pen && run.y == y);
+        if !extends {
+            self.flush(frame);
+            self.open = Some(OpenRun { x, y, pen, gap: 0 });
+            self.text.clear();
+        }
+        if let Some(run) = self.open.as_mut() {
+            for _ in 0..std::mem::take(&mut run.gap) {
+                self.text.push(' ');
+            }
+        }
+        self.text.push_str(grapheme);
+    }
+
+    fn flush(&mut self, frame: &mut Frame) {
+        let Some(run) = self.open.take() else { return };
+        if self.text.is_empty() {
+            return;
+        }
+        frame.count_run();
+        let timed = frame.nested();
+        self.cr.set_source_rgb(
+            run.pen.fg.r as f64 / 255.0,
+            run.pen.fg.g as f64 / 255.0,
+            run.pen.fg.b as f64 / 255.0,
+        );
+        self.layout
+            .set_font_description(Some(self.fonts[run.pen.font()]));
+        self.layout.set_text(&self.text);
+        // Monospace terminals left-align glyphs in the cell.
+        self.cr.move_to(run.x, run.y);
+        pangocairo::functions::show_layout(self.cr, self.layout);
+        frame.add(Phase::Glyphs, timed);
+        self.text.clear();
+    }
+}
+
+/// Whether a cell can join a text run.
+///
+/// A run is drawn as one string, so every cell in it must advance by exactly
+/// one cell width. That holds only for a lone narrow codepoint: wide (CJK) and
+/// zero-width cells break the grid, and multi-codepoint clusters (combining
+/// marks, emoji ZWJ sequences) may shape to any width. Underlines and
+/// strikethroughs are excluded too, so they keep being drawn per cell and stay
+/// pixel-identical to before.
+fn is_batchable(text: &str, style: &Style) -> bool {
+    if style.underline != Underline::None || style.strikethrough {
+        return false;
+    }
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => codepoint_width(c) == 1,
+        _ => false,
     }
 }
 
@@ -1698,6 +1883,241 @@ fn paint_error(cr: &cairo::Context, width: i32, height: i32, err: &anyhow::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CELL_W: f64 = 8.0;
+    const CELL_H: f64 = 16.0;
+
+    fn surface() -> (cairo::ImageSurface, cairo::Context) {
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, 128, 32).expect("surface");
+        let cr = cairo::Context::new(&surface).expect("context");
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.paint().expect("clear");
+        (surface, cr)
+    }
+
+    fn pixel(data: &[u8], stride: usize, x: usize, y: usize) -> [u8; 3] {
+        let at = y * stride + x * 4;
+        // Rgb24 is stored as a 32-bit little-endian xRGB word.
+        [data[at + 2], data[at + 1], data[at]]
+    }
+
+    /// A monospace Pango layout without a GTK widget, so the render helpers can
+    /// be exercised headlessly.
+    fn layout() -> (pango::Layout, [pango::FontDescription; 4]) {
+        use pango::prelude::FontMapExt;
+        let ctx = pangocairo::FontMap::default().create_context();
+        let layout = pango::Layout::new(&ctx);
+        let mut regular = pango::FontDescription::from_string("monospace 10");
+        regular.set_weight(pango::Weight::Normal);
+        let mut bold = regular.clone();
+        bold.set_weight(pango::Weight::Bold);
+        let mut italic = regular.clone();
+        italic.set_style(pango::Style::Italic);
+        let mut bold_italic = bold.clone();
+        bold_italic.set_style(pango::Style::Italic);
+        (layout, [regular, bold, italic, bold_italic])
+    }
+
+    fn style() -> Style {
+        Style {
+            underline: Underline::None,
+            strikethrough: false,
+            ..Default::default()
+        }
+    }
+
+    fn pen(fg: RgbColor) -> Pen {
+        Pen {
+            fg,
+            bold: false,
+            italic: false,
+        }
+    }
+
+    const RED: RgbColor = RgbColor { r: 255, g: 0, b: 0 };
+    const BLUE: RgbColor = RgbColor { r: 0, g: 0, b: 255 };
+
+    #[test]
+    fn a_background_run_covers_every_cell_it_merged() {
+        let (surface, cr) = surface();
+        let mut bgs = BgRuns::new(&cr, CELL_H);
+        for col in 0..3 {
+            bgs.push(f64::from(col) * CELL_W, 0.0, CELL_W, Some(RED));
+        }
+        bgs.flush();
+        drop(cr);
+
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().expect("data");
+        // Every merged cell is painted...
+        for col in 0..3 {
+            let x = (col * CELL_W as usize) + CELL_W as usize / 2;
+            assert_eq!(pixel(&data, stride, x, 8), [255, 0, 0], "cell {col}");
+        }
+        // ...and the run stops where it should.
+        assert_eq!(pixel(&data, stride, 3 * CELL_W as usize + 4, 8), [0, 0, 0]);
+        assert_eq!(pixel(&data, stride, 4, CELL_H as usize + 4), [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_background_run_breaks_on_a_colour_change() {
+        let (surface, cr) = surface();
+        let mut bgs = BgRuns::new(&cr, CELL_H);
+        bgs.push(0.0, 0.0, CELL_W, Some(RED));
+        bgs.push(CELL_W, 0.0, CELL_W, Some(BLUE));
+        // A cell with no background must not extend the previous run.
+        bgs.push(2.0 * CELL_W, 0.0, CELL_W, None);
+        bgs.push(3.0 * CELL_W, 0.0, CELL_W, Some(RED));
+        bgs.flush();
+        drop(cr);
+
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().expect("data");
+        assert_eq!(pixel(&data, stride, 4, 8), [255, 0, 0]);
+        assert_eq!(pixel(&data, stride, CELL_W as usize + 4, 8), [0, 0, 255]);
+        assert_eq!(pixel(&data, stride, 2 * CELL_W as usize + 4, 8), [0, 0, 0]);
+        assert_eq!(
+            pixel(&data, stride, 3 * CELL_W as usize + 4, 8),
+            [255, 0, 0]
+        );
+    }
+
+    /// The whole point of batching: a run must land on the same grid columns as
+    /// the per-cell draws it replaces, otherwise text drifts out of its cells.
+    #[test]
+    fn a_text_run_lands_on_the_same_columns_as_per_cell_draws() {
+        let (layout, fonts) = layout();
+        let descs = [&fonts[0], &fonts[1], &fonts[2], &fonts[3]];
+        let text = "abcdefgh";
+
+        let (batched, cr) = surface();
+        let mut profiler = Profiler::new();
+        let mut frame = profiler.begin();
+        let mut runs = TextRuns::new(&cr, &layout, descs);
+        for (i, ch) in text.chars().enumerate() {
+            let mut buf = [0u8; 4];
+            runs.push(
+                i as f64 * CELL_W,
+                0.0,
+                pen(RED),
+                ch.encode_utf8(&mut buf),
+                &mut frame,
+            );
+        }
+        runs.flush(&mut frame);
+        drop(cr);
+
+        // The same glyphs, one layout per cell, as the old code did.
+        let (per_cell, cr) = surface();
+        layout.set_font_description(Some(&fonts[0]));
+        cr.set_source_rgb(1.0, 0.0, 0.0);
+        for (i, ch) in text.chars().enumerate() {
+            layout.set_text(&ch.to_string());
+            cr.move_to(i as f64 * CELL_W, 0.0);
+            pangocairo::functions::show_layout(&cr, &layout);
+        }
+        drop(cr);
+
+        let stride = batched.stride() as usize;
+        let a = batched.take_data().expect("batched");
+        let b = per_cell.take_data().expect("per cell");
+        // Compare per column: a column that has ink in one image must have ink
+        // in the other. Exact pixels may differ because shaping a whole run lets
+        // Pango hint across it, which is the normal way text is drawn.
+        for col in 0..text.chars().count() {
+            let inked = |data: &[u8]| {
+                (0..CELL_H as usize).any(|y| {
+                    (0..CELL_W as usize)
+                        .any(|dx| pixel(data, stride, col * CELL_W as usize + dx, y) != [0, 0, 0])
+                })
+            };
+            assert!(inked(&a), "batched column {col} drew nothing");
+            assert_eq!(inked(&a), inked(&b), "column {col} disagrees");
+        }
+        // Nothing may spill past the run into the next column.
+        let spill = (0..CELL_H as usize).any(|y| {
+            (0..CELL_W as usize).any(|dx| {
+                pixel(&a, stride, text.chars().count() * CELL_W as usize + dx, y) != [0, 0, 0]
+            })
+        });
+        assert!(!spill, "the run painted outside its cells");
+    }
+
+    /// Blanks inside a run must be materialised as spaces, or everything after
+    /// them slides left.
+    #[test]
+    fn a_blank_inside_a_run_keeps_later_cells_in_place() {
+        let (layout, fonts) = layout();
+        let descs = [&fonts[0], &fonts[1], &fonts[2], &fonts[3]];
+        let (surface, cr) = surface();
+        let mut profiler = Profiler::new();
+        let mut frame = profiler.begin();
+        let mut runs = TextRuns::new(&cr, &layout, descs);
+
+        runs.push(0.0, 0.0, pen(RED), "a", &mut frame);
+        runs.blank();
+        runs.blank();
+        runs.push(3.0 * CELL_W, 0.0, pen(RED), "b", &mut frame);
+        assert_eq!(runs.text, "a  b", "gap was not turned into spaces");
+        runs.flush(&mut frame);
+        drop(cr);
+
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().expect("data");
+        let inked = |col: usize| {
+            (0..CELL_H as usize).any(|y| {
+                (0..CELL_W as usize)
+                    .any(|dx| pixel(&data, stride, col * CELL_W as usize + dx, y) != [0, 0, 0])
+            })
+        };
+        assert!(inked(0), "'a' is missing");
+        assert!(!inked(1) && !inked(2), "the gap should stay blank");
+        assert!(inked(3), "'b' did not land in its own column");
+    }
+
+    #[test]
+    fn trailing_blanks_never_open_a_run() {
+        let (layout, fonts) = layout();
+        let descs = [&fonts[0], &fonts[1], &fonts[2], &fonts[3]];
+        let (_surface, cr) = surface();
+        let mut profiler = Profiler::new();
+        let mut frame = profiler.begin();
+        let mut runs = TextRuns::new(&cr, &layout, descs);
+
+        // A row of blanks: nothing is open, so nothing is drawn or shaped.
+        for _ in 0..10 {
+            runs.blank();
+        }
+        assert!(runs.open.is_none());
+        runs.flush(&mut frame);
+        assert!(runs.text.is_empty());
+    }
+
+    #[test]
+    fn only_single_width_undecorated_cells_are_batchable() {
+        assert!(is_batchable("a", &style()));
+        assert!(is_batchable(" ", &style()));
+        // Wide (CJK) cells advance two columns.
+        assert!(!is_batchable("好", &style()));
+        // Composed clusters can shape to any width.
+        assert!(!is_batchable("e\u{301}", &style()));
+        assert!(!is_batchable("", &style()));
+        // Decorations stay on the per-cell path so they keep their exact pixels.
+        assert!(!is_batchable(
+            "a",
+            &Style {
+                underline: Underline::Single,
+                ..style()
+            }
+        ));
+        assert!(!is_batchable(
+            "a",
+            &Style {
+                strikethrough: true,
+                ..style()
+            }
+        ));
+    }
 
     #[test]
     fn detects_explicit_urls() {
