@@ -18,7 +18,7 @@ use crate::{
     session::{Session as SessionState, TabState},
     terminal::TerminalView,
     ui::{
-        SearchBar, attach_context_menu, main_menu, show_about, show_command_palette,
+        SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
         show_preferences, show_shortcuts, tiling_menu,
     },
 };
@@ -82,7 +82,29 @@ fn install_css(display: &gdk::Display) {
     provider.load_from_string(
         "window.transparent-bg,
          window.transparent-bg > * ,
-         window.transparent-bg .terminal { background-color: transparent; }",
+         window.transparent-bg .terminal { background-color: transparent; }
+
+         .quick-settings { padding: 6px 12px 2px 12px; }
+         /* Round swatches previewing each theme. Colours are literal on
+            purpose: the point is to show what light and dark look like, so they
+            must not follow the theme currently in effect. The selection ring
+            does follow it, via the accent colour. */
+         .quick-settings .theme-swatch {
+           min-width: 40px;
+           min-height: 40px;
+           padding: 0;
+           border-radius: 9999px;
+           box-shadow: inset 0 0 0 1px alpha(currentColor, 0.15);
+         }
+         .quick-settings .theme-swatch.system {
+           background-image: linear-gradient(135deg, #fafafa 0%, #fafafa 50%, #1d1d1d 50%, #1d1d1d 100%);
+         }
+         .quick-settings .theme-swatch.light { background-image: none; background-color: #fafafa; }
+         .quick-settings .theme-swatch.dark { background-image: none; background-color: #1d1d1d; }
+         .quick-settings .theme-swatch:checked {
+           outline: 2px solid @accent_color;
+           outline-offset: 2px;
+         }",
     );
     gtk4::style_context_add_provider_for_display(
         display,
@@ -256,12 +278,21 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     palette_btn.set_action_name(Some("win.command-palette"));
     header.pack_start(&palette_btn);
 
+    // Shows the tab count and opens the overview, the way libadwaita expects
+    // AdwTabOverview to be reached.
+    let tab_button = adw::TabButton::builder().view(&tab_view).build();
+    tab_button.set_tooltip_text(Some("All Tabs (F1)"));
+    tab_button.set_action_name(Some("win.tab-overview"));
+    header.pack_end(&tab_button);
+
+    let (menu_popover, quick_settings) = main_popover();
+    let quick_settings = Rc::new(quick_settings);
     let menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Main Menu")
         .build();
     menu_btn.add_css_class("flat");
-    menu_btn.set_menu_model(Some(&main_menu()));
+    menu_btn.set_popover(Some(&menu_popover));
     header.pack_end(&menu_btn);
 
     // Search bar sits above the tabs so it spans whichever pane is focused.
@@ -300,7 +331,34 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         .tooltip_text("Menu")
         .build();
     sidebar_menu_btn.add_css_class("flat");
-    sidebar_menu_btn.set_menu_model(Some(&main_menu()));
+    // A popover belongs to one parent, so the sidebar gets its own instance.
+    let (sidebar_quick_popover, sidebar_quick) = main_popover();
+    let sidebar_quick = Rc::new(sidebar_quick);
+    sidebar_menu_btn.set_popover(Some(&sidebar_quick_popover));
+
+    // Both menus show the same quick controls, so they are refreshed together.
+    let last_grid = Rc::new(Cell::new((0u16, 0u16)));
+    let sync_quick: Rc<dyn Fn()> = {
+        let config = config.clone();
+        let base_font_size = base_font_size.clone();
+        let last_grid = last_grid.clone();
+        let quicks = [quick_settings.clone(), sidebar_quick.clone()];
+        Rc::new(move || {
+            let (theme, size) = {
+                let cfg = config.borrow();
+                (cfg.theme, cfg.font_size)
+            };
+            let (cols, rows) = last_grid.get();
+            for quick in &quicks {
+                quick.set_theme(theme);
+                quick.set_font_size(size, base_font_size.get());
+                if cols > 0 {
+                    quick.set_grid(cols, rows);
+                }
+            }
+        })
+    };
+    sync_quick();
 
     // A real HeaderBar inside the sidebar: window controls get the exact
     // system styling (theme CSS targets `headerbar windowcontrols`) and the
@@ -324,7 +382,13 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     split_view.set_min_sidebar_width(160.0);
     split_view.set_show_sidebar(false);
     split_view.set_sidebar(Some(&sidebar_box));
-    split_view.set_content(Some(&toast_overlay));
+    // Grid of tab thumbnails (pages already set live thumbnails).
+    let tab_overview = adw::TabOverview::builder()
+        .view(&tab_view)
+        .enable_new_tab(true)
+        .child(&toast_overlay)
+        .build();
+    split_view.set_content(Some(&tab_overview));
 
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&split_view));
@@ -522,7 +586,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let show_resize = {
         let overlay = toast_overlay.clone();
         let resize_toast = resize_toast.clone();
+        let last_grid = last_grid.clone();
+        let sync_quick = sync_quick.clone();
         Rc::new(move |cols: u16, rows: u16| {
+            last_grid.set((cols, rows));
+            sync_quick();
             let title = format!("{cols} × {rows}");
             if let Some(t) = resize_toast.borrow().as_ref() {
                 // Reuse the visible toast if it is still alive.
@@ -942,6 +1010,30 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     };
 
     {
+        // The overview has its own `+`; without this it would do nothing.
+        let add_tab = add_tab.clone();
+        let inherit_cwd = inherit_cwd.clone();
+        let tab_view = tab_view.clone();
+        tab_overview.connect_create_tab(move |_| match add_tab(inherit_cwd()) {
+            Ok(page) => page,
+            Err(err) => {
+                // The signal has to return a page, and a TabPage cannot be
+                // built standalone, so hand back an empty one.
+                tracing::error!("new tab from overview failed: {err:#}");
+                tab_view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0))
+            }
+        });
+    }
+
+    {
+        let tab_overview = tab_overview.clone();
+        window.add_action(&add_simple(
+            "tab-overview",
+            Box::new(move || tab_overview.set_open(!tab_overview.is_open())),
+        ));
+    }
+
+    {
         let add_tab = add_tab.clone();
         let inherit_cwd = inherit_cwd.clone();
         window.add_action(&add_simple(
@@ -1143,6 +1235,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let config = config.clone();
         let toast = toast.clone();
         let save_config = save_config.clone();
+        let sync_quick = sync_quick.clone();
         Rc::new(move |size: f32| {
             let mut applied = size;
             for (_, views) in pages.borrow().iter() {
@@ -1152,6 +1245,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             }
             config.borrow_mut().font_size = applied;
             save_config();
+            sync_quick();
             toast(&format!("Font: {applied:.0} pt"));
         })
     };
@@ -1364,12 +1458,14 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     {
         let config = config.clone();
         let save_config = save_config.clone();
+        let sync_quick = sync_quick.clone();
         theme_action.connect_activate(move |action, param| {
             let value = param.and_then(|p| p.str()).unwrap_or("system");
             let theme = Theme::parse(value);
             apply_theme(theme);
             config.borrow_mut().theme = theme;
             save_config();
+            sync_quick();
             action.set_state(&value.to_variant());
         });
     }
@@ -1468,6 +1564,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     }
     window.add_action(&sidebar_always_action);
 
+    app.set_accels_for_action("win.tab-overview", &["F1", "<Super>Tab"]);
     app.set_accels_for_action("win.new-tab", &["<Control><Shift>t"]);
     app.set_accels_for_action("win.close-tab", &["<Control><Shift>w"]);
     app.set_accels_for_action("win.next-tab", &["<Control>Page_Down", "<Control>Tab"]);

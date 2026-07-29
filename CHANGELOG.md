@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-07-29
+
+Thanks to **Yacha** ([FoxTerminal](https://gitlab.com/OrangeFox/misc/FoxTerminal), [OrangeFox](https://orangefox.tech)) — her terminal is the reason optionTerm exists, and this release borrows the shape of its quick controls and preferences. FoxTerminal is GPL-3.0-or-later and optionTerm is Apache-2.0, so no code is shared; only ideas were.
+
+### Added
+
+- **Tab overview** — `F1` or `Super+Tab` opens a grid of live tab thumbnails, with search and a `+` of its own. A tab-count button in the header opens it too.
+- **Quick settings at the top of the `···` menu** — theme swatches (System / Light / Dark), a font-size stepper showing the current zoom as a percentage of your configured size, and the focused pane's live `columns × rows`. The `···` menu is a real popover now, because a `GMenu` can only hold text items.
+- **Preferences for the two settings added in 0.1.8** — `Ligatures` and `Inherit Working Directory` were only editable by hand in `config.toml`.
+
+### Changed
+
+- **Preferences are split into pages** — Appearance (theme, font, cursor), Behavior (session, tabs) and Advanced (config file), instead of one long scroll.
+- **The `···` menu is much shorter.** Appearance moved into Preferences and the quick settings; tab, split and terminal actions moved behind `+`, which now carries Tabs, All Tabs / Next / Previous, Split and Terminal. What is left in `···` is Copy/Paste/Select All, Find, Command Palette, Preferences, Shortcuts, About and Quit.
+
 ## [0.1.8] - 2026-07-29
 
 ### Fixed

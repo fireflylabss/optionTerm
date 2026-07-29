@@ -6,7 +6,9 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 
 ## Features
 
-- **Tabs, three ways** — top tab bar, left/right sidebar, or hidden tabs (`window.tabs`), each with a `+` button that doubles as a tiling dropdown.
+- **Tabs, three ways** — top tab bar, left/right sidebar, or hidden tabs (`window.tabs`), each with a `+` button that doubles as a tab, split and terminal menu.
+- **Tab overview** — `F1` (or `Super+Tab`) opens a grid of live tab thumbnails to search and switch.
+- **Quick settings** — the `···` menu opens with theme swatches, a font-size stepper showing the current zoom, and the live `columns × rows` of the focused pane.
 - **Kitty graphics protocol** — inline images (`timg`, `chafa --format=kitty`, plotting backends, previews), with PNG and raw pixel formats, scaling and z-layers.
 - **Accents & input methods** — dead keys and compose sequences work (`´` + `a` → `á`), plus CJK/IBus engines via `GtkIMMulticontext`.
 - **Persistent settings** — anything changed from the menus or Preferences is written straight back to `config.toml`.
@@ -212,7 +214,8 @@ With `session_restore = true`, the open tabs, their pane count and each pane's w
 | Clear terminal | `Ctrl+Shift+K` |
 | Restart terminal | `Ctrl+Shift+R` |
 | Find in scrollback | `Ctrl+Shift+F` |
-| Open link under cursor | `Ctrl+Click` |
+| Open link under cursor | `Ctrl+Click` or `Shift+Click` |
+| Tab overview | `F1` / `Super+Tab` |
 | Increase font size | `Ctrl++` |
 | Decrease font size | `Ctrl+-` |
 | Reset font size | `Ctrl+0` |
@@ -226,6 +229,14 @@ With `session_restore = true`, the open tabs, their pane count and each pane's w
 - optionTerm is a single-instance `GApplication` (`io.option.terminal`).
 - A benign `AdwTabBox reported min width -6` warning may appear on startup (known libadwaita behavior).
 - Requires **Zig 0.15.2** at build time; `libghostty-vt-sys` does not yet support Zig 0.16.
+
+## Acknowledgements
+
+optionTerm exists because of **[FoxTerminal](https://gitlab.com/OrangeFox/misc/FoxTerminal)** by **Yacha** ([OrangeFox](https://orangefox.tech)). Her sidebar-first terminal is what convinced us to build this one, and its quick theme/font controls and the shape of its preferences directly inspired the UI here. If you want a GNOME terminal with containers, SSH hosts and agent sessions in one sidebar, use hers — it does far more than this one.
+
+FoxTerminal is licensed GPL-3.0-or-later and optionTerm is Apache-2.0, so **no FoxTerminal code is included here**; only ideas were borrowed.
+
+The VT engine is Ghostty's [libghostty-vt](https://ghostty.org), by Mitchell Hashimoto and the Ghostty contributors.
 
 ## License
 

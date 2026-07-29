@@ -23,6 +23,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Close Tab", "win.close-tab", "Ctrl+Shift+W"),
     ("Next Tab", "win.next-tab", "Ctrl+PgDn"),
     ("Previous Tab", "win.prev-tab", "Ctrl+PgUp"),
+    ("All Tabs", "win.tab-overview", "F1"),
     ("Split Right", "win.split-right", "Ctrl+Shift+O"),
     ("Split Down", "win.split-down", "Ctrl+Shift+E"),
     ("Split Left", "win.split-left", "Ctrl+Shift+L"),
@@ -67,9 +68,25 @@ fn splits_menu() -> gio::Menu {
     split
 }
 
+/// Menu behind the `+` split button: everything that creates or acts on tabs
+/// and splits, so the main menu does not have to carry any of it.
 pub fn tiling_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    menu.append_section(Some("Tiling in this window"), &splits_menu());
+
+    let tabs = gio::Menu::new();
+    tabs.append(Some("New Tab"), Some("win.new-tab"));
+    tabs.append(Some("Rename Tab"), Some("win.rename-tab"));
+    tabs.append(Some("Close Tab"), Some("win.close-tab"));
+    menu.append_section(Some("Tabs"), &tabs);
+
+    let nav = gio::Menu::new();
+    nav.append(Some("All Tabs"), Some("win.tab-overview"));
+    nav.append(Some("Next Tab"), Some("win.next-tab"));
+    nav.append(Some("Previous Tab"), Some("win.prev-tab"));
+    menu.append_section(None, &nav);
+
+    menu.append_section(Some("Split"), &splits_menu());
+    menu.append_section(Some("Terminal"), &terminal_menu());
     menu
 }
 
@@ -81,81 +98,156 @@ fn terminal_menu() -> gio::Menu {
     menu
 }
 
-pub fn main_menu() -> gio::Menu {
+/// The `···` menu, deliberately short: appearance lives in Preferences and
+/// tab/split/terminal actions live behind `+`, so what is left here is the
+/// window-wide odds and ends plus the quick controls in [`quick_settings`].
+fn main_menu() -> gio::Menu {
     let menu = gio::Menu::new();
 
-    // --- Tabs & splits ---
-    let tabs = gio::Menu::new();
-    tabs.append(Some("New Tab"), Some("win.new-tab"));
-    tabs.append(Some("Close Tab"), Some("win.close-tab"));
-    tabs.append(Some("Rename Tab"), Some("win.rename-tab"));
-    tabs.append(Some("Next Tab"), Some("win.next-tab"));
-    tabs.append(Some("Previous Tab"), Some("win.prev-tab"));
-    menu.append_section(None, &tabs);
-    menu.append_submenu(Some("Split"), &splits_menu());
+    // Anchor for the theme/zoom widget built by `quick_settings`.
+    let header = gio::MenuItem::new(None, None);
+    header.set_attribute_value("custom", Some(&QUICK_SETTINGS_ID.to_variant()));
+    let header_section = gio::Menu::new();
+    header_section.append_item(&header);
+    menu.append_section(None, &header_section);
 
-    // --- Current terminal ---
     let edit = gio::Menu::new();
     edit.append(Some("Copy"), Some("win.copy"));
     edit.append(Some("Paste"), Some("win.paste"));
     edit.append(Some("Select All"), Some("win.select-all"));
-    menu.append_section(Some("Edit"), &edit);
-    menu.append_section(Some("Terminal"), &terminal_menu());
+    menu.append_section(None, &edit);
 
-    // --- Appearance (submenu with live radios) ---
-    let appearance = gio::Menu::new();
-
-    let theme = gio::Menu::new();
-    theme.append(Some("System"), Some("win.theme::system"));
-    theme.append(Some("Light"), Some("win.theme::light"));
-    theme.append(Some("Dark"), Some("win.theme::dark"));
-    appearance.append_section(Some("Theme"), &theme);
-
-    let tabs_pos = gio::Menu::new();
-    tabs_pos.append(Some("Tabs on Top"), Some("win.tabs-pos::top"));
-    tabs_pos.append(Some("Sidebar on the Left"), Some("win.tabs-pos::left"));
-    tabs_pos.append(Some("Sidebar on the Right"), Some("win.tabs-pos::right"));
-    tabs_pos.append(Some("Hidden Tabs"), Some("win.tabs-pos::hidden"));
-    tabs_pos.append(Some("Always Show Sidebar"), Some("win.sidebar-always"));
-    appearance.append_section(Some("Tabs"), &tabs_pos);
-
-    let cursor = gio::Menu::new();
-    cursor.append(Some("Block Cursor"), Some("win.cursor-shape::block"));
-    cursor.append(Some("Bar Cursor"), Some("win.cursor-shape::bar"));
-    cursor.append(
-        Some("Underline Cursor"),
-        Some("win.cursor-shape::underline"),
-    );
-    cursor.append(Some("Blinking Cursor"), Some("win.cursor-blink"));
-    appearance.append_section(Some("Cursor"), &cursor);
-
-    let zoom = gio::Menu::new();
-    zoom.append(Some("Increase Font Size"), Some("win.zoom-in"));
-    zoom.append(Some("Decrease Font Size"), Some("win.zoom-out"));
-    zoom.append(Some("Default Font Size"), Some("win.zoom-reset"));
-    appearance.append_section(Some("Font"), &zoom);
-
-    menu.append_submenu(Some("Appearance"), &appearance);
-
-    // --- Tools ---
     let tools = gio::Menu::new();
+    tools.append(Some("Find…"), Some("win.find"));
     tools.append(Some("Command Palette"), Some("win.command-palette"));
-    tools.append(Some("Find in Scrollback"), Some("win.find"));
-    tools.append(Some("Reload Configuration"), Some("win.reload-config"));
-    tools.append(Some("Preferences"), Some("win.preferences"));
     menu.append_section(None, &tools);
 
-    // --- Help ---
-    let help = gio::Menu::new();
-    help.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
-    help.append(Some("About optionTerm"), Some("win.about"));
-    menu.append_section(Some("Help"), &help);
+    let app = gio::Menu::new();
+    app.append(Some("Preferences"), Some("win.preferences"));
+    app.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
+    app.append(Some("About optionTerm"), Some("win.about"));
+    menu.append_section(None, &app);
 
     let quit = gio::Menu::new();
     quit.append(Some("Quit"), Some("win.quit"));
     menu.append_section(None, &quit);
 
     menu
+}
+
+/// Name tying the custom widget to its slot in [`main_menu`].
+const QUICK_SETTINGS_ID: &str = "quick-settings";
+
+/// The `···` menu as a real popover, so the theme picker and zoom stepper can
+/// be actual widgets. A `GMenu` can only hold text items.
+pub fn main_popover() -> (gtk4::PopoverMenu, QuickSettings) {
+    let popover = gtk4::PopoverMenu::from_model_full(&main_menu(), gtk4::PopoverMenuFlags::NESTED);
+    let quick = QuickSettings::new();
+    popover.add_child(&quick.widget, QUICK_SETTINGS_ID);
+    (popover, quick)
+}
+
+/// Theme swatches, a font-size stepper and the current grid size, mirroring the
+/// quick controls FoxTerminal puts at the top of its menu.
+pub struct QuickSettings {
+    pub widget: gtk4::Box,
+    swatches: [gtk4::ToggleButton; 3],
+    zoom_label: gtk4::Label,
+    grid_label: gtk4::Label,
+}
+
+impl QuickSettings {
+    fn new() -> Self {
+        let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+        widget.add_css_class("quick-settings");
+
+        // --- Theme ---
+        let themes = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+        themes.set_halign(gtk4::Align::Center);
+        let swatches = [
+            (Theme::System, "system", "Follow the system theme"),
+            (Theme::Light, "light", "Light theme"),
+            (Theme::Dark, "dark", "Dark theme"),
+        ]
+        .map(|(theme, class, tip)| {
+            let button = gtk4::ToggleButton::builder()
+                .tooltip_text(tip)
+                .action_name("win.theme")
+                .action_target(&theme.as_str().to_variant())
+                .build();
+            button.add_css_class("theme-swatch");
+            button.add_css_class(class);
+            themes.append(&button);
+            button
+        });
+        widget.append(&themes);
+
+        // --- Font size ---
+        let zoom = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+        let out = gtk4::Button::from_icon_name("list-remove-symbolic");
+        out.add_css_class("circular");
+        out.set_tooltip_text(Some("Decrease font size"));
+        out.set_action_name(Some("win.zoom-out"));
+
+        let zoom_label = gtk4::Label::new(Some("100%"));
+        zoom_label.set_hexpand(true);
+        zoom_label.add_css_class("heading");
+        // Reset on click is the obvious meaning of pressing the readout.
+        let reset = gtk4::Button::builder().child(&zoom_label).build();
+        reset.add_css_class("flat");
+        reset.set_hexpand(true);
+        reset.set_tooltip_text(Some("Reset font size"));
+        reset.set_action_name(Some("win.zoom-reset"));
+
+        let into = gtk4::Button::from_icon_name("list-add-symbolic");
+        into.add_css_class("circular");
+        into.set_tooltip_text(Some("Increase font size"));
+        into.set_action_name(Some("win.zoom-in"));
+
+        zoom.append(&out);
+        zoom.append(&reset);
+        zoom.append(&into);
+        widget.append(&zoom);
+
+        // --- Grid size ---
+        let grid_label = gtk4::Label::new(None);
+        grid_label.add_css_class("dim-label");
+        grid_label.add_css_class("caption");
+        widget.append(&grid_label);
+
+        Self {
+            widget,
+            swatches,
+            zoom_label,
+            grid_label,
+        }
+    }
+
+    /// Reflect the active theme in the swatches.
+    pub fn set_theme(&self, theme: Theme) {
+        for (button, value) in self
+            .swatches
+            .iter()
+            .zip([Theme::System, Theme::Light, Theme::Dark])
+        {
+            button.set_active(value == theme);
+        }
+    }
+
+    /// `size` against the size the window opened with, so 100% is the size the
+    /// user configured rather than an arbitrary constant.
+    pub fn set_font_size(&self, size: f32, base: f32) {
+        let percent = if base > 0.0 {
+            (size / base * 100.0).round()
+        } else {
+            100.0
+        };
+        self.zoom_label.set_text(&format!("{percent:.0}%"));
+    }
+
+    pub fn set_grid(&self, cols: u16, rows: u16) {
+        self.grid_label.set_text(&format!("{cols} × {rows}"));
+    }
 }
 
 fn context_menu() -> gio::Menu {
@@ -481,9 +573,17 @@ pub fn show_preferences(
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
         .build();
-    let page = adw::PreferencesPage::builder()
-        .title("General")
+    let look_page = adw::PreferencesPage::builder()
+        .title("Appearance")
+        .icon_name("applications-graphics-symbolic")
+        .build();
+    let behavior_page = adw::PreferencesPage::builder()
+        .title("Behavior")
         .icon_name("preferences-system-symbolic")
+        .build();
+    let advanced_page = adw::PreferencesPage::builder()
+        .title("Advanced")
+        .icon_name("preferences-other-symbolic")
         .build();
 
     // Apply a config mutation to every live terminal.
@@ -503,7 +603,9 @@ pub fn show_preferences(
     };
 
     // --- Appearance ---
-    let appearance = adw::PreferencesGroup::builder().title("Appearance").build();
+    let theme_group = adw::PreferencesGroup::builder().title("Theme").build();
+    let font_group = adw::PreferencesGroup::builder().title("Font").build();
+    let tabs_group = adw::PreferencesGroup::builder().title("Tabs").build();
 
     let theme_row = adw::ComboRow::builder()
         .title("Theme")
@@ -534,7 +636,7 @@ pub fn show_preferences(
             save_config();
         });
     }
-    appearance.add(&theme_row);
+    theme_group.add(&theme_row);
 
     let tabs_row = adw::ComboRow::builder()
         .title("Tab Position")
@@ -568,7 +670,7 @@ pub fn show_preferences(
             save_config();
         });
     }
-    appearance.add(&tabs_row);
+    tabs_group.add(&tabs_row);
 
     let sidebar_always_row = adw::SwitchRow::builder()
         .title("Always Show Sidebar")
@@ -586,7 +688,7 @@ pub fn show_preferences(
             save_config();
         });
     }
-    appearance.add(&sidebar_always_row);
+    tabs_group.add(&sidebar_always_row);
 
     let font_row = adw::SpinRow::with_range(6.0, 40.0, 1.0);
     font_row.set_title("Font Size");
@@ -598,7 +700,7 @@ pub fn show_preferences(
             apply_zoom(row.value() as f32);
         });
     }
-    appearance.add(&font_row);
+    font_group.add(&font_row);
 
     let padding_row = adw::SpinRow::with_range(0.0, 32.0, 1.0);
     padding_row.set_title("Window Padding");
@@ -614,7 +716,7 @@ pub fn show_preferences(
             }));
         });
     }
-    appearance.add(&padding_row);
+    theme_group.add(&padding_row);
 
     let opacity_row = adw::SpinRow::with_range(15.0, 100.0, 5.0);
     opacity_row.set_title("Background Opacity");
@@ -627,8 +729,24 @@ pub fn show_preferences(
             update_all(Rc::new(move |cfg| cfg.background_opacity = v));
         });
     }
-    appearance.add(&opacity_row);
-    page.add(&appearance);
+    theme_group.add(&opacity_row);
+
+    let ligature_row = adw::SwitchRow::builder()
+        .title("Ligatures")
+        .subtitle("Shape ->, => and != as single glyphs")
+        .build();
+    ligature_row.set_active(config.borrow().font_ligatures);
+    {
+        let update_all = update_all.clone();
+        ligature_row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            update_all(Rc::new(move |cfg| cfg.font_ligatures = on));
+        });
+    }
+    font_group.add(&ligature_row);
+
+    look_page.add(&theme_group);
+    look_page.add(&font_group);
 
     // --- Session ---
     let session_group = adw::PreferencesGroup::builder().title("Session").build();
@@ -646,7 +764,22 @@ pub fn show_preferences(
         });
     }
     session_group.add(&restore_row);
-    page.add(&session_group);
+
+    let inherit_row = adw::SwitchRow::builder()
+        .title("Inherit Working Directory")
+        .subtitle("New tabs and splits open in the focused pane's directory")
+        .build();
+    inherit_row.set_active(config.borrow().inherit_working_directory);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        inherit_row.connect_active_notify(move |row| {
+            config.borrow_mut().inherit_working_directory = row.is_active();
+            save_config();
+        });
+    }
+    session_group.add(&inherit_row);
+    behavior_page.add(&session_group);
 
     // --- Cursor ---
     let cursor_group = adw::PreferencesGroup::builder().title("Cursor").build();
@@ -687,7 +820,7 @@ pub fn show_preferences(
         });
     }
     cursor_group.add(&blink_row);
-    page.add(&cursor_group);
+    look_page.add(&cursor_group);
 
     // --- Config file ---
     let cfg_group = adw::PreferencesGroup::builder()
@@ -736,9 +869,12 @@ pub fn show_preferences(
     reload_row.add_suffix(&reload_btn);
     reload_row.set_activatable_widget(Some(&reload_btn));
     cfg_group.add(&reload_row);
-    page.add(&cfg_group);
+    advanced_page.add(&cfg_group);
 
-    dialog.add(&page);
+    behavior_page.add(&tabs_group);
+    dialog.add(&look_page);
+    dialog.add(&behavior_page);
+    dialog.add(&advanced_page);
     dialog.present(Some(window));
 }
 
@@ -788,5 +924,20 @@ pub fn show_about(window: &adw::ApplicationWindow) {
         .issue_url("https://github.com/fireflylabss/optionTerm/issues")
         .comments("GTK4 + libadwaita terminal powered by libghostty-vt")
         .build();
+    about.add_acknowledgement_section(
+        Some("Inspired by"),
+        &[
+            "Yacha (FoxTerminal) https://gitlab.com/OrangeFox/misc/FoxTerminal",
+            "Ghostty https://ghostty.org",
+        ],
+    );
+    about.add_legal_section(
+        "FoxTerminal",
+        // Ideas only: FoxTerminal is GPL-3.0-or-later and optionTerm is
+        // Apache-2.0, so no code is shared between them.
+        Some("optionTerm's sidebar-first workflow, its quick theme and font\ncontrols and the shape of its preferences were inspired by\nFoxTerminal by Yacha, whose terminal is why this one exists.\n\nFoxTerminal is licensed GPL-3.0-or-later. No FoxTerminal code is\nincluded in optionTerm; only ideas were borrowed."),
+        gtk4::License::Custom,
+        None,
+    );
     about.present(Some(window));
 }
