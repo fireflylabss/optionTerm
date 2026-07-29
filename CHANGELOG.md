@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Changed
 
 - Application ID is now **`io.option.terminal`** (was `labs.firefly.optionTerm`). Desktop entry, install scripts, AppImage and `.deb` packaging follow the new ID. Reinstall the `.desktop` file if you used a previous install.
+- **The grid is drawn in runs instead of cell by cell, cutting frame time by ~9x.** Adjacent cells that share a colour and font are now shaped as a single Pango run, and adjacent cells that share a background fill as a single rectangle. A full 86x24 screen went from 2063 Pango round trips per frame to 24 — one per row — and `paint` from 10.2 ms to 1.1 ms (scrolling: 9.7 ms to 1.1 ms; text changing colour every 8 cells: 10.0 ms to 2.4 ms). Nothing stopped being drawn: the number of glyphs per frame is unchanged. Only cells that provably advance exactly one column may join a run, so wide (CJK) cells, composed clusters, underlines and strikethroughs keep the previous per-cell path and their exact pixels.
+- The cell loop now covers a row's backgrounds before its text. Besides letting both kinds of run merge, this fixes a latent issue in the old interleaved order, where a glyph that overhung its cell could be clipped by the next cell's background.
+
+### Added
+
+- **Render profiling** — `OPTION_TERM_PROFILE=1` reports `paint` timings per phase (background, setup, images, cells, cursor) with p50/p99, plus cells, glyphs and Pango runs per frame. Costs a single boolean check when unset.
+- `scripts/bench-render.sh` — reproducible render benchmark. It runs against an isolated `HOME`, so config and session are generated fresh and the window always opens at the same size, which keeps the grid comparable between runs.
 
 ## [0.1.5] - 2026-07-28
 
