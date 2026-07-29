@@ -95,14 +95,14 @@ echo "Using Zig: $ZIG ($($ZIG version))"
 # ---------------------------------------------------------------------------
 # Build release binary
 # ---------------------------------------------------------------------------
-echo "Building option-term (release)..."
+echo "Building optionterm (release)..."
 (
   cd "$ROOT"
   PATH="$(dirname "$ZIG"):$PATH" cargo build --release
 )
 
-if [[ ! -f "$ROOT/target/release/option-term" ]]; then
-  echo "error: build did not produce target/release/option-term" >&2
+if [[ ! -f "$ROOT/target/release/optionterm" ]]; then
+  echo "error: build did not produce target/release/optionterm" >&2
   exit 1
 fi
 
@@ -111,11 +111,9 @@ fi
 # ---------------------------------------------------------------------------
 echo "Installing binary to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
-if $SYSTEM; then
-  install -Dm755 "$ROOT/target/release/option-term" "$BIN_DIR/option-term"
-else
-  install -Dm755 "$ROOT/target/release/option-term" "$BIN_DIR/option-term"
-fi
+install -Dm755 "$ROOT/target/release/optionterm" "$BIN_DIR/optionterm"
+# The command was called option-term up to 0.1.6; keep it working.
+ln -sf optionterm "$BIN_DIR/option-term"
 
 # ---------------------------------------------------------------------------
 # Install .desktop entry
@@ -160,7 +158,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "optionTerm installed."
-echo "  binary: $BIN_DIR/option-term"
+echo "  binary: $BIN_DIR/optionterm (with an option-term symlink)"
 echo "  desktop: $APP_DIR/$DESKTOP_FILE"
 echo "  icons: $ICONS_DIR"
 echo ""
@@ -170,7 +168,7 @@ if ! $SYSTEM; then
     echo "Tip: $BIN_DIR is not on your PATH. Add this to your shell config:"
     echo "  export PATH=\"$BIN_DIR:\$PATH\""
   fi
-  echo "Launch with: option-term"
+  echo "Launch with: optionterm"
 else
-  echo "Launch with: option-term (or from your applications menu)"
+  echo "Launch with: optionterm (or from your applications menu)"
 fi

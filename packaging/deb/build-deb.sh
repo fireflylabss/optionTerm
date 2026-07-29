@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APP_ID="io.option.terminal"
-PKG="option-term"
+PKG="optionterm"
 OUT_DIR="$ROOT/dist"
 
 while [[ $# -gt 0 ]]; do
@@ -23,7 +23,7 @@ done
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 [[ -n "$version" ]] || { echo "error: could not read version from Cargo.toml" >&2; exit 1; }
 
-binary="$ROOT/target/release/option-term"
+binary="$ROOT/target/release/optionterm"
 [[ -x "$binary" ]] || {
   echo "error: $binary not found — run 'cargo build --release' first" >&2
   exit 1
@@ -39,7 +39,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 root="$work/$PKG"
 
-install -Dm755 "$binary" "$root/usr/bin/option-term"
+install -Dm755 "$binary" "$root/usr/bin/optionterm"
+# The command was called option-term up to 0.1.6; keep it working.
+ln -s optionterm "$root/usr/bin/option-term"
 install -Dm644 "$ROOT/packaging/$APP_ID.desktop" \
   "$root/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$ROOT/LICENSE" "$root/usr/share/doc/$PKG/copyright"
@@ -71,6 +73,9 @@ Section: utils
 Priority: optional
 Architecture: $arch
 Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libpango-1.0-0, libcairo2, libglib2.0-0
+Conflicts: option-term
+Replaces: option-term
+Provides: option-term
 Maintainer: AE Firefly Labs <fireflylabss@users.noreply.github.com>
 Homepage: https://github.com/fireflylabss/optionTerm
 Installed-Size: $installed_kb

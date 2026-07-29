@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-07-29
+
+### Changed
+
+- **The package and binary are now named `optionterm`** (was `option-term`). On the AUR the package is [`optionterm`](https://aur.archlinux.org/packages/optionterm); the `.deb` is `optionterm_<version>_amd64.deb`.
+- **Nothing breaks if you already had it installed.** Every install path — AUR, `.deb` and `scripts/install.sh` — also creates an `option-term` symlink pointing at the new binary, so existing aliases, scripts and launchers keep working. The AUR and Debian packages declare `replaces`/`conflicts`/`provides` against `option-term`, so upgrading migrates cleanly instead of leaving an orphaned binary behind.
+
 ## [0.1.6] - 2026-07-29
 
 ### Changed

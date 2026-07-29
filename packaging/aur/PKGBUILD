@@ -1,12 +1,17 @@
 # Maintainer: AE Firefly Labs <fireflylabss@users.noreply.github.com>
 
-pkgname=option-term
-pkgver=0.1.6
+pkgname=optionterm
+pkgver=0.1.7
 pkgrel=1
 pkgdesc='GTK4 + libadwaita terminal emulator powered by libghostty-vt'
 arch=('x86_64')
 url='https://github.com/fireflylabss/optionTerm'
 license=('Apache-2.0')
+# Renamed from option-term in 0.1.7; the old package must be replaced, not
+# co-installed, since both own /usr/bin/option-term.
+conflicts=('option-term')
+replaces=('option-term')
+provides=('option-term')
 depends=(
   'gcc-libs'
   'glib2'
@@ -60,7 +65,9 @@ check() {
 
 package() {
   cd "$_srcdir"
-  install -Dm755 "target/release/option-term" "$pkgdir/usr/bin/option-term"
+  install -Dm755 "target/release/optionterm" "$pkgdir/usr/bin/optionterm"
+  # The command was called option-term up to 0.1.6; keep it working.
+  ln -s optionterm "$pkgdir/usr/bin/option-term"
   install -Dm644 "packaging/io.option.terminal.desktop" \
     "$pkgdir/usr/share/applications/io.option.terminal.desktop"
   install -Dm644 'LICENSE' "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

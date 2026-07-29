@@ -24,7 +24,7 @@ done
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 [[ -n "$version" ]] || { echo "error: could not read version from Cargo.toml" >&2; exit 1; }
 
-binary="$ROOT/target/release/option-term"
+binary="$ROOT/target/release/optionterm"
 [[ -x "$binary" ]] || {
   echo "error: $binary not found — run 'cargo build --release' first" >&2
   exit 1
@@ -57,7 +57,7 @@ fetch \
 
 appdir="$ROOT/target/AppDir"
 rm -rf "$appdir"
-install -Dm755 "$binary" "$appdir/usr/bin/option-term"
+install -Dm755 "$binary" "$appdir/usr/bin/optionterm"
 
 # The AppImage must not use the generic theme icon: give it a real one.
 desktop="$appdir/usr/share/applications/$APP_ID.desktop"

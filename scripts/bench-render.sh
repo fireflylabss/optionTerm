@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/release/option-term"
+BIN="$ROOT/target/release/optionterm"
 MODE="${1:-static}"
 shift || true
 OUT="$ROOT/target/bench"
@@ -37,7 +37,7 @@ chmod +x "$SHIM"
 
 # GApplication is single-instance: a stale process would swallow the activation
 # and the run would measure nothing.
-pkill -x option-term 2>/dev/null || true
+pkill -x optionterm 2>/dev/null || true
 sleep 0.3
 
 BENCH_HOME="$OUT/home"
@@ -47,7 +47,7 @@ mkdir -p "$BENCH_HOME"
 LOG="$OUT/$MODE.log"
 echo "running $MODE $* -> $LOG" >&2
 env HOME="$BENCH_HOME" XDG_CONFIG_HOME="$BENCH_HOME/.config" SHELL="$SHIM" \
-  OPTION_TERM_PROFILE=1 RUST_LOG=option_term=info \
+  OPTION_TERM_PROFILE=1 RUST_LOG=optionterm=info \
   timeout 120 "$BIN" >"$LOG" 2>&1 || true
 
 echo

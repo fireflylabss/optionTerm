@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=optionTerm
 Comment=AI-ready terminal powered by libghostty-vt
-Exec=option-term
+Exec=optionterm
 Icon=utilities-terminal
 Terminal=false
 Type=Application

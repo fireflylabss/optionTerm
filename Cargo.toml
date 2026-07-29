@@ -1,14 +1,14 @@
 [package]
-name = "option-term"
-version = "0.1.6"
+name = "optionterm"
+version = "0.1.7"
 edition = "2024"
 description = "optionTerm AI — GTK4 + libadwaita terminal powered by libghostty-vt"
 license = "Apache-2.0"
 repository = "https://github.com/fireflylabss/optionTerm"
-default-run = "option-term"
+default-run = "optionterm"
 
 [[bin]]
-name = "option-term"
+name = "optionterm"
 path = "src/main.rs"
 
 [dependencies]

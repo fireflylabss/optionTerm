@@ -46,9 +46,9 @@ sudo pacman -S gtk4 libadwaita pango cairo pkgconf git
 ### Arch Linux (AUR)
 
 ```bash
-yay -S option-term
+yay -S optionterm
 # or
-paru -S option-term
+paru -S optionterm
 ```
 
 ### Debian / Ubuntu
@@ -56,7 +56,7 @@ paru -S option-term
 Download the `.deb` from the [latest release](https://github.com/fireflylabss/optionTerm/releases) and install it:
 
 ```bash
-sudo apt install ./option-term_*_amd64.deb
+sudo apt install ./optionterm_*_amd64.deb
 ```
 
 Requires GTK 4.14+ and libadwaita 1.5+ (Ubuntu 24.04+, Debian 13+).
@@ -93,10 +93,13 @@ sudo ./scripts/install.sh --system
 After installing, launch from the terminal:
 
 ```bash
-option-term
+optionterm
 ```
 
 Or from your applications menu / launcher (it appears as **optionTerm**).
+
+> The package and command were called `option-term` up to 0.1.6. Installs still
+> provide an `option-term` symlink, so existing aliases and scripts keep working.
 
 ## Build & run (development)
 

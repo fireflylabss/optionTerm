@@ -3,8 +3,8 @@
 ## Build
 - `libghostty-vt 0.2.x` exige **Zig 0.15.x** (o Zig 0.16 do sistema não compila).
   Use `./scripts/run.sh` ou: `PATH="/tmp/zig151/zig-0.15.2:$PATH" cargo build --release`
-- Smoke test: `timeout 5 ./target/release/option-term` (GApplication é single-instance —
-  mate instâncias antigas antes: `pkill option-term`).
+- Smoke test: `timeout 5 ./target/release/optionterm` (GApplication é single-instance —
+  mate instâncias antigas antes: `pkill optionterm`).
 - O warning `AdwTabBox reported min width -6` no startup é bug conhecido e inofensivo do libadwaita.
 - Testes: `PATH="/tmp/zig151/zig-0.15.2:$PATH" cargo test --release`.
 
@@ -48,7 +48,11 @@
 - `git` é makedepend real: o `build.rs` do `libghostty-vt-sys` clona o Ghostty.
 
 ## Release / AUR
-- Publicado no AUR como **`option-term`** (`ssh://aur@aur.archlinux.org/option-term.git`).
+- Publicado no AUR como **`optionterm`** (`ssh://aur@aur.archlinux.org/optionterm.git`).
+  Renomeado de `option-term` na 0.1.7. O AUR **não renomeia pacote**: publica-se um novo e
+  pede-se merge do antigo pela interface web (não tem API). O novo PKGBUILD leva
+  `conflicts`/`replaces`/`provides = option-term` e instala um symlink `option-term`,
+  senão quem já tinha instalado não migra e o binário antigo fica órfão.
 - `packaging/aur/` guarda uma cópia do `PKGBUILD`/`.SRCINFO` publicados (fonte da verdade é o repo do AUR).
 - O `PKGBUILD` baixa o tarball oficial do **Zig 0.15.2** porque `extra/zig` já é 0.16.
 - Fluxo de release: bump no `Cargo.toml` → `CHANGELOG.md` → commit → `git tag -a vX.Y.Z` →
