@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_ID="labs.firefly.optionTerm"
+APP_ID="io.option.terminal"
 DESKTOP_FILE="$APP_ID.desktop"
 
 # ---------------------------------------------------------------------------

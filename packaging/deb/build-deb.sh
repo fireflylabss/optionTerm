@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-APP_ID="labs.firefly.optionTerm"
+APP_ID="io.option.terminal"
 PKG="option-term"
 OUT_DIR="$ROOT/dist"
 

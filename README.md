@@ -220,7 +220,7 @@ With `session_restore = true`, the open tabs, their pane count and each pane's w
 
 ## Notes
 
-- optionTerm is a single-instance `GApplication` (`labs.firefly.optionTerm`).
+- optionTerm is a single-instance `GApplication` (`io.option.terminal`).
 - A benign `AdwTabBox reported min width -6` warning may appear on startup (known libadwaita behavior).
 - Requires **Zig 0.15.2** at build time; `libghostty-vt-sys` does not yet support Zig 0.16.
 

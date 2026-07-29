@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-const APP_ID: &str = "labs.firefly.optionTerm";
+const APP_ID: &str = "io.option.terminal";
 
 /// How long after our own `config.toml` write the file monitor stays quiet.
 const SELF_WRITE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);

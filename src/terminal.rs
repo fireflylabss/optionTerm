@@ -34,6 +34,7 @@ use crate::{
     config::{Config, CursorStyle},
     graphics,
     input::Input,
+    profile::{Phase, Profiler},
     pty::{self, Child, Pty, PtyError},
 };
 
@@ -90,6 +91,7 @@ struct Session {
     sel_start: Option<TrackedGridRef>,
     sel_end: Option<TrackedGridRef>,
     sel_rectangle: bool,
+    profiler: Profiler,
 }
 
 impl TerminalView {
@@ -493,6 +495,7 @@ fn bootstrap_session(
         sel_start: None,
         sel_end: None,
         sel_rectangle: false,
+        profiler: Profiler::new(),
     })
 }
 
@@ -1201,6 +1204,7 @@ impl Session {
         width: i32,
         height: i32,
     ) -> Result<()> {
+        let mut frame = self.profiler.begin();
         let bg = self.config.background;
         // `background-opacity` only dims the default background; explicit cell
         // backgrounds stay opaque so text remains readable, like Ghostty.
@@ -1213,6 +1217,7 @@ impl Session {
         );
         cr.paint().ok();
         cr.set_operator(cairo::Operator::Over);
+        frame.mark(Phase::Clear);
         let _ = (width, height);
 
         // Grab cached font descriptions before `render_state` borrows self.
@@ -1297,6 +1302,7 @@ impl Session {
             width: width as f64,
             height: height as f64,
         };
+        frame.mark(Phase::Setup);
         // Borrow the fields directly: `snapshot` still holds `&self.terminal`,
         // so a `&mut self` method would conflict.
         self.image_cache.begin_frame();
@@ -1310,6 +1316,7 @@ impl Session {
                 layer,
             );
         }
+        frame.mark(Phase::ImagesBelow);
 
         let mut row_it = self
             .row_it
@@ -1324,6 +1331,7 @@ impl Session {
             let mut col_idx = 0u16;
 
             while let Some(cell) = cell_it.next() {
+                frame.count_cell();
                 let x = pad_x + col_idx as f64 * cell_w;
                 let selected = cell.is_selected().unwrap_or(false);
                 let graphemes = cell.graphemes_len().unwrap_or(0);
@@ -1387,6 +1395,7 @@ impl Session {
                             (false, true) => font_italic,
                             (false, false) => font,
                         };
+                        frame.count_glyph();
                         layout.set_font_description(Some(desc));
                         layout.set_text(&text);
                         // Monospace terminals left-align glyphs in the cell.
@@ -1412,6 +1421,7 @@ impl Session {
             }
             row_idx = row_idx.saturating_add(1);
         }
+        frame.mark(Phase::Cells);
 
         // Thin cursor shapes drawn on top (they don't obscure the glyph).
         if cursor_shown
@@ -1444,6 +1454,8 @@ impl Session {
             }
         }
 
+        frame.mark(Phase::Cursor);
+
         // Kitty images that sit above the text layer (z >= 0).
         paint_images(
             &self.terminal,
@@ -1454,7 +1466,10 @@ impl Session {
             KittyLayer::AboveText,
         );
         self.image_cache.end_frame();
+        frame.mark(Phase::ImagesAbove);
 
+        let (cols, rows) = (self.cols, self.rows);
+        self.profiler.end(frame, cols, rows);
         Ok(())
     }
 }

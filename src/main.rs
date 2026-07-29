@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod graphics;
 mod input;
+mod profile;
 mod pty;
 mod session;
 mod terminal;

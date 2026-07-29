@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-07-29
+
+### Changed
+
+- Application ID is now **`io.option.terminal`** (was `labs.firefly.optionTerm`). Desktop entry, install scripts, AppImage and `.deb` packaging follow the new ID. Reinstall the `.desktop` file if you used a previous install.
+
 ## [0.1.5] - 2026-07-28
 
 ### Added
@@ -84,5 +90,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Notes
 
 - Requires **Zig 0.15.2** in `PATH` at build time (`libghostty-vt-sys`).
-- The app uses a single-instance `GApplication` (`labs.firefly.optionTerm`).
+- The app uses a single-instance `GApplication` (`io.option.terminal`).
 - A benign `AdwTabBox reported min width -6` warning may appear on startup (known libadwaita behavior).

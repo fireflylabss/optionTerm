@@ -2,7 +2,7 @@
 # Install the optionTerm icons + .desktop entry for the current user.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_ID="labs.firefly.optionTerm"
+APP_ID="io.option.terminal"
 ICONS="$HOME/.local/share/icons/hicolor"
 
 for s in 16 24 32 48 64 128 256 512; do
