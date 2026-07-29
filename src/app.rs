@@ -579,7 +579,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 attach_context_menu(&view);
 
                 {
-                    // Ctrl+click on a hyperlink / URL / existing path.
+                    // Ctrl+click or Shift+click on a hyperlink / URL / path.
                     let toast = toast.clone();
                     view.set_on_link(move |uri| {
                         match gio::AppInfo::launch_default_for_uri(
@@ -725,6 +725,20 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         })
     };
 
+    // Directory a new tab or split should start in. `None` means "wherever the
+    // shell would start anyway", which is also what the config key turns this
+    // into when inheritance is off.
+    let inherit_cwd: Rc<dyn Fn() -> Option<PathBuf>> = {
+        let current_view = current_view.clone();
+        let config = config.clone();
+        Rc::new(move || {
+            if !config.borrow().inherit_working_directory {
+                return None;
+            }
+            current_view()?.pwd().map(PathBuf::from)
+        })
+    };
+
     let search_bar = Rc::new(SearchBar::new({
         let current_view = current_view.clone();
         Rc::new(move || current_view())
@@ -740,6 +754,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let pages = pages.clone();
         let make_view = make_view.clone();
         let current_view = current_view.clone();
+        let inherit_cwd = inherit_cwd.clone();
         let unzoom = unzoom.clone();
         Rc::new(move |orientation: gtk4::Orientation, before: bool| {
             unzoom();
@@ -748,8 +763,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             };
             let Some(target) = current_view() else { return };
             let page_slot = Rc::new(RefCell::new(Some(page.clone())));
-            // A new split inherits the focused pane's directory.
-            let cwd = target.pwd().map(PathBuf::from);
+            let cwd = inherit_cwd();
             let Ok(new_view) = make_view(page_slot, cwd) else {
                 return;
             };
@@ -929,10 +943,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     {
         let add_tab = add_tab.clone();
+        let inherit_cwd = inherit_cwd.clone();
         window.add_action(&add_simple(
             "new-tab",
             Box::new(move || {
-                if let Err(err) = add_tab(None) {
+                if let Err(err) = add_tab(inherit_cwd()) {
                     tracing::error!("new tab failed: {err:#}");
                 }
             }),

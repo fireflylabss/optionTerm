@@ -15,7 +15,7 @@ use libghostty_vt::{
     Terminal, TerminalOptions,
     fmt::{Formatter, FormatterOptions},
     kitty::graphics::{Layer as KittyLayer, PlacementIterator},
-    paste,
+    mouse, paste,
     render::{CellIterator, CursorVisualStyle, RenderState, RowIterator},
     screen::TrackedGridRef,
     selection::{
@@ -34,7 +34,7 @@ use libghostty_vt::{
 use crate::{
     config::{Config, CursorStyle},
     graphics,
-    input::Input,
+    input::{Input, gdk_mods},
     profile::{Frame, Phase, Profiler},
     pty::{self, Child, Pty, PtyError},
 };
@@ -92,6 +92,12 @@ struct Session {
     sel_start: Option<TrackedGridRef>,
     sel_end: Option<TrackedGridRef>,
     sel_rectangle: bool,
+    /// Fractional wheel travel not yet turned into whole lines. High-resolution
+    /// wheels report a fraction of a detent per event, so rounding each event
+    /// on its own discards all of them and the terminal never scrolls.
+    wheel_accum: f64,
+    mouse_enc: mouse::Encoder<'static>,
+    mouse_ev: mouse::Event<'static>,
     profiler: Profiler,
 }
 
@@ -296,20 +302,28 @@ impl TerminalView {
         size
     }
 
-    /// Called with a URI when the user Ctrl+clicks a link.
+    /// Called with a URI when the user Ctrl+ or Shift+clicks a link.
     pub fn set_on_link(&self, cb: impl Fn(String) + 'static) {
         *self.link_cb.borrow_mut() = Some(Rc::new(cb));
     }
 
     /// The shell's working directory, as a filesystem path.
     ///
-    /// OSC 7 reports a `file://host/path` URI, so it has to be decoded rather
-    /// than used verbatim.
+    /// Prefers OSC 7 because a shell that reports it is authoritative (it can
+    /// describe directories this process cannot see), and falls back to the
+    /// kernel's view of the foreground process group. Without that fallback
+    /// this returns `None` on any shell not set up to emit OSC 7, which is
+    /// most of them.
     pub fn pwd(&self) -> Option<String> {
         let borrow = self.state.borrow();
         let session = borrow.as_ref()?;
-        let raw = session.terminal.pwd().ok().filter(|p| !p.is_empty())?;
-        Some(pwd_to_path(raw))
+        if let Some(raw) = session.terminal.pwd().ok().filter(|p| !p.is_empty()) {
+            let path = pwd_to_path(raw);
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+        Some(session.pty.foreground_cwd()?.display().to_string())
     }
 
     /// Find every occurrence of `needle` (case-insensitive) in the scrollback.
@@ -496,6 +510,9 @@ fn bootstrap_session(
         sel_start: None,
         sel_end: None,
         sel_rectangle: false,
+        wheel_accum: 0.0,
+        mouse_enc: mouse::Encoder::new().map_err(|e| anyhow!("{e:?}"))?,
+        mouse_ev: mouse::Event::new().map_err(|e| anyhow!("{e:?}"))?,
         profiler: Profiler::new(),
     })
 }
@@ -732,16 +749,18 @@ fn attach_input(
     {
         let state = state.clone();
         let area = area.clone();
-        scroll.connect_scroll(move |_, _dx, dy| {
+        scroll.connect_scroll(move |controller, _dx, dy| {
+            let mods = controller.current_event_state();
+            // Mouse reporting needs a cell, and the cell comes from where the
+            // pointer is — which the scroll signal itself does not carry.
+            let pos = controller
+                .current_event()
+                .and_then(|e| e.position())
+                .unwrap_or((0.0, 0.0));
             if let Ok(mut borrow) = state.try_borrow_mut()
                 && let Some(session) = borrow.as_mut()
             {
-                let delta = (dy * 3.0).round() as isize;
-                if delta != 0 {
-                    session
-                        .terminal
-                        .scroll_viewport(ScrollViewport::Delta(delta));
-                }
+                session.wheel(dy, mods, pos);
             }
             area.queue_draw();
             glib::Propagation::Stop
@@ -758,11 +777,13 @@ fn attach_input(
         let link_cb = link_cb.clone();
         click.connect_pressed(move |gesture, _n, x, y| {
             area.grab_focus();
-            // Ctrl+click opens the link under the pointer instead of starting
-            // a selection (OSC 8 hyperlink, URL, or an existing path).
+            // Ctrl+click or Shift+click opens the link under the pointer
+            // instead of starting a selection (OSC 8 hyperlink, URL, or an
+            // existing path). Shift is what most terminals bind, Ctrl is what
+            // editors and browsers train people to expect, so accept both.
             if gesture
                 .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK)
+                .intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
             {
                 let uri = state
                     .try_borrow_mut()
@@ -1198,6 +1219,118 @@ impl Session {
         Ok(Some((cols, rows)))
     }
 
+    /// Handle one wheel event.
+    ///
+    /// Three destinations, in the order a terminal is expected to try them:
+    /// the application (when it asked for mouse reporting), cursor keys (the
+    /// alternate screen, where there is no scrollback to move), or the
+    /// viewport.
+    fn wheel(&mut self, dy: f64, mods: gdk::ModifierType, pos: (f64, f64)) {
+        let Some(lines) = accumulate_wheel(&mut self.wheel_accum, dy) else {
+            return;
+        };
+
+        if self.report_wheel(lines, mods, pos) {
+            return;
+        }
+        if self.on_alternate_screen() {
+            self.send_cursor_keys(lines);
+            return;
+        }
+        self.terminal.scroll_viewport(ScrollViewport::Delta(lines));
+    }
+
+    /// Whether the alternate screen is active, by any of the three modes that
+    /// can switch to it. 1049 is the one every modern TUI actually uses, so
+    /// checking only 1047 would miss vim, less and htop entirely.
+    fn on_alternate_screen(&self) -> bool {
+        [
+            Mode::ALT_SCREEN_SAVE,
+            Mode::ALT_SCREEN,
+            Mode::ALT_SCREEN_LEGACY,
+        ]
+        .iter()
+        .any(|m| self.terminal.mode(*m).unwrap_or(false))
+    }
+
+    /// Encode the wheel as mouse buttons 4/5 if the application is tracking the
+    /// mouse. Returns whether it was reported.
+    fn report_wheel(&mut self, lines: isize, mods: gdk::ModifierType, pos: (f64, f64)) -> bool {
+        let tracking = [
+            Mode::X10_MOUSE,
+            Mode::NORMAL_MOUSE,
+            Mode::BUTTON_MOUSE,
+            Mode::ANY_MOUSE,
+        ]
+        .iter()
+        .any(|m| self.terminal.mode(*m).unwrap_or(false));
+        if !tracking {
+            return false;
+        }
+
+        self.mouse_enc.set_options_from_terminal(&self.terminal);
+        self.mouse_enc.set_size(mouse::EncoderSize {
+            screen_width: (self.cols as f64 * self.cell_width).round() as u32,
+            screen_height: (self.rows as f64 * self.cell_height).round() as u32,
+            cell_width: self.cell_width.round().max(1.0) as u32,
+            cell_height: self.cell_height.round().max(1.0) as u32,
+            padding_top: self.config.padding_y.round() as u32,
+            padding_bottom: self.config.padding_y.round() as u32,
+            padding_left: self.config.padding_x.round() as u32,
+            padding_right: self.config.padding_x.round() as u32,
+        });
+
+        let button = if lines < 0 {
+            mouse::Button::Four
+        } else {
+            mouse::Button::Five
+        };
+        self.mouse_ev
+            .set_action(mouse::Action::Press)
+            .set_button(Some(button))
+            .set_mods(gdk_mods(mods))
+            .set_position(mouse::Position {
+                x: pos.0 as f32,
+                y: pos.1 as f32,
+            });
+
+        // A detent is one discrete click, so send one report per line of travel
+        // rather than scaling the report itself.
+        let mut out = Vec::new();
+        for _ in 0..lines.unsigned_abs() {
+            if self
+                .mouse_enc
+                .encode_to_vec(&self.mouse_ev, &mut out)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        if out.is_empty() {
+            return false;
+        }
+        self.pty.write_all(&out);
+        true
+    }
+
+    /// xterm's alternate scroll: on the alternate screen the wheel becomes
+    /// cursor keys, which is what `less`, `man` and friends actually read.
+    fn send_cursor_keys(&mut self, lines: isize) {
+        // DECCKM switches the cursor keys from CSI to SS3.
+        let application = self.terminal.mode(Mode::DECCKM).unwrap_or(false);
+        let seq: &[u8] = match (lines < 0, application) {
+            (true, false) => b"\x1b[A",
+            (true, true) => b"\x1bOA",
+            (false, false) => b"\x1b[B",
+            (false, true) => b"\x1bOB",
+        };
+        let mut out = Vec::with_capacity(seq.len() * lines.unsigned_abs());
+        for _ in 0..lines.unsigned_abs() {
+            out.extend_from_slice(seq);
+        }
+        self.pty.write_all(&out);
+    }
+
     fn paint(
         &mut self,
         da: &DrawingArea,
@@ -1247,7 +1380,12 @@ impl Session {
 
         let layout = pango::Layout::new(&pango_ctx);
         layout.set_font_description(Some(font));
-        disable_ligatures(&layout);
+        // Ligatures only became possible once cells were shaped as runs; a lone
+        // cell has nothing to ligate with. Programming fonts keep the combined
+        // advance equal to the sum of the parts, so the grid still lines up.
+        if !self.config.font_ligatures {
+            disable_ligatures(&layout);
+        }
 
         let pad_x = self.config.padding_x;
         let pad_y = self.config.padding_y;
@@ -1493,6 +1631,30 @@ impl Session {
         self.profiler.end(frame, cols, rows);
         Ok(())
     }
+}
+
+/// Turn wheel travel into whole lines, carrying the remainder.
+///
+/// High-resolution wheels (libinput reports 1/120 of a detent) deliver
+/// fractional deltas, so rounding each event independently yields zero every
+/// time and the terminal appears frozen. Keeping the remainder is what makes
+/// both a chunky mouse wheel and a smooth one work.
+///
+/// Negative is up, matching GTK's delta and `ScrollViewport::Delta`.
+fn accumulate_wheel(accum: &mut f64, dy: f64) -> Option<isize> {
+    /// Lines of travel per full wheel detent.
+    const LINES_PER_DETENT: f64 = 3.0;
+
+    if !dy.is_finite() {
+        return None;
+    }
+    *accum += dy * LINES_PER_DETENT;
+    let whole = accum.trunc();
+    if whole == 0.0 {
+        return None;
+    }
+    *accum -= whole;
+    Some(whole as isize)
 }
 
 /// Merges horizontally adjacent cells that share a background into one
@@ -1747,7 +1909,7 @@ pub fn pwd_to_path(raw: &str) -> String {
 ///
 /// Recognises explicit schemes, bare `www.` hosts, and filesystem paths that
 /// actually exist (relative ones resolved against the shell's reported pwd).
-/// Returns `None` for ordinary words so Ctrl+click stays a no-op on prose.
+/// Returns `None` for ordinary words so a modified click stays a no-op on prose.
 pub fn detect_link(word: &str, pwd: Option<&str>) -> Option<String> {
     // Terminal output is full of trailing punctuation: `see https://x.dev.`
     let word = word.trim_matches(|c: char| {
@@ -1852,6 +2014,8 @@ fn measure_cell(da: &DrawingArea, config: &Config) -> (f64, f64) {
     let desc = font_description(config);
     let layout = pango::Layout::new(&pango_ctx);
     layout.set_font_description(Some(&desc));
+    // Always measured without ligatures: cell size must not depend on the
+    // ligature setting, or toggling it would reflow the whole grid.
     disable_ligatures(&layout);
     layout.set_text("M");
 
@@ -2093,6 +2257,154 @@ mod tests {
         assert!(runs.text.is_empty());
     }
 
+    /// The wheel picks one of three destinations from terminal state, so those
+    /// states have to be detected correctly or scrolling goes to the wrong place
+    /// — which is exactly how it ended up doing nothing at all.
+    #[test]
+    fn wheel_routing_reads_the_right_terminal_modes() {
+        let mut term = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("terminal");
+
+        let tracking = |t: &Terminal<'_, '_>| {
+            [
+                Mode::X10_MOUSE,
+                Mode::NORMAL_MOUSE,
+                Mode::BUTTON_MOUSE,
+                Mode::ANY_MOUSE,
+            ]
+            .iter()
+            .any(|m| t.mode(*m).unwrap_or(false))
+        };
+
+        // A plain shell: no tracking, main screen, so the viewport moves.
+        assert!(!tracking(&term));
+        assert!(!term.mode(Mode::ALT_SCREEN).unwrap_or(false));
+
+        // htop and friends enable mouse reporting; the wheel must be forwarded.
+        term.vt_write(b"\x1b[?1000h");
+        assert!(tracking(&term), "normal mouse tracking not detected");
+        term.vt_write(b"\x1b[?1000l");
+        assert!(!tracking(&term));
+
+        // less, man and vim switch to the alternate screen, where there is no
+        // scrollback to move, so the wheel becomes cursor keys. They all use
+        // 1049, *not* 1047 — checking only the latter is why this test exists.
+        let alt = |t: &Terminal<'_, '_>| {
+            [
+                Mode::ALT_SCREEN_SAVE,
+                Mode::ALT_SCREEN,
+                Mode::ALT_SCREEN_LEGACY,
+            ]
+            .iter()
+            .any(|m| t.mode(*m).unwrap_or(false))
+        };
+        term.vt_write(b"\x1b[?1049h");
+        assert!(alt(&term), "alternate screen via 1049 not detected");
+        assert!(
+            !term.mode(Mode::ALT_SCREEN).unwrap_or(false),
+            "1049 does not set 1047, so both must be checked"
+        );
+        term.vt_write(b"\x1b[?1049l");
+        assert!(!alt(&term));
+        term.vt_write(b"\x1b[?47h");
+        assert!(alt(&term), "legacy alternate screen not detected");
+        term.vt_write(b"\x1b[?47l");
+
+        // DECCKM decides between CSI and SS3 for those cursor keys.
+        assert!(!term.mode(Mode::DECCKM).unwrap_or(false));
+        term.vt_write(b"\x1b[?1h");
+        assert!(term.mode(Mode::DECCKM).unwrap_or(false));
+    }
+
+    /// Ligatures are only safe because programming fonts keep the ligature's
+    /// advance equal to the sum of the glyphs it replaces. If that ever stops
+    /// holding, text drifts out of the grid — so assert it rather than trust it.
+    #[test]
+    fn ligatures_preserve_the_cell_advance() {
+        use pango::prelude::FontMapExt;
+        let font_map = pangocairo::FontMap::default();
+        let family = "FiraCode Nerd Font Mono";
+        if !font_map.list_families().iter().any(|f| f.name() == family) {
+            eprintln!("skipping: {family} is not installed");
+            return;
+        }
+
+        let ctx = font_map.create_context();
+        let desc = pango::FontDescription::from_string(&format!("{family} 12"));
+        let layout = pango::Layout::new(&ctx);
+        layout.set_font_description(Some(&desc));
+
+        // Cell width is measured without ligatures, exactly like measure_cell.
+        disable_ligatures(&layout);
+        layout.set_text("M");
+        let cell_w = layout.pixel_size().0;
+
+        let ligated = "->";
+        layout.set_text(ligated);
+        let plain_w = layout.pixel_size().0;
+
+        // Now with ligatures on, which is what paint does by default.
+        layout.set_attributes(None);
+        layout.set_text(ligated);
+        let ligature_w = layout.pixel_size().0;
+
+        assert_eq!(
+            ligature_w,
+            cell_w * ligated.chars().count() as i32,
+            "a ligature changed the run's advance and would break the grid"
+        );
+        assert_eq!(plain_w, ligature_w, "ligatures must not change total width");
+    }
+
+    /// The scroll bug: a high-resolution wheel reports a fraction of a detent
+    /// per event, so rounding each event on its own always yielded zero.
+    #[test]
+    fn a_high_resolution_wheel_eventually_scrolls() {
+        let mut accum = 0.0;
+        // libinput's 1/120 steps, scaled to a detent by GTK.
+        let step = 1.0 / 120.0;
+        let mut emitted = 0isize;
+        for _ in 0..120 {
+            if let Some(lines) = accumulate_wheel(&mut accum, step) {
+                emitted += lines;
+            }
+        }
+        // A full detent of travel must produce a full detent of lines.
+        assert_eq!(emitted, 3, "high-resolution wheel produced {emitted} lines");
+    }
+
+    #[test]
+    fn a_discrete_wheel_scrolls_on_every_click() {
+        let mut accum = 0.0;
+        assert_eq!(accumulate_wheel(&mut accum, -1.0), Some(-3), "up");
+        assert_eq!(accumulate_wheel(&mut accum, 1.0), Some(3), "down");
+    }
+
+    /// The remainder must be carried, not dropped, or slow scrolling loses
+    /// travel over time.
+    #[test]
+    fn wheel_travel_is_never_lost() {
+        let mut accum = 0.0;
+        let mut emitted = 0isize;
+        // 0.5 of a detent is 1.5 lines: one line now, half carried forward.
+        for _ in 0..4 {
+            emitted += accumulate_wheel(&mut accum, 0.5).unwrap_or(0);
+        }
+        assert_eq!(emitted, 6, "2 detents of travel must be 6 lines");
+    }
+
+    #[test]
+    fn wheel_ignores_garbage_deltas() {
+        let mut accum = 0.0;
+        assert_eq!(accumulate_wheel(&mut accum, f64::NAN), None);
+        assert_eq!(accumulate_wheel(&mut accum, 0.0), None);
+        assert_eq!(accum, 0.0, "a rejected delta must not poison the carry");
+    }
+
     #[test]
     fn only_single_width_undecorated_cells_are_batchable() {
         assert!(is_batchable("a", &style()));
@@ -2144,7 +2456,7 @@ mod tests {
         );
     }
 
-    /// Ordinary words must not become links, otherwise Ctrl+click would fire
+    /// Ordinary words must not become links, otherwise a modified click would fire
     /// on prose and version numbers.
     #[test]
     fn ignores_plain_words() {

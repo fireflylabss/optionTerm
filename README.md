@@ -11,7 +11,7 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 - **Accents & input methods** — dead keys and compose sequences work (`´` + `a` → `á`), plus CJK/IBus engines via `GtkIMMulticontext`.
 - **Persistent settings** — anything changed from the menus or Preferences is written straight back to `config.toml`.
 - **Clear & restart** — wipe the screen and scrollback (`Ctrl+Shift+K`) or respawn the shell in place keeping the split layout (`Ctrl+Shift+R`).
-- **Clickable links** — `Ctrl+click` opens OSC 8 hyperlinks, bare URLs and existing file paths.
+- **Clickable links** — `Ctrl+click` or `Shift+click` opens OSC 8 hyperlinks, bare URLs and existing file paths.
 - **Scrollback search** — `Ctrl+Shift+F`, with match counter and wrap-around navigation.
 - **Session restore** — reopen tabs, panes and their working directories on start.
 - **Translucent background** — `background_opacity`, plus automatic config reload when `config.toml` changes.

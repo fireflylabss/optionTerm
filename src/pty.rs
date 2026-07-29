@@ -112,6 +112,20 @@ impl Pty {
         write_fd(self.master.as_raw_fd(), data);
     }
 
+    /// Working directory of whatever is currently in the foreground.
+    ///
+    /// OSC 7 only works when the shell is set up to emit it, which most are
+    /// not, so this reads the truth from the kernel instead: the terminal's
+    /// foreground process group, then that process's `cwd` link. It also
+    /// follows `cd` inside a running program, which OSC 7 cannot.
+    pub fn foreground_cwd(&self) -> Option<PathBuf> {
+        let pgid = unistd::tcgetpgrp(&self.master).ok()?;
+        let cwd = std::fs::read_link(format!("/proc/{}/cwd", pgid.as_raw())).ok()?;
+        // A deleted directory resolves to something like "/old/path (deleted)",
+        // which would make the new pane fail to chdir.
+        cwd.is_dir().then_some(cwd)
+    }
+
     pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
         let winsize = Winsize {
             ws_row: rows,
@@ -166,5 +180,39 @@ impl Drop for Child {
                 let _ = wait::waitpid(pid, None);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cwd fix must work without any shell cooperation: no OSC 7, no shell
+    /// integration, just the kernel's view of the foreground process group.
+    #[test]
+    fn reads_the_foreground_directory_from_the_kernel() {
+        let dir = std::env::temp_dir().canonicalize().expect("temp dir");
+        // SAFETY: single-threaded setup before the fork; the child execs at once.
+        unsafe { std::env::set_var("SHELL", "/bin/sh") };
+
+        let (pty, child) = Pty::spawn(80, 24, 8, 16, Some(&dir)).expect("spawn");
+
+        // The shell has to be scheduled and claim the terminal first.
+        let mut found = None;
+        for _ in 0..200 {
+            if let Some(cwd) = pty.foreground_cwd() {
+                found = Some(cwd);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(child);
+
+        let found = found.expect("no foreground cwd was ever reported");
+        assert_eq!(
+            found.canonicalize().ok().as_deref(),
+            Some(dir.as_path()),
+            "reported {found:?}, expected {dir:?}"
+        );
     }
 }

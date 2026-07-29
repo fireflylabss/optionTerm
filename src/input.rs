@@ -121,7 +121,7 @@ fn is_modifier(keyval: gdk::Key) -> bool {
     )
 }
 
-fn gdk_mods(state: gdk::ModifierType) -> key::Mods {
+pub(crate) fn gdk_mods(state: gdk::ModifierType) -> key::Mods {
     let mut mods = key::Mods::empty();
     if state.contains(gdk::ModifierType::SHIFT_MASK) {
         mods |= key::Mods::SHIFT;

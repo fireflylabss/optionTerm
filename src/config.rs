@@ -54,6 +54,9 @@ impl Theme {
 pub struct Config {
     pub font_family: String,
     pub font_size: f32,
+    /// Shape programming ligatures (`->`, `=>`, `!=`). Only affects runs of
+    /// cells with the same style, so the grid is preserved either way.
+    pub font_ligatures: bool,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub tabs_location: TabsLocation,
@@ -64,6 +67,9 @@ pub struct Config {
     pub background_opacity: f64,
     /// Restore tabs/splits and their working directories on start.
     pub session_restore: bool,
+    /// New tabs and splits start in the focused pane's directory
+    /// (Ghostty `window-inherit-working-directory`).
+    pub inherit_working_directory: bool,
     pub background: RgbColor,
     pub foreground: RgbColor,
     pub cursor: RgbColor,
@@ -81,6 +87,7 @@ impl Default for Config {
         Self {
             font_family: "monospace".into(),
             font_size: 13.0,
+            font_ligatures: true,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             tabs_location: TabsLocation::Top,
@@ -88,6 +95,7 @@ impl Default for Config {
             theme: Theme::System,
             background_opacity: 1.0,
             session_restore: false,
+            inherit_working_directory: true,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
             cursor: rgb(0xff, 0xff, 0xff),
@@ -172,6 +180,9 @@ impl Config {
         if let Some(v) = num_at("font", "size") {
             cfg.font_size = v as f32;
         }
+        if let Some(v) = bool_at("font", "ligatures") {
+            cfg.font_ligatures = v;
+        }
 
         if let Some(v) = str_at("cursor", "style") {
             cfg.cursor_style = match v.as_str() {
@@ -207,6 +218,9 @@ impl Config {
         }
         if let Some(v) = num_at("window", "background_opacity") {
             cfg.background_opacity = v.clamp(0.15, 1.0);
+        }
+        if let Some(v) = bool_at("window", "inherit_working_directory") {
+            cfg.inherit_working_directory = v;
         }
         if let Some(v) = bool_at("window", "session_restore") {
             cfg.session_restore = v;
@@ -290,6 +304,7 @@ impl Config {
 [font]
 family = "{family}"
 size = {size}
+ligatures = {ligatures}   # shape ->, =>, != as single glyphs
 
 [cursor]
 style = "{style}"   # block | bar | underline | block_hollow
@@ -303,6 +318,7 @@ sidebar_always = {sidebar_always}   # show the sidebar even with a single tab
 theme = "{theme}"   # system | light | dark
 background_opacity = {opacity}   # 0.15 .. 1.0
 session_restore = {session_restore}   # restore tabs/splits and cwd on start
+inherit_working_directory = {inherit_cwd}   # new tabs/splits open in the focused pane's directory
 padding_x = {pad_x}
 padding_y = {pad_y}
 
@@ -317,6 +333,8 @@ palette = [
 "##,
             family = self.font_family,
             size = self.font_size,
+            ligatures = self.font_ligatures,
+            inherit_cwd = self.inherit_working_directory,
             sidebar_always = self.sidebar_always,
             theme = self.theme.as_str(),
             opacity = self.background_opacity,
@@ -358,6 +376,16 @@ palette = [
                     if let Ok(v) = value.parse::<f32>() {
                         cfg.font_size = v;
                     }
+                }
+                // Ghostty spells this as a font feature list; the common case
+                // by far is switching ligatures off wholesale.
+                "font-feature" => {
+                    if matches!(value, "-liga" | "-calt" | "-clig" | "-dlig") {
+                        cfg.font_ligatures = false;
+                    }
+                }
+                "window-inherit-working-directory" => {
+                    cfg.inherit_working_directory = value != "false";
                 }
                 "cursor-style" => {
                     cfg.cursor_style = match value {
@@ -579,6 +607,22 @@ fn default_ansi() -> [RgbColor; 16] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ligatures_and_cwd_inheritance_default_on() {
+        let cfg = Config::default();
+        assert!(cfg.font_ligatures);
+        assert!(cfg.inherit_working_directory, "matches Ghostty's default");
+    }
+
+    /// Ghostty's own spellings must keep working, since the first run is
+    /// generated from the user's Ghostty config.
+    #[test]
+    fn reads_the_ghostty_spellings() {
+        let cfg = Config::parse("font-feature = -liga\nwindow-inherit-working-directory = false\n");
+        assert!(!cfg.font_ligatures);
+        assert!(!cfg.inherit_working_directory);
+    }
+
     /// Everything we persist must survive a save/load round trip, otherwise
     /// preferences silently reset on the next start.
     #[test]
@@ -593,6 +637,8 @@ mod tests {
             theme: Theme::Dark,
             background_opacity: 0.85,
             session_restore: true,
+            font_ligatures: false,
+            inherit_working_directory: false,
             padding_x: 8.0,
             padding_y: 6.0,
             ..Config::default()
@@ -614,6 +660,11 @@ mod tests {
         assert_eq!(back.theme, cfg.theme);
         assert_eq!(back.background_opacity, cfg.background_opacity);
         assert_eq!(back.session_restore, cfg.session_restore);
+        assert_eq!(back.font_ligatures, cfg.font_ligatures);
+        assert_eq!(
+            back.inherit_working_directory,
+            cfg.inherit_working_directory
+        );
         assert_eq!(back.padding_x, cfg.padding_x);
         assert_eq!(back.padding_y, cfg.padding_y);
         assert_eq!(back.palette[3], cfg.palette[3]);

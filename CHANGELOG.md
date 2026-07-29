@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-07-29
+
+### Fixed
+
+- **The mouse wheel did nothing.** High-resolution wheels report a fraction of a detent per event (libinput uses 1/120 steps), and each event was rounded to whole lines on its own, so every one of them rounded to zero. Wheel travel is now accumulated and the remainder carried, which fixes both high-resolution wheels and slow scrolling on ordinary ones.
+- **The wheel did nothing inside full-screen programs either**, for a second and unrelated reason: mouse events were never reported to the application at all. The wheel now goes to whichever destination the running program expects — reported as mouse buttons when it enables mouse tracking (`htop`, `vim` with `set mouse=a`), turned into cursor keys on the alternate screen (`less`, `man`), and otherwise moving the scrollback viewport.
+- **New tabs never inherited the working directory**, and splits only did when the shell was set up to emit OSC 7, which most are not. Both now fall back to the kernel's view of the terminal's foreground process group, so inheritance works with any shell and also follows a `cd` made inside a running program, which OSC 7 cannot report.
+- **Ligatures never rendered.** They were disabled unconditionally, because up to 0.1.6 each cell was shaped as its own Pango layout and a single cell has nothing to ligate with. Now that cells are shaped as runs, `->`, `=>` and `!=` form as intended. Programming fonts keep a ligature's advance equal to the sum of the glyphs it replaces, so the grid still lines up; there is a test asserting exactly that.
+
+### Added
+
+- **`Shift+click` opens links**, alongside the existing `Ctrl+click`.
+- **`font.ligatures`** (default `true`) — also read from Ghostty's `font-feature = -liga`.
+- **`window.inherit_working_directory`** (default `true`, matching Ghostty) — also read from Ghostty's `window-inherit-working-directory`. Set it to `false` for new tabs and splits to open wherever the shell would start on its own.
+
 ## [0.1.7] - 2026-07-29
 
 ### Changed
