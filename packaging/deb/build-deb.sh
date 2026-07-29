@@ -76,7 +76,7 @@ Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libpango-1.0-0, l
 Conflicts: option-term
 Replaces: option-term
 Provides: option-term
-Maintainer: AE Firefly Labs <fireflylabss@users.noreply.github.com>
+Maintainer: Firefly Labs <fireflylabss@users.noreply.github.com>
 Homepage: https://github.com/fireflylabss/optionTerm
 Installed-Size: $installed_kb
 Description: GTK4 terminal emulator powered by libghostty-vt

@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod default_terminal;
 mod graphics;
 mod input;
 mod profile;

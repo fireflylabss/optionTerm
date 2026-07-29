@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-07-29
+
+### Added
+
+- **Theme swatches in Preferences too**, the same control as the `···` menu instead of a dropdown, so the two cannot disagree. Both were also reworked to match the intended design: bigger circles, no button frame, and a check badge on the selected one.
+- **Sound page** — an audible bell rung when a program writes BEL, honoring your desktop's sound settings, plus a button to play it once so you can tell whether your system has one at all. `sound.bell`, default on.
+- **Default Terminal page** — registers optionTerm as the preferred terminal. There is no single mechanism for this, so it writes the portable `xdg-terminals.list` (keeping your other choices below ours) plus your desktop's own key when it has one, and reports exactly which ones it managed to update instead of claiming success blindly.
+- **Shortcuts page** listing every action and its binding.
+- **New tab position** (`window.new_tab_position`) — after the current tab (default), before it, at the end, or at the start.
+- **Middle click on a tab** (`window.middle_click_tab`) — nothing (default), new tab, or close tab. It acts on the tab actually under the pointer.
+- **Confirmations** — before closing a tab (`window.confirm_close_tab`, default off) and before closing a window with more than one tab open (`window.confirm_quit`, default on).
+- **Keep the system awake** (`window.keep_awake`, default off) — blocks idle and screen blanking while any pane has a foreground job, so a long build does not get interrupted by the screen locking.
+
+### Changed
+
+- **Session restore is on by default.** Restoring tabs, panes and their directories is what a terminal with tabs and splits is expected to do.
+- The developer name is now **Firefly Labs**.
+
 ## [0.1.9] - 2026-07-29
 
 Thanks to **Yacha** ([FoxTerminal](https://gitlab.com/OrangeFox/misc/FoxTerminal), [OrangeFox](https://orangefox.tech)) — her terminal is the reason optionTerm exists, and this release borrows the shape of its quick controls and preferences. FoxTerminal is GPL-3.0-or-later and optionTerm is Apache-2.0, so no code is shared; only ideas were.

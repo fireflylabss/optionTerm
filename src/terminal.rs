@@ -65,6 +65,8 @@ pub struct TerminalView {
     watcher_attached: Rc<Cell<bool>>,
     /// Live PTY fd source, so a restart can drop it before closing the fd.
     watcher: Rc<RefCell<Option<glib::SourceId>>>,
+    /// Shared with the VT bell callback, which cannot reach `Session::config`.
+    bell_sound: Rc<Cell<bool>>,
 }
 
 struct Session {
@@ -104,6 +106,7 @@ struct Session {
 impl TerminalView {
     pub fn new(config: Config, cwd: Option<PathBuf>) -> Result<Self> {
         let area = DrawingArea::new();
+        let bell_sound = Rc::new(Cell::new(config.bell_sound));
         area.set_hexpand(true);
         area.set_vexpand(true);
         area.set_focusable(true);
@@ -131,10 +134,19 @@ impl TerminalView {
             let resize_cb = resize_cb.clone();
             let watcher_attached = watcher_attached.clone();
             let watcher = watcher.clone();
+            let bell_sound = bell_sound.clone();
             area.set_draw_func(move |da, cr, width, height| {
                 let mut just_bootstrapped = false;
                 if state.borrow().is_none() {
-                    match bootstrap_session(&config, &grid, width, height, da, cwd.as_deref()) {
+                    match bootstrap_session(
+                        bell_sound.clone(),
+                        &config,
+                        &grid,
+                        width,
+                        height,
+                        da,
+                        cwd.as_deref(),
+                    ) {
                         Ok(session) => {
                             *state.borrow_mut() = Some(session);
                             just_bootstrapped = true;
@@ -217,6 +229,7 @@ impl TerminalView {
             link_cb,
             watcher_attached,
             watcher,
+            bell_sound,
         })
     }
 
@@ -259,6 +272,7 @@ impl TerminalView {
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
         if let Some(session) = self.state.borrow_mut().as_mut() {
             f(&mut session.config);
+            self.bell_sound.set(session.config.bell_sound);
             // Cursor style/blink live in the VT state, not just our config.
             let config = session.config.clone();
             if let Err(err) = config.apply_cursor_to_terminal(&mut session.terminal) {
@@ -326,6 +340,15 @@ impl TerminalView {
         Some(session.pty.foreground_cwd()?.display().to_string())
     }
 
+    /// Whether something other than the shell prompt is running in this pane.
+    pub fn is_busy(&self) -> bool {
+        let borrow = self.state.borrow();
+        let Some(session) = borrow.as_ref() else {
+            return false;
+        };
+        session.pty.is_busy(&session.child)
+    }
+
     /// Find every occurrence of `needle` (case-insensitive) in the scrollback.
     pub fn search(&self, needle: &str) -> Vec<Match> {
         self.state
@@ -384,6 +407,7 @@ impl TerminalView {
 }
 
 fn bootstrap_session(
+    bell_sound: Rc<Cell<bool>>,
     config: &Config,
     grid: &Rc<Cell<(u16, u16)>>,
     width: i32,
@@ -479,6 +503,21 @@ fn bootstrap_session(
     terminal
         .on_xtversion(|_term| Some("optionTerm"))
         .map_err(|e| anyhow!("{e:?}"))?;
+
+    // BEL rings the system bell. Done here rather than in the widget because
+    // the VT decides when a bell happened.
+    {
+        let bell_sound = bell_sound.clone();
+        terminal
+            .on_bell(move |_term| {
+                if bell_sound.get()
+                    && let Some(display) = gdk::Display::default()
+                {
+                    display.beep();
+                }
+            })
+            .map_err(|e| anyhow!("{e:?}"))?;
+    }
 
     terminal
         .on_color_scheme(|_term| None)

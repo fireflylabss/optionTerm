@@ -9,6 +9,11 @@ optionTerm gives you a fast, modern terminal with tabs, Ghostty-style tiling spl
 - **Tabs, three ways** — top tab bar, left/right sidebar, or hidden tabs (`window.tabs`), each with a `+` button that doubles as a tab, split and terminal menu.
 - **Tab overview** — `F1` (or `Super+Tab`) opens a grid of live tab thumbnails to search and switch.
 - **Quick settings** — the `···` menu opens with theme swatches, a font-size stepper showing the current zoom, and the live `columns × rows` of the focused pane.
+- **Categorized preferences** — Appearance, Behavior, Sound, Shortcuts, Default Terminal and Advanced.
+- **Audible bell** — rung on BEL, honoring your desktop's sound settings, with a test button.
+- **Default terminal** — registers optionTerm through the portable `xdg-terminals.list` plus your desktop's own key.
+- **Tab handling** — configurable position for new tabs, a middle-click action, and optional confirmation before closing a tab or a window.
+- **Keep the system awake** while a command is running, so a long build is not interrupted by the screen locking.
 - **Kitty graphics protocol** — inline images (`timg`, `chafa --format=kitty`, plotting backends, previews), with PNG and raw pixel formats, scaling and z-layers.
 - **Accents & input methods** — dead keys and compose sequences work (`´` + `a` → `á`), plus CJK/IBus engines via `GtkIMMulticontext`.
 - **Persistent settings** — anything changed from the menus or Preferences is written straight back to `config.toml`.

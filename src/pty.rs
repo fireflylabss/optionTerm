@@ -126,6 +126,23 @@ impl Pty {
         cwd.is_dir().then_some(cwd)
     }
 
+    /// Whether a program other than the shell itself holds the terminal.
+    ///
+    /// The shell keeps its own process group in the foreground while it waits
+    /// at a prompt, so a foreground group that is not the child we spawned means
+    /// something is actually running.
+    pub fn is_busy(&self, child: &Child) -> bool {
+        let Ok(foreground) = unistd::tcgetpgrp(&self.master) else {
+            return false;
+        };
+        let shell = match child {
+            Child::Active(pid) => *pid,
+            // A dead shell is not busy, whatever the terminal still reports.
+            Child::Exited(_) => return false,
+        };
+        foreground != shell
+    }
+
     pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
         let winsize = Winsize {
             ws_row: rows,

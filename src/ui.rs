@@ -13,7 +13,7 @@ use libadwaita::prelude::*;
 
 use crate::{
     app::Pages,
-    config::{Config, CursorStyle, TabsLocation, Theme},
+    config::{Config, CursorStyle, MiddleClickTab, NewTabPosition, TabsLocation, Theme},
     terminal::{Match, TerminalView},
 };
 
@@ -135,6 +135,49 @@ fn main_menu() -> gio::Menu {
     menu
 }
 
+/// The three theme swatches: a literal preview of System / Light / Dark with a
+/// check badge on the active one.
+///
+/// Shared by the `···` menu and Preferences so both look identical.
+pub fn theme_swatches() -> (gtk4::Box, [gtk4::ToggleButton; 3]) {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 14);
+    row.set_halign(gtk4::Align::Center);
+
+    let swatches = [
+        (Theme::System, "system", "Follow the system theme"),
+        (Theme::Light, "light", "Light theme"),
+        (Theme::Dark, "dark", "Dark theme"),
+    ]
+    .map(|(theme, class, tip)| {
+        let button = gtk4::ToggleButton::builder()
+            .tooltip_text(tip)
+            .action_name("win.theme")
+            .action_target(&theme.as_str().to_variant())
+            .build();
+        button.add_css_class("theme-swatch");
+        button.add_css_class(class);
+
+        // Badge in the corner, on top of the swatch, only while selected.
+        let check = gtk4::Image::from_icon_name("object-select-symbolic");
+        check.add_css_class("theme-check");
+        check.set_halign(gtk4::Align::End);
+        check.set_valign(gtk4::Align::End);
+        check.set_visible(button.is_active());
+        button
+            .bind_property("active", &check, "visible")
+            .sync_create()
+            .build();
+
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&button));
+        overlay.add_overlay(&check);
+        row.append(&overlay);
+        button
+    });
+
+    (row, swatches)
+}
+
 /// Name tying the custom widget to its slot in [`main_menu`].
 const QUICK_SETTINGS_ID: &str = "quick-settings";
 
@@ -162,24 +205,7 @@ impl QuickSettings {
         widget.add_css_class("quick-settings");
 
         // --- Theme ---
-        let themes = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        themes.set_halign(gtk4::Align::Center);
-        let swatches = [
-            (Theme::System, "system", "Follow the system theme"),
-            (Theme::Light, "light", "Light theme"),
-            (Theme::Dark, "dark", "Dark theme"),
-        ]
-        .map(|(theme, class, tip)| {
-            let button = gtk4::ToggleButton::builder()
-                .tooltip_text(tip)
-                .action_name("win.theme")
-                .action_target(&theme.as_str().to_variant())
-                .build();
-            button.add_css_class("theme-swatch");
-            button.add_css_class(class);
-            themes.append(&button);
-            button
-        });
+        let (themes, swatches) = theme_swatches();
         widget.append(&themes);
 
         // --- Font size ---
@@ -607,36 +633,22 @@ pub fn show_preferences(
     let font_group = adw::PreferencesGroup::builder().title("Font").build();
     let tabs_group = adw::PreferencesGroup::builder().title("Tabs").build();
 
-    let theme_row = adw::ComboRow::builder()
-        .title("Theme")
-        .subtitle("Application interface style")
-        .model(&gtk4::StringList::new(&["System", "Light", "Dark"]))
-        .build();
-    theme_row.set_selected(match config.borrow().theme {
-        Theme::Light => 1,
-        Theme::Dark => 2,
-        Theme::System => 0,
-    });
+    // Same swatches as the `···` menu, so the two never disagree. They drive
+    // the `win.theme` action, which already applies and persists the choice.
+    let (theme_row_widget, theme_swatch_buttons) = theme_swatches();
+    theme_row_widget.set_margin_top(6);
+    theme_row_widget.set_margin_bottom(6);
     {
-        let config = config.clone();
-        let save_config = save_config.clone();
-        theme_row.connect_selected_notify(move |row| {
-            let theme = match row.selected() {
-                1 => Theme::Light,
-                2 => Theme::Dark,
-                _ => Theme::System,
-            };
-            let scheme = match theme {
-                Theme::Light => adw::ColorScheme::ForceLight,
-                Theme::Dark => adw::ColorScheme::ForceDark,
-                Theme::System => adw::ColorScheme::Default,
-            };
-            adw::StyleManager::default().set_color_scheme(scheme);
-            config.borrow_mut().theme = theme;
-            save_config();
-        });
+        let theme = config.borrow().theme;
+        for (button, value) in
+            theme_swatch_buttons
+                .iter()
+                .zip([Theme::System, Theme::Light, Theme::Dark])
+        {
+            button.set_active(value == theme);
+        }
     }
-    theme_group.add(&theme_row);
+    theme_group.add(&theme_row_widget);
 
     let tabs_row = adw::ComboRow::builder()
         .title("Tab Position")
@@ -689,6 +701,61 @@ pub fn show_preferences(
         });
     }
     tabs_group.add(&sidebar_always_row);
+
+    let new_tab_row = adw::ComboRow::builder()
+        .title("New Tab Position")
+        .subtitle("Where a new tab is inserted")
+        .model(&gtk4::StringList::new(&[
+            "After Current",
+            "Before Current",
+            "End",
+            "Start",
+        ]))
+        .build();
+    new_tab_row.set_selected(match config.borrow().new_tab_position {
+        NewTabPosition::AfterCurrent => 0,
+        NewTabPosition::BeforeCurrent => 1,
+        NewTabPosition::End => 2,
+        NewTabPosition::Start => 3,
+    });
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        new_tab_row.connect_selected_notify(move |row| {
+            config.borrow_mut().new_tab_position = match row.selected() {
+                1 => NewTabPosition::BeforeCurrent,
+                2 => NewTabPosition::End,
+                3 => NewTabPosition::Start,
+                _ => NewTabPosition::AfterCurrent,
+            };
+            save_config();
+        });
+    }
+    tabs_group.add(&new_tab_row);
+
+    let middle_row = adw::ComboRow::builder()
+        .title("Middle Click on a Tab")
+        .subtitle("Action bound to the middle mouse button")
+        .model(&gtk4::StringList::new(&["Nothing", "New Tab", "Close Tab"]))
+        .build();
+    middle_row.set_selected(match config.borrow().middle_click_tab {
+        MiddleClickTab::Ignore => 0,
+        MiddleClickTab::NewTab => 1,
+        MiddleClickTab::CloseTab => 2,
+    });
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        middle_row.connect_selected_notify(move |row| {
+            config.borrow_mut().middle_click_tab = match row.selected() {
+                1 => MiddleClickTab::NewTab,
+                2 => MiddleClickTab::CloseTab,
+                _ => MiddleClickTab::Ignore,
+            };
+            save_config();
+        });
+    }
+    tabs_group.add(&middle_row);
 
     let font_row = adw::SpinRow::with_range(6.0, 40.0, 1.0);
     font_row.set_title("Font Size");
@@ -779,7 +846,57 @@ pub fn show_preferences(
         });
     }
     session_group.add(&inherit_row);
+
+    let awake_row = adw::SwitchRow::builder()
+        .title("Keep the System Awake")
+        .subtitle("Blocks idle and screen blanking while a command is running")
+        .build();
+    awake_row.set_active(config.borrow().keep_awake);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        awake_row.connect_active_notify(move |row| {
+            config.borrow_mut().keep_awake = row.is_active();
+            save_config();
+        });
+    }
+    session_group.add(&awake_row);
     behavior_page.add(&session_group);
+
+    // --- Confirmations ---
+    let confirm_group = adw::PreferencesGroup::builder()
+        .title("Confirmations")
+        .build();
+
+    let confirm_tab_row = adw::SwitchRow::builder()
+        .title("Confirm Closing a Tab")
+        .build();
+    confirm_tab_row.set_active(config.borrow().confirm_close_tab);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        confirm_tab_row.connect_active_notify(move |row| {
+            config.borrow_mut().confirm_close_tab = row.is_active();
+            save_config();
+        });
+    }
+    confirm_group.add(&confirm_tab_row);
+
+    let confirm_quit_row = adw::SwitchRow::builder()
+        .title("Confirm Closing the Window")
+        .subtitle("Only asked when more than one tab is open")
+        .build();
+    confirm_quit_row.set_active(config.borrow().confirm_quit);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        confirm_quit_row.connect_active_notify(move |row| {
+            config.borrow_mut().confirm_quit = row.is_active();
+            save_config();
+        });
+    }
+    confirm_group.add(&confirm_quit_row);
+    behavior_page.add(&confirm_group);
 
     // --- Cursor ---
     let cursor_group = adw::PreferencesGroup::builder().title("Cursor").build();
@@ -872,8 +989,134 @@ pub fn show_preferences(
     advanced_page.add(&cfg_group);
 
     behavior_page.add(&tabs_group);
+
+    // --- Sound ---
+    let sound_page = adw::PreferencesPage::builder()
+        .title("Sound")
+        .icon_name("audio-volume-high-symbolic")
+        .build();
+    let bell_group = adw::PreferencesGroup::builder()
+        .title("Bell")
+        .description("Programs ring the bell by writing the BEL character")
+        .build();
+    let bell_row = adw::SwitchRow::builder()
+        .title("Audible Bell")
+        .subtitle("Rings the system bell, honoring your desktop's sound settings")
+        .build();
+    bell_row.set_active(config.borrow().bell_sound);
+    {
+        let update_all = update_all.clone();
+        bell_row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            update_all(Rc::new(move |cfg| cfg.bell_sound = on));
+        });
+    }
+    bell_group.add(&bell_row);
+
+    let test_row = adw::ActionRow::builder()
+        .title("Test the Bell")
+        .subtitle("Plays it once, so you can tell whether your system has one")
+        .build();
+    let test_btn = gtk4::Button::with_label("Play");
+    test_btn.add_css_class("flat");
+    test_btn.set_valign(gtk4::Align::Center);
+    test_btn.connect_clicked(|_| {
+        if let Some(display) = gdk::Display::default() {
+            display.beep();
+        }
+    });
+    test_row.add_suffix(&test_btn);
+    test_row.set_activatable_widget(Some(&test_btn));
+    bell_group.add(&test_row);
+    sound_page.add(&bell_group);
+
+    // --- Default terminal ---
+    let default_page = adw::PreferencesPage::builder()
+        .title("Default Terminal")
+        .icon_name("utilities-terminal-symbolic")
+        .build();
+    let default_group = adw::PreferencesGroup::builder()
+        .title("System Integration")
+        .description(
+            "There is no single setting for this. optionTerm writes the portable \
+             xdg-terminals.list, plus your desktop's own key when it has one.",
+        )
+        .build();
+    let default_row = adw::ActionRow::builder()
+        .title("Set as Default Terminal")
+        .build();
+    let default_btn = gtk4::Button::new();
+    default_btn.add_css_class("flat");
+    default_btn.set_valign(gtk4::Align::Center);
+
+    let refresh_default = {
+        let row = default_row.clone();
+        let button = default_btn.clone();
+        Rc::new(move || {
+            if crate::default_terminal::is_default() {
+                row.set_subtitle("optionTerm is the preferred terminal");
+                button.set_label("Set Again");
+            } else {
+                row.set_subtitle("Another terminal is preferred");
+                button.set_label("Set as Default");
+            }
+        })
+    };
+    refresh_default();
+    {
+        let refresh_default = refresh_default.clone();
+        let dialog = dialog.clone();
+        default_btn.connect_clicked(move |_| {
+            let toast = match crate::default_terminal::set_default() {
+                // Say what actually changed: silently claiming success would
+                // hide a desktop we could not reach.
+                Ok(applied) if applied.is_empty() => {
+                    "Nothing could be set on this desktop".to_string()
+                }
+                Ok(applied) => format!("Updated {}", applied.join(", ")),
+                Err(err) => {
+                    tracing::warn!("could not set default terminal: {err:#}");
+                    "Could not set the default terminal".to_string()
+                }
+            };
+            refresh_default();
+            dialog.add_toast(adw::Toast::builder().title(&toast).timeout(4).build());
+        });
+    }
+    default_row.add_suffix(&default_btn);
+    default_group.add(&default_row);
+    default_page.add(&default_group);
+
+    // --- Shortcuts ---
+    let shortcuts_page = adw::PreferencesPage::builder()
+        .title("Shortcuts")
+        .icon_name("preferences-desktop-keyboard-symbolic")
+        .build();
+    let shortcuts_group = adw::PreferencesGroup::builder()
+        .title("Keyboard Shortcuts")
+        .description("Remapping is not implemented yet; these are the built-in bindings")
+        .build();
+    for (label, _action, accel) in COMMANDS {
+        let row = adw::ActionRow::builder().title(*label).build();
+        if accel.is_empty() {
+            let none = gtk4::Label::new(Some("—"));
+            none.add_css_class("dim-label");
+            row.add_suffix(&none);
+        } else {
+            let keys = gtk4::Label::new(Some(accel));
+            keys.add_css_class("dim-label");
+            keys.add_css_class("monospace");
+            row.add_suffix(&keys);
+        }
+        shortcuts_group.add(&row);
+    }
+    shortcuts_page.add(&shortcuts_group);
+
     dialog.add(&look_page);
     dialog.add(&behavior_page);
+    dialog.add(&sound_page);
+    dialog.add(&shortcuts_page);
+    dialog.add(&default_page);
     dialog.add(&advanced_page);
     dialog.present(Some(window));
 }
@@ -917,7 +1160,7 @@ pub fn show_about(window: &adw::ApplicationWindow) {
     let about = adw::AboutDialog::builder()
         .application_name("optionTerm")
         .application_icon("utilities-terminal")
-        .developer_name("AE Firefly Labs")
+        .developer_name("Firefly Labs")
         .version(env!("CARGO_PKG_VERSION"))
         .license_type(gtk4::License::Apache20)
         .website("https://github.com/fireflylabss/optionTerm")

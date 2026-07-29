@@ -14,7 +14,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::{
-    config::{Config, CursorStyle, TabsLocation, Theme},
+    config::{Config, CursorStyle, MiddleClickTab, NewTabPosition, TabsLocation, Theme},
     session::{Session as SessionState, TabState},
     terminal::TerminalView,
     ui::{
@@ -84,26 +84,36 @@ fn install_css(display: &gdk::Display) {
          window.transparent-bg > * ,
          window.transparent-bg .terminal { background-color: transparent; }
 
-         .quick-settings { padding: 6px 12px 2px 12px; }
-         /* Round swatches previewing each theme. Colours are literal on
-            purpose: the point is to show what light and dark look like, so they
-            must not follow the theme currently in effect. The selection ring
-            does follow it, via the accent colour. */
-         .quick-settings .theme-swatch {
-           min-width: 40px;
-           min-height: 40px;
+         .quick-settings { padding: 8px 14px 4px 14px; }
+         /* Swatches preview each theme, so their colours are literal on
+            purpose: following the theme in effect would make all three look
+            the same. Only the selection ring and badge follow the accent. */
+         .theme-swatch {
+           min-width: 46px;
+           min-height: 46px;
            padding: 0;
+           border: none;
            border-radius: 9999px;
-           box-shadow: inset 0 0 0 1px alpha(currentColor, 0.15);
+           box-shadow: inset 0 0 0 1px alpha(#000, 0.25);
+           background-image: none;
          }
-         .quick-settings .theme-swatch.system {
-           background-image: linear-gradient(135deg, #fafafa 0%, #fafafa 50%, #1d1d1d 50%, #1d1d1d 100%);
+         .theme-swatch.system {
+           background-image: linear-gradient(135deg, #f6f5f4 0%, #f6f5f4 50%, #1d1d1d 50%, #1d1d1d 100%);
          }
-         .quick-settings .theme-swatch.light { background-image: none; background-color: #fafafa; }
-         .quick-settings .theme-swatch.dark { background-image: none; background-color: #1d1d1d; }
-         .quick-settings .theme-swatch:checked {
-           outline: 2px solid @accent_color;
-           outline-offset: 2px;
+         .theme-swatch.light { background-color: #f6f5f4; }
+         .theme-swatch.dark { background-color: #1d1d1d; }
+         .theme-swatch:hover { box-shadow: inset 0 0 0 1px alpha(#000, 0.4); }
+         .theme-swatch:checked {
+           outline: 2px solid @accent_bg_color;
+           outline-offset: 3px;
+         }
+         .theme-check {
+           background-color: @accent_bg_color;
+           color: @accent_fg_color;
+           border-radius: 9999px;
+           padding: 2px;
+           margin: 0;
+           -gtk-icon-size: 12px;
          }",
     );
     gtk4::style_context_add_provider_for_display(
@@ -111,6 +121,28 @@ fn install_css(display: &gdk::Display) {
         &provider,
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+/// The tab under a point in the tab bar, if any.
+///
+/// libadwaita exposes neither hit-testing nor a middle-click signal on
+/// `AdwTabBar`, so this picks the widget under the pointer and walks up looking
+/// for the internal tab widget, which carries the page it represents as a
+/// property. Reading it by name keeps this working without the private type
+/// being public; if a future libadwaita renames it, the lookup simply fails and
+/// middle click becomes a no-op rather than acting on the wrong tab.
+fn tab_page_at(tab_bar: &adw::TabBar, x: f64, y: f64) -> Option<adw::TabPage> {
+    let mut widget = tab_bar.pick(x, y, gtk4::PickFlags::DEFAULT)?;
+    loop {
+        // `property_value` panics on an unknown property, and most widgets on
+        // the way up do not have one, so check before reading.
+        if widget.has_property("page", Some(adw::TabPage::static_type()))
+            && let Ok(page) = widget.property_value("page").get::<adw::TabPage>()
+        {
+            return Some(page);
+        }
+        widget = widget.parent()?;
+    }
 }
 
 /// Key used to remember that the user renamed a tab by hand.
@@ -754,6 +786,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let tab_view = tab_view.clone();
         let pages = pages.clone();
         let make_view = make_view.clone();
+        let config = config.clone();
         Rc::new(
             move |cwd: Option<PathBuf>| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
@@ -762,7 +795,22 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 root.append(view.widget());
 
-                let page = tab_view.append(&root);
+                let page = match config.borrow().new_tab_position {
+                    NewTabPosition::End => tab_view.append(&root),
+                    NewTabPosition::Start => tab_view.insert(&root, 0),
+                    // Relative positions need the current tab; with none
+                    // selected there is nothing to be relative to.
+                    NewTabPosition::AfterCurrent => match tab_view.selected_page() {
+                        Some(current) => {
+                            tab_view.insert(&root, tab_view.page_position(&current) + 1)
+                        }
+                        None => tab_view.append(&root),
+                    },
+                    NewTabPosition::BeforeCurrent => match tab_view.selected_page() {
+                        Some(current) => tab_view.insert(&root, tab_view.page_position(&current)),
+                        None => tab_view.append(&root),
+                    },
+                };
                 page.set_title("Terminal");
                 page.set_live_thumbnail(true);
                 *page_slot.borrow_mut() = Some(page.clone());
@@ -1008,6 +1056,39 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         action.connect_activate(move |_, _| f());
         action
     };
+
+    // Middle click on a tab, per config.
+    {
+        let config = config.clone();
+        let tab_view = tab_view.clone();
+        let tab_bar_c = tab_bar.clone();
+        let add_tab = add_tab.clone();
+        let inherit_cwd = inherit_cwd.clone();
+        let middle = gtk4::GestureClick::new();
+        middle.set_button(gdk::BUTTON_MIDDLE);
+        middle.connect_pressed(move |_, _, x, y| {
+            let action = config.borrow().middle_click_tab;
+            if action == MiddleClickTab::Ignore {
+                return;
+            }
+            match action {
+                MiddleClickTab::NewTab => {
+                    if let Err(err) = add_tab(inherit_cwd()) {
+                        tracing::error!("middle-click new tab failed: {err:#}");
+                    }
+                }
+                MiddleClickTab::CloseTab => {
+                    // Only close the tab actually under the pointer; acting on
+                    // the selected one instead would close the wrong tab.
+                    if let Some(page) = tab_page_at(&tab_bar_c, x, y) {
+                        tab_view.close_page(&page);
+                    }
+                }
+                MiddleClickTab::Ignore => {}
+            }
+        });
+        tab_bar.add_controller(middle);
+    }
 
     {
         // The overview has its own `+`; without this it would do nothing.
@@ -1626,7 +1707,38 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     {
         let pages = pages.clone();
         let window = window.clone();
+        let config = config.clone();
         tab_view.connect_close_page(move |tv, page| {
+            // AdwTabView allows an async answer: hold the close, then finish it
+            // once the user has decided.
+            if config.borrow().confirm_close_tab {
+                let dialog = adw::AlertDialog::new(
+                    Some("Close this tab?"),
+                    Some("Anything still running in it will be terminated."),
+                );
+                dialog.add_responses(&[("cancel", "Cancel"), ("close", "Close")]);
+                dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                let tv = tv.clone();
+                let page = page.clone();
+                let pages = pages.clone();
+                let parent = window.clone();
+                let window = window.clone();
+                dialog.choose(&parent, gio::Cancellable::NONE, move |response| {
+                    let closing = response == "close";
+                    if closing {
+                        pages.borrow_mut().retain(|(p, _)| p != &page);
+                    }
+                    tv.close_page_finish(&page, closing);
+                    if closing && tv.n_pages() == 0 {
+                        window.close();
+                    }
+                });
+                return glib::Propagation::Stop;
+            }
+
             pages.borrow_mut().retain(|(p, _)| p != page);
             // Must call close_page_finish for AdwTabView.
             tv.close_page_finish(page, true);
@@ -1653,6 +1765,36 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
             );
         }
+    }
+
+    // Keep the session awake while any pane has a foreground job, so a long
+    // build does not get interrupted by the screen locking.
+    {
+        let config = config.clone();
+        let pages = pages.clone();
+        let app = app.clone();
+        let window = window.clone();
+        // The GTK inhibit cookie; 0 means "not inhibiting".
+        let cookie = Rc::new(Cell::new(0u32));
+        glib::timeout_add_seconds_local(4, move || {
+            let wanted = config.borrow().keep_awake
+                && pages
+                    .borrow()
+                    .iter()
+                    .any(|(_, views)| views.iter().any(|v| v.is_busy()));
+            let held = cookie.get();
+            if wanted && held == 0 {
+                cookie.set(app.inhibit(
+                    Some(&window),
+                    gtk4::ApplicationInhibitFlags::IDLE,
+                    Some("a terminal command is running"),
+                ));
+            } else if !wanted && held != 0 {
+                app.uninhibit(held);
+                cookie.set(0);
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     // Persist the workspace so the next start can restore it.
@@ -1683,7 +1825,34 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     {
         let save_session = save_session.clone();
-        window.connect_close_request(move |_| {
+        let config = config.clone();
+        let tab_view = tab_view.clone();
+        let confirmed_quit = Rc::new(Cell::new(false));
+        window.connect_close_request(move |window| {
+            // Confirming a single tab would just be in the way.
+            let ask = config.borrow().confirm_quit && tab_view.n_pages() > 1;
+            if ask && !confirmed_quit.get() {
+                let dialog = adw::AlertDialog::new(
+                    Some("Close this window?"),
+                    Some("It has more than one tab open."),
+                );
+                dialog.add_responses(&[("cancel", "Cancel"), ("close", "Close")]);
+                dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                let confirmed_quit = confirmed_quit.clone();
+                let parent = window.clone();
+                let window = window.clone();
+                dialog.choose(&parent, gio::Cancellable::NONE, move |response| {
+                    if response == "close" {
+                        // Remember the answer so the retry is not asked again.
+                        confirmed_quit.set(true);
+                        window.close();
+                    }
+                });
+                return glib::Propagation::Stop;
+            }
             save_session();
             glib::Propagation::Proceed
         });

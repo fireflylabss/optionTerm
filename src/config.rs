@@ -49,6 +49,66 @@ impl Theme {
     }
 }
 
+/// Where a freshly created tab is inserted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewTabPosition {
+    /// Immediately after the current tab (the default).
+    AfterCurrent,
+    /// Immediately before the current tab.
+    BeforeCurrent,
+    /// End of the tab strip.
+    End,
+    /// Start of the tab strip.
+    Start,
+}
+
+impl NewTabPosition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AfterCurrent => "after_current",
+            Self::BeforeCurrent => "before_current",
+            Self::End => "end",
+            Self::Start => "start",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "before_current" => Self::BeforeCurrent,
+            "end" => Self::End,
+            "start" => Self::Start,
+            _ => Self::AfterCurrent,
+        }
+    }
+}
+
+/// What a middle click on a tab does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiddleClickTab {
+    /// Nothing at all (the default).
+    Ignore,
+    NewTab,
+    CloseTab,
+}
+
+impl MiddleClickTab {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ignore => "nothing",
+            Self::NewTab => "new_tab",
+            Self::CloseTab => "close_tab",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "new_tab" => Self::NewTab,
+            "close_tab" => Self::CloseTab,
+            _ => Self::Ignore,
+        }
+    }
+}
+
 /// Visual + sizing settings we honor from Ghostty's config file.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -70,6 +130,18 @@ pub struct Config {
     /// New tabs and splits start in the focused pane's directory
     /// (Ghostty `window-inherit-working-directory`).
     pub inherit_working_directory: bool,
+    /// Where a new tab is inserted in the strip.
+    pub new_tab_position: NewTabPosition,
+    /// Action bound to a middle click on a tab.
+    pub middle_click_tab: MiddleClickTab,
+    /// Ask before closing a tab that is still running something.
+    pub confirm_close_tab: bool,
+    /// Ask before closing the window with more than one tab.
+    pub confirm_quit: bool,
+    /// Ring the system bell when the terminal writes BEL.
+    pub bell_sound: bool,
+    /// Keep the session from idling while a pane has a foreground job.
+    pub keep_awake: bool,
     pub background: RgbColor,
     pub foreground: RgbColor,
     pub cursor: RgbColor,
@@ -94,8 +166,16 @@ impl Default for Config {
             sidebar_always: false,
             theme: Theme::System,
             background_opacity: 1.0,
-            session_restore: false,
+            // Restoring the workspace is what people expect from a terminal
+            // that has tabs and splits, so it is on by default.
+            session_restore: true,
             inherit_working_directory: true,
+            new_tab_position: NewTabPosition::AfterCurrent,
+            middle_click_tab: MiddleClickTab::Ignore,
+            confirm_close_tab: false,
+            confirm_quit: true,
+            bell_sound: true,
+            keep_awake: false,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
             cursor: rgb(0xff, 0xff, 0xff),
@@ -222,6 +302,24 @@ impl Config {
         if let Some(v) = bool_at("window", "inherit_working_directory") {
             cfg.inherit_working_directory = v;
         }
+        if let Some(v) = str_at("window", "new_tab_position") {
+            cfg.new_tab_position = NewTabPosition::parse(&v);
+        }
+        if let Some(v) = str_at("window", "middle_click_tab") {
+            cfg.middle_click_tab = MiddleClickTab::parse(&v);
+        }
+        if let Some(v) = bool_at("window", "confirm_close_tab") {
+            cfg.confirm_close_tab = v;
+        }
+        if let Some(v) = bool_at("window", "confirm_quit") {
+            cfg.confirm_quit = v;
+        }
+        if let Some(v) = bool_at("sound", "bell") {
+            cfg.bell_sound = v;
+        }
+        if let Some(v) = bool_at("window", "keep_awake") {
+            cfg.keep_awake = v;
+        }
         if let Some(v) = bool_at("window", "session_restore") {
             cfg.session_restore = v;
         }
@@ -319,8 +417,16 @@ theme = "{theme}"   # system | light | dark
 background_opacity = {opacity}   # 0.15 .. 1.0
 session_restore = {session_restore}   # restore tabs/splits and cwd on start
 inherit_working_directory = {inherit_cwd}   # new tabs/splits open in the focused pane's directory
+new_tab_position = "{new_tab_pos}"   # after_current | before_current | end | start
+middle_click_tab = "{middle_click}"   # nothing | new_tab | close_tab
+confirm_close_tab = {confirm_close_tab}   # ask before closing a tab that is still running something
+confirm_quit = {confirm_quit}   # ask before closing a window with more than one tab
+keep_awake = {keep_awake}   # keep the session awake while a pane has a foreground job
 padding_x = {pad_x}
 padding_y = {pad_y}
+
+[sound]
+bell = {bell}   # ring the system bell on BEL
 
 [colors]
 background = "{bg}"
@@ -335,6 +441,12 @@ palette = [
             size = self.font_size,
             ligatures = self.font_ligatures,
             inherit_cwd = self.inherit_working_directory,
+            new_tab_pos = self.new_tab_position.as_str(),
+            middle_click = self.middle_click_tab.as_str(),
+            confirm_close_tab = self.confirm_close_tab,
+            confirm_quit = self.confirm_quit,
+            keep_awake = self.keep_awake,
+            bell = self.bell_sound,
             sidebar_always = self.sidebar_always,
             theme = self.theme.as_str(),
             opacity = self.background_opacity,
@@ -614,6 +726,22 @@ mod tests {
         assert!(cfg.inherit_working_directory, "matches Ghostty's default");
     }
 
+    /// These defaults are a deliberate contract, so pin them.
+    #[test]
+    fn defaults_match_the_documented_behaviour() {
+        let cfg = Config::default();
+        assert!(
+            cfg.session_restore,
+            "restoring the workspace is the default"
+        );
+        assert!(cfg.confirm_quit, "closing a multi-tab window asks");
+        assert!(!cfg.confirm_close_tab, "closing one tab does not ask");
+        assert!(cfg.bell_sound);
+        assert!(!cfg.keep_awake, "inhibiting idle must be opt-in");
+        assert_eq!(cfg.new_tab_position, NewTabPosition::AfterCurrent);
+        assert_eq!(cfg.middle_click_tab, MiddleClickTab::Ignore);
+    }
+
     /// Ghostty's own spellings must keep working, since the first run is
     /// generated from the user's Ghostty config.
     #[test]
@@ -639,6 +767,12 @@ mod tests {
             session_restore: true,
             font_ligatures: false,
             inherit_working_directory: false,
+            new_tab_position: NewTabPosition::Start,
+            middle_click_tab: MiddleClickTab::CloseTab,
+            confirm_close_tab: true,
+            confirm_quit: false,
+            bell_sound: false,
+            keep_awake: true,
             padding_x: 8.0,
             padding_y: 6.0,
             ..Config::default()
@@ -661,6 +795,12 @@ mod tests {
         assert_eq!(back.background_opacity, cfg.background_opacity);
         assert_eq!(back.session_restore, cfg.session_restore);
         assert_eq!(back.font_ligatures, cfg.font_ligatures);
+        assert_eq!(back.new_tab_position, cfg.new_tab_position);
+        assert_eq!(back.middle_click_tab, cfg.middle_click_tab);
+        assert_eq!(back.confirm_close_tab, cfg.confirm_close_tab);
+        assert_eq!(back.confirm_quit, cfg.confirm_quit);
+        assert_eq!(back.bell_sound, cfg.bell_sound);
+        assert_eq!(back.keep_awake, cfg.keep_awake);
         assert_eq!(
             back.inherit_working_directory,
             cfg.inherit_working_directory

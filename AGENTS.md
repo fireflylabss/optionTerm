@@ -97,6 +97,19 @@
 - Roda de mouse tem três destinos, nessa ordem: aplicação (se ligou mouse tracking),
   cursor keys (tela alternada, respeitando DECCKM), viewport (resto). Errar a ordem
   faz o scroll "não funcionar" em contextos específicos.
+- **`AdwTabBar` não tem hit-testing nem sinal de clique do meio.** `tab_page_at` resolve
+  a aba pelo `pick()` e sobe a árvore lendo a propriedade `page` do widget interno da
+  libadwaita. Use `has_property` antes: **`property_value` entra em pânico** se a
+  propriedade não existe, e o primeiro widget do `pick` nunca tem. Se a libadwaita
+  renomear, o clique do meio vira no-op em vez de fechar a aba errada.
+- **Restaurar posição de scroll é impossível hoje**: o `session.toml` não persiste
+  scrollback (decisão de privacidade), então não existe histórico pra rolar de volta.
+  Só dá pra implementar se o conteúdo do scrollback for pra disco.
+- `AdwTabView::close_page` aceita resposta assíncrona: devolva `Propagation::Stop` e
+  chame `close_page_finish` no callback do diálogo. Não remova a página do `pages`
+  antes de confirmar, senão cancelar deixa a lista inconsistente.
+- Warnings `Can't handle >16bit keyvals` no startup vêm do layout de teclado do usuário
+  (GTK/XKB), não do projeto — a 0.1.9 já emitia 53 deles.
 - **Ligaduras só são seguras** porque fonte de programação mantém o avanço da ligadura
   igual à soma dos glifos que ela substitui. Há teste afirmando isso
   (`ligatures_preserve_the_cell_advance`, pula se a FiraCode não estiver instalada).
