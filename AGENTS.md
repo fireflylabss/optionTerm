@@ -83,6 +83,25 @@
 - `cursor.blink` só funciona se for empurrado para o VT via `set_default_cursor_blink`
   (`Config::apply_cursor_to_terminal`); o snapshot de render lê o estado DECSCUSR, não o config.
 - OSC 7 devolve `file://host/path` — use `pwd_to_path` antes de usar como diretório.
+  E **a maioria dos shells nunca emite OSC 7** (o Ghostty injeta shell integration, nós não):
+  por isso `TerminalView::pwd` cai pro `Pty::foreground_cwd`, que lê
+  `tcgetpgrp` + `/proc/<pgid>/cwd`. Isso não precisa de cooperação do shell e ainda
+  segue `cd` feito dentro de um programa rodando. Teste ponta a ponta: `session.toml`
+  guarda o `pwd()` de cada painel.
+- **Roda de mouse de alta resolução** (libinput, passos de 1/120 de detent) manda `dy`
+  fracionário. Arredondar por evento dá **sempre zero** — foi assim que o scroll ficou
+  morto. Use `accumulate_wheel`, que carrega o resto.
+- **Modo 1049 ≠ 1047.** `ALT_SCREEN` é 1047, mas vim/less/htop usam **1049**
+  (`ALT_SCREEN_SAVE`). Checar só 1047 não detecta tela alternada em programa real nenhum.
+  Use `Session::on_alternate_screen`, que cobre 1049/1047/47.
+- Roda de mouse tem três destinos, nessa ordem: aplicação (se ligou mouse tracking),
+  cursor keys (tela alternada, respeitando DECCKM), viewport (resto). Errar a ordem
+  faz o scroll "não funcionar" em contextos específicos.
+- **Ligaduras só são seguras** porque fonte de programação mantém o avanço da ligadura
+  igual à soma dos glifos que ela substitui. Há teste afirmando isso
+  (`ligatures_preserve_the_cell_advance`, pula se a FiraCode não estiver instalada).
+  `measure_cell` mede **sempre** com ligaduras desligadas, senão ligar/desligar a config
+  reflui a grade inteira.
 - O `GFileMonitor` do config dispara também nas **nossas** escritas; há um guard
   (`SELF_WRITE_GRACE`) para não entrar em loop de reload.
 - SIGTERM não dispara `close-request`; a sessão é salva também por `unix_signal_add_local`.
