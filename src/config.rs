@@ -109,6 +109,56 @@ impl MiddleClickTab {
     }
 }
 
+/// How tabs share the width of the bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabWidth {
+    /// Tabs stretch to fill the bar and split the space between them.
+    Fill,
+    /// Each tab is only as wide as its title needs.
+    Natural,
+}
+
+impl TabWidth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fill => "fill",
+            Self::Natural => "natural",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "natural" => Self::Natural,
+            _ => Self::Fill,
+        }
+    }
+}
+
+/// What happens once there are more tabs than fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabOverflow {
+    /// Keep shrinking the tabs.
+    Squeeze,
+    /// Hold a readable width and scroll the bar instead.
+    Scroll,
+}
+
+impl TabOverflow {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Squeeze => "squeeze",
+            Self::Scroll => "scroll",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "scroll" => Self::Scroll,
+            _ => Self::Squeeze,
+        }
+    }
+}
+
 /// Visual + sizing settings we honor from Ghostty's config file.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -117,6 +167,8 @@ pub struct Config {
     /// Shape programming ligatures (`->`, `=>`, `!=`). Only affects runs of
     /// cells with the same style, so the grid is preserved either way.
     pub font_ligatures: bool,
+    /// Use the desktop's monospace font instead of `font_family`.
+    pub use_system_font: bool,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub tabs_location: TabsLocation,
@@ -132,6 +184,12 @@ pub struct Config {
     pub inherit_working_directory: bool,
     /// Where a new tab is inserted in the strip.
     pub new_tab_position: NewTabPosition,
+    /// Whether tabs fill the bar or stay as wide as their titles.
+    pub tab_width: TabWidth,
+    /// Squeeze or scroll once the tabs no longer fit.
+    pub tab_overflow: TabOverflow,
+    /// Show the command palette button in the header.
+    pub show_search_button: bool,
     /// Action bound to a middle click on a tab.
     pub middle_click_tab: MiddleClickTab,
     /// Ask before closing a tab that is still running something.
@@ -160,6 +218,9 @@ impl Default for Config {
             font_family: "monospace".into(),
             font_size: 13.0,
             font_ligatures: true,
+            // Off by default: a terminal font is a deliberate choice, and the
+            // generated config already carries the user's Ghostty family.
+            use_system_font: false,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             tabs_location: TabsLocation::Top,
@@ -171,6 +232,10 @@ impl Default for Config {
             session_restore: true,
             inherit_working_directory: true,
             new_tab_position: NewTabPosition::AfterCurrent,
+            tab_width: TabWidth::Fill,
+            tab_overflow: TabOverflow::Squeeze,
+            // The palette has a shortcut; the button is extra chrome.
+            show_search_button: false,
             middle_click_tab: MiddleClickTab::Ignore,
             confirm_close_tab: false,
             confirm_quit: true,
@@ -263,6 +328,9 @@ impl Config {
         if let Some(v) = bool_at("font", "ligatures") {
             cfg.font_ligatures = v;
         }
+        if let Some(v) = bool_at("font", "use_system") {
+            cfg.use_system_font = v;
+        }
 
         if let Some(v) = str_at("cursor", "style") {
             cfg.cursor_style = match v.as_str() {
@@ -304,6 +372,15 @@ impl Config {
         }
         if let Some(v) = str_at("window", "new_tab_position") {
             cfg.new_tab_position = NewTabPosition::parse(&v);
+        }
+        if let Some(v) = str_at("window", "tab_width") {
+            cfg.tab_width = TabWidth::parse(&v);
+        }
+        if let Some(v) = str_at("window", "tab_overflow") {
+            cfg.tab_overflow = TabOverflow::parse(&v);
+        }
+        if let Some(v) = bool_at("window", "show_search_button") {
+            cfg.show_search_button = v;
         }
         if let Some(v) = str_at("window", "middle_click_tab") {
             cfg.middle_click_tab = MiddleClickTab::parse(&v);
@@ -403,6 +480,7 @@ impl Config {
 family = "{family}"
 size = {size}
 ligatures = {ligatures}   # shape ->, =>, != as single glyphs
+use_system = {use_system}   # ignore `family` and use the desktop's monospace font
 
 [cursor]
 style = "{style}"   # block | bar | underline | block_hollow
@@ -418,6 +496,9 @@ background_opacity = {opacity}   # 0.15 .. 1.0
 session_restore = {session_restore}   # restore tabs/splits and cwd on start
 inherit_working_directory = {inherit_cwd}   # new tabs/splits open in the focused pane's directory
 new_tab_position = "{new_tab_pos}"   # after_current | before_current | end | start
+tab_width = "{tab_width}"   # fill (share the bar) | natural (as wide as the title)
+tab_overflow = "{tab_overflow}"   # squeeze (keep shrinking) | scroll (hold a width, scroll the bar)
+show_search_button = {show_search}   # magnifier in the header for the command palette
 middle_click_tab = "{middle_click}"   # nothing | new_tab | close_tab
 confirm_close_tab = {confirm_close_tab}   # ask before closing a tab that is still running something
 confirm_quit = {confirm_quit}   # ask before closing a window with more than one tab
@@ -440,8 +521,12 @@ palette = [
             family = self.font_family,
             size = self.font_size,
             ligatures = self.font_ligatures,
+            use_system = self.use_system_font,
             inherit_cwd = self.inherit_working_directory,
             new_tab_pos = self.new_tab_position.as_str(),
+            tab_width = self.tab_width.as_str(),
+            tab_overflow = self.tab_overflow.as_str(),
+            show_search = self.show_search_button,
             middle_click = self.middle_click_tab.as_str(),
             confirm_close_tab = self.confirm_close_tab,
             confirm_quit = self.confirm_quit,
@@ -766,6 +851,7 @@ mod tests {
             background_opacity: 0.85,
             session_restore: true,
             font_ligatures: false,
+            use_system_font: true,
             inherit_working_directory: false,
             new_tab_position: NewTabPosition::Start,
             middle_click_tab: MiddleClickTab::CloseTab,
@@ -795,6 +881,7 @@ mod tests {
         assert_eq!(back.background_opacity, cfg.background_opacity);
         assert_eq!(back.session_restore, cfg.session_restore);
         assert_eq!(back.font_ligatures, cfg.font_ligatures);
+        assert_eq!(back.use_system_font, cfg.use_system_font);
         assert_eq!(back.new_tab_position, cfg.new_tab_position);
         assert_eq!(back.middle_click_tab, cfg.middle_click_tab);
         assert_eq!(back.confirm_close_tab, cfg.confirm_close_tab);

@@ -14,12 +14,15 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::{
-    config::{Config, CursorStyle, MiddleClickTab, NewTabPosition, TabsLocation, Theme},
+    config::{
+        Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
+        Theme,
+    },
     session::{Session as SessionState, TabState},
     terminal::TerminalView,
     ui::{
         SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
-        show_preferences, show_shortcuts, tiling_menu,
+        show_preferences, show_shortcuts, tab_menu, tiling_menu,
     },
 };
 
@@ -84,37 +87,7 @@ fn install_css(display: &gdk::Display) {
          window.transparent-bg > * ,
          window.transparent-bg .terminal { background-color: transparent; }
 
-         .quick-settings { padding: 8px 14px 4px 14px; }
-         /* Swatches preview each theme, so their colours are literal on
-            purpose: following the theme in effect would make all three look
-            the same. Only the selection ring and badge follow the accent. */
-         .theme-swatch {
-           min-width: 46px;
-           min-height: 46px;
-           padding: 0;
-           border: none;
-           border-radius: 9999px;
-           box-shadow: inset 0 0 0 1px alpha(#000, 0.25);
-           background-image: none;
-         }
-         .theme-swatch.system {
-           background-image: linear-gradient(135deg, #f6f5f4 0%, #f6f5f4 50%, #1d1d1d 50%, #1d1d1d 100%);
-         }
-         .theme-swatch.light { background-color: #f6f5f4; }
-         .theme-swatch.dark { background-color: #1d1d1d; }
-         .theme-swatch:hover { box-shadow: inset 0 0 0 1px alpha(#000, 0.4); }
-         .theme-swatch:checked {
-           outline: 2px solid @accent_bg_color;
-           outline-offset: 3px;
-         }
-         .theme-check {
-           background-color: @accent_bg_color;
-           color: @accent_fg_color;
-           border-radius: 9999px;
-           padding: 2px;
-           margin: 0;
-           -gtk-icon-size: 12px;
-         }",
+         .quick-settings { padding: 8px 14px 4px 14px; }",
     );
     gtk4::style_context_add_provider_for_display(
         display,
@@ -292,6 +265,34 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     tab_bar.set_view(Some(&tab_view));
     tab_bar.set_autohide(false);
     tab_bar.set_hexpand(true);
+
+    // Tab shape. `expand-tabs` is a genuine AdwTabBar property. Squeeze-versus-
+    // scroll is not exposed at all, so it is expressed as a minimum tab width:
+    // once tabs cannot shrink past it, AdwTabBar scrolls on its own.
+    let apply_tab_shape: Rc<dyn Fn()> = {
+        let tab_bar = tab_bar.clone();
+        let config = config.clone();
+        let provider = gtk4::CssProvider::new();
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        }
+        Rc::new(move || {
+            let (width, overflow) = {
+                let cfg = config.borrow();
+                (cfg.tab_width, cfg.tab_overflow)
+            };
+            tab_bar.set_expand_tabs(width == TabWidth::Fill);
+            provider.load_from_string(match overflow {
+                TabOverflow::Scroll => "tabbar tabbox > tab { min-width: 150px; }",
+                TabOverflow::Squeeze => "",
+            });
+        })
+    };
+    apply_tab_shape();
     header.set_title_widget(Some(&tab_bar));
 
     // `+` with the 4-direction tiling dropdown, same as the sidebar variant,
@@ -308,6 +309,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     palette_btn.set_tooltip_text(Some("Command Palette (Ctrl+Shift+P)"));
     palette_btn.add_css_class("flat");
     palette_btn.set_action_name(Some("win.command-palette"));
+    palette_btn.set_visible(config.borrow().show_search_button);
     header.pack_start(&palette_btn);
 
     // Shows the tab count and opens the overview, the way libadwaita expects
@@ -357,6 +359,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     sidebar_palette_btn.set_tooltip_text(Some("Command Palette (Ctrl+Shift+P)"));
     sidebar_palette_btn.add_css_class("flat");
     sidebar_palette_btn.set_action_name(Some("win.command-palette"));
+    sidebar_palette_btn.set_visible(config.borrow().show_search_button);
 
     let sidebar_menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
@@ -376,13 +379,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let last_grid = last_grid.clone();
         let quicks = [quick_settings.clone(), sidebar_quick.clone()];
         Rc::new(move || {
-            let (theme, size) = {
-                let cfg = config.borrow();
-                (cfg.theme, cfg.font_size)
-            };
+            let size = config.borrow().font_size;
             let (cols, rows) = last_grid.get();
             for quick in &quicks {
-                quick.set_theme(theme);
                 quick.set_font_size(size, base_font_size.get());
                 if cols > 0 {
                     quick.set_grid(cols, rows);
@@ -1057,6 +1056,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         action
     };
 
+    // Right-click on a tab: rename / split / close.
+    tab_view.set_menu_model(Some(&tab_menu()));
+
     // Middle click on a tab, per config.
     {
         let config = config.clone();
@@ -1066,11 +1068,14 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let inherit_cwd = inherit_cwd.clone();
         let middle = gtk4::GestureClick::new();
         middle.set_button(gdk::BUTTON_MIDDLE);
-        middle.connect_pressed(move |_, _, x, y| {
+        // AdwTabBar closes the tab on middle click by itself. Without running
+        // ahead of it and claiming the sequence, "New Tab" opened a tab *and*
+        // let libadwaita close the one under the pointer, and "Nothing" still
+        // closed it. Capturing makes the setting authoritative for all three.
+        middle.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        middle.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
             let action = config.borrow().middle_click_tab;
-            if action == MiddleClickTab::Ignore {
-                return;
-            }
             match action {
                 MiddleClickTab::NewTab => {
                     if let Err(err) = add_tab(inherit_cwd()) {
@@ -1450,12 +1455,24 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         }
     }
 
+    // The header and the sidebar each have their own palette button.
+    let set_search_visible: Rc<dyn Fn(bool)> = {
+        let palette_btn = palette_btn.clone();
+        let sidebar_palette_btn = sidebar_palette_btn.clone();
+        Rc::new(move |visible| {
+            palette_btn.set_visible(visible);
+            sidebar_palette_btn.set_visible(visible);
+        })
+    };
+
     {
         let window_c = window.clone();
         let config = config.clone();
         let pages = pages.clone();
         let apply_zoom = apply_zoom.clone();
         let set_tabs_location = set_tabs_location.clone();
+        let apply_tab_shape = apply_tab_shape.clone();
+        let set_search_visible = set_search_visible.clone();
         let save_config = save_config.clone();
         window.add_action(&add_simple(
             "preferences",
@@ -1466,6 +1483,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                     &pages,
                     apply_zoom.clone(),
                     set_tabs_location.clone(),
+                    apply_tab_shape.clone(),
+                    set_search_visible.clone(),
                     save_config.clone(),
                 );
             }),

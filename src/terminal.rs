@@ -2041,10 +2041,63 @@ fn resolve_font_family(pango_ctx: &pango::Context, requested: &str) -> String {
 
 fn font_description(config: &Config) -> pango::FontDescription {
     let mut desc = pango::FontDescription::new();
-    // Ghostty `font-family` verbatim — same family string Fontconfig resolves.
-    desc.set_family(&config.font_family);
+    let family = if config.use_system_font {
+        system_monospace()
+    } else if family_installed(&config.font_family) {
+        // Ghostty `font-family` verbatim — the string Fontconfig resolves.
+        config.font_family.clone()
+    } else {
+        // A missing family would silently resolve to something proportional,
+        // which wrecks the grid. Fall back to a real monospace instead.
+        tracing::warn!(
+            "font family {:?} is not installed, falling back to monospace",
+            config.font_family
+        );
+        "monospace".to_string()
+    };
+    desc.set_family(&family);
     desc.set_size((config.font_size * pango::SCALE as f32).round() as i32);
     desc
+}
+
+/// Whether Fontconfig can actually provide this family.
+///
+/// Pango happily substitutes an unrelated font for an unknown family, so asking
+/// first is the only way to notice.
+fn family_installed(family: &str) -> bool {
+    use pango::prelude::FontMapExt;
+    let wanted = family.trim().trim_matches(['\'', '"']).to_lowercase();
+    if wanted.is_empty() || wanted == "monospace" {
+        return true;
+    }
+    pangocairo::FontMap::default()
+        .list_families()
+        .iter()
+        .any(|f| f.name().to_lowercase() == wanted)
+}
+
+/// The desktop's monospace font, falling back to the generic alias.
+fn system_monospace() -> String {
+    // GNOME and most desktops keep the terminal font here; the GTK font
+    // setting is the proportional UI one, which would be wrong for a grid.
+    let from_gsettings = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "monospace-font-name"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .map(|value| value.trim_matches(['\'', '"']).to_string())
+        .filter(|value| !value.is_empty());
+
+    match from_gsettings {
+        // The setting carries a size too ("Source Code Pro 10"); the size comes
+        // from our own config, so keep only the family.
+        Some(value) => pango::FontDescription::from_string(&value)
+            .family()
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "monospace".into()),
+        None => "monospace".into(),
+    }
 }
 
 /// Cell advance in DrawingArea logical pixels (same space as draw `width`/`height`).

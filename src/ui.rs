@@ -7,13 +7,17 @@ use std::{
 
 use gtk4::gdk;
 use gtk4::gio;
+use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::{
     app::Pages,
-    config::{Config, CursorStyle, MiddleClickTab, NewTabPosition, TabsLocation, Theme},
+    config::{
+        Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
+        Theme,
+    },
     terminal::{Match, TerminalView},
 };
 
@@ -68,33 +72,26 @@ fn splits_menu() -> gio::Menu {
     split
 }
 
-/// Menu behind the `+` split button: everything that creates or acts on tabs
-/// and splits, so the main menu does not have to carry any of it.
+/// Menu behind the `+` split button: the split directions and nothing else.
+/// Clicking the button itself opens a tab, so tab actions live on the tab's own
+/// context menu instead of being buried here.
 pub fn tiling_menu() -> gio::Menu {
-    let menu = gio::Menu::new();
-
-    let tabs = gio::Menu::new();
-    tabs.append(Some("New Tab"), Some("win.new-tab"));
-    tabs.append(Some("Rename Tab"), Some("win.rename-tab"));
-    tabs.append(Some("Close Tab"), Some("win.close-tab"));
-    menu.append_section(Some("Tabs"), &tabs);
-
-    let nav = gio::Menu::new();
-    nav.append(Some("All Tabs"), Some("win.tab-overview"));
-    nav.append(Some("Next Tab"), Some("win.next-tab"));
-    nav.append(Some("Previous Tab"), Some("win.prev-tab"));
-    menu.append_section(None, &nav);
-
-    menu.append_section(Some("Split"), &splits_menu());
-    menu.append_section(Some("Terminal"), &terminal_menu());
-    menu
+    splits_menu()
 }
 
-/// Actions that act on the terminal currently in focus.
-fn terminal_menu() -> gio::Menu {
+/// Right-click on a tab: rename, split, close.
+pub fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    menu.append(Some("Clear Terminal"), Some("win.clear-tab"));
-    menu.append(Some("Restart Terminal"), Some("win.restart-tab"));
+
+    let rename = gio::Menu::new();
+    rename.append(Some("Rename…"), Some("win.rename-tab"));
+    menu.append_section(None, &rename);
+
+    menu.append_submenu(Some("Split"), &splits_menu());
+
+    let close = gio::Menu::new();
+    close.append(Some("Close Tab"), Some("win.close-tab"));
+    menu.append_section(None, &close);
     menu
 }
 
@@ -122,6 +119,10 @@ fn main_menu() -> gio::Menu {
     tools.append(Some("Command Palette"), Some("win.command-palette"));
     menu.append_section(None, &tools);
 
+    let term = gio::Menu::new();
+    term.append(Some("Restart Terminal"), Some("win.restart-tab"));
+    menu.append_section(None, &term);
+
     let app = gio::Menu::new();
     app.append(Some("Preferences"), Some("win.preferences"));
     app.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
@@ -133,49 +134,6 @@ fn main_menu() -> gio::Menu {
     menu.append_section(None, &quit);
 
     menu
-}
-
-/// The three theme swatches: a literal preview of System / Light / Dark with a
-/// check badge on the active one.
-///
-/// Shared by the `···` menu and Preferences so both look identical.
-pub fn theme_swatches() -> (gtk4::Box, [gtk4::ToggleButton; 3]) {
-    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 14);
-    row.set_halign(gtk4::Align::Center);
-
-    let swatches = [
-        (Theme::System, "system", "Follow the system theme"),
-        (Theme::Light, "light", "Light theme"),
-        (Theme::Dark, "dark", "Dark theme"),
-    ]
-    .map(|(theme, class, tip)| {
-        let button = gtk4::ToggleButton::builder()
-            .tooltip_text(tip)
-            .action_name("win.theme")
-            .action_target(&theme.as_str().to_variant())
-            .build();
-        button.add_css_class("theme-swatch");
-        button.add_css_class(class);
-
-        // Badge in the corner, on top of the swatch, only while selected.
-        let check = gtk4::Image::from_icon_name("object-select-symbolic");
-        check.add_css_class("theme-check");
-        check.set_halign(gtk4::Align::End);
-        check.set_valign(gtk4::Align::End);
-        check.set_visible(button.is_active());
-        button
-            .bind_property("active", &check, "visible")
-            .sync_create()
-            .build();
-
-        let overlay = gtk4::Overlay::new();
-        overlay.set_child(Some(&button));
-        overlay.add_overlay(&check);
-        row.append(&overlay);
-        button
-    });
-
-    (row, swatches)
 }
 
 /// Name tying the custom widget to its slot in [`main_menu`].
@@ -190,11 +148,10 @@ pub fn main_popover() -> (gtk4::PopoverMenu, QuickSettings) {
     (popover, quick)
 }
 
-/// Theme swatches, a font-size stepper and the current grid size, mirroring the
-/// quick controls FoxTerminal puts at the top of its menu.
+/// A font-size stepper and the current grid size at the top of the main menu.
+/// The theme is set in Preferences instead, so there is one place for it.
 pub struct QuickSettings {
     pub widget: gtk4::Box,
-    swatches: [gtk4::ToggleButton; 3],
     zoom_label: gtk4::Label,
     grid_label: gtk4::Label,
 }
@@ -203,10 +160,6 @@ impl QuickSettings {
     fn new() -> Self {
         let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
         widget.add_css_class("quick-settings");
-
-        // --- Theme ---
-        let (themes, swatches) = theme_swatches();
-        widget.append(&themes);
 
         // --- Font size ---
         let zoom = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
@@ -243,20 +196,8 @@ impl QuickSettings {
 
         Self {
             widget,
-            swatches,
             zoom_label,
             grid_label,
-        }
-    }
-
-    /// Reflect the active theme in the swatches.
-    pub fn set_theme(&self, theme: Theme) {
-        for (button, value) in self
-            .swatches
-            .iter()
-            .zip([Theme::System, Theme::Light, Theme::Dark])
-        {
-            button.set_active(value == theme);
         }
     }
 
@@ -276,29 +217,24 @@ impl QuickSettings {
     }
 }
 
+/// Right-click inside a terminal. Deliberately short: clipboard, the two
+/// terminal actions, and everything split-related folded into one submenu so
+/// six directions do not crowd out the two entries people actually reach for.
 fn context_menu() -> gio::Menu {
     let menu = gio::Menu::new();
 
     let edit = gio::Menu::new();
     edit.append(Some("Copy"), Some("win.copy"));
     edit.append(Some("Paste"), Some("win.paste"));
-    edit.append(Some("Select All"), Some("win.select-all"));
     menu.append_section(None, &edit);
 
-    menu.append_section(None, &splits_menu());
-    menu.append_section(None, &terminal_menu());
-
-    let tabs = gio::Menu::new();
-    tabs.append(Some("New Tab"), Some("win.new-tab"));
-    tabs.append(Some("Close Tab"), Some("win.close-tab"));
-    menu.append_section(None, &tabs);
+    menu.append_submenu(Some("Split"), &splits_menu());
 
     let misc = gio::Menu::new();
-    misc.append(Some("Find in Scrollback"), Some("win.find"));
-    misc.append(Some("Command Palette"), Some("win.command-palette"));
-    misc.append(Some("Preferences"), Some("win.preferences"));
+    misc.append(Some("Select All"), Some("win.select-all"));
+    misc.append(Some("Clear Terminal"), Some("win.clear-tab"));
+    misc.append(Some("Find…"), Some("win.find"));
     menu.append_section(None, &misc);
-
     menu
 }
 
@@ -584,16 +520,45 @@ pub fn show_command_palette(window: &adw::ApplicationWindow) {
     root.append(&scroll);
 
     dialog.set_child(Some(&root));
+
+    // Escape has to be handled twice over. GtkSearchEntry swallows it to clear
+    // its own text, so the dialog never sees the first press; and once the list
+    // has focus the entry is not involved at all.
+    {
+        let dialog = dialog.clone();
+        entry.connect_stop_search(move |_| {
+            dialog.close();
+        });
+    }
+    {
+        let dialog_for_keys = dialog.clone();
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                dialog_for_keys.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        dialog.add_controller(keys);
+    }
+    // Clicking outside dismisses it.
+    dialog.set_can_close(true);
+
     dialog.present(Some(window));
     entry.grab_focus();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show_preferences(
     window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
     pages: &Pages,
     apply_zoom: Rc<dyn Fn(f32)>,
     set_tabs_location: Rc<dyn Fn(TabsLocation)>,
+    apply_tab_shape: Rc<dyn Fn()>,
+    set_search_visible: Rc<dyn Fn(bool)>,
     save_config: Rc<dyn Fn()>,
 ) {
     let dialog = adw::PreferencesDialog::builder()
@@ -633,22 +598,35 @@ pub fn show_preferences(
     let font_group = adw::PreferencesGroup::builder().title("Font").build();
     let tabs_group = adw::PreferencesGroup::builder().title("Tabs").build();
 
-    // Same swatches as the `···` menu, so the two never disagree. They drive
-    // the `win.theme` action, which already applies and persists the choice.
-    let (theme_row_widget, theme_swatch_buttons) = theme_swatches();
-    theme_row_widget.set_margin_top(6);
-    theme_row_widget.set_margin_bottom(6);
+    let theme_row = adw::ComboRow::builder()
+        .title("Theme")
+        .subtitle("Application interface style")
+        .model(&gtk4::StringList::new(&["System", "Light", "Dark"]))
+        .build();
+    theme_row.set_selected(match config.borrow().theme {
+        Theme::Light => 1,
+        Theme::Dark => 2,
+        Theme::System => 0,
+    });
     {
-        let theme = config.borrow().theme;
-        for (button, value) in
-            theme_swatch_buttons
-                .iter()
-                .zip([Theme::System, Theme::Light, Theme::Dark])
-        {
-            button.set_active(value == theme);
-        }
+        let config = config.clone();
+        let save_config = save_config.clone();
+        theme_row.connect_selected_notify(move |row| {
+            let theme = match row.selected() {
+                1 => Theme::Light,
+                2 => Theme::Dark,
+                _ => Theme::System,
+            };
+            adw::StyleManager::default().set_color_scheme(match theme {
+                Theme::Light => adw::ColorScheme::ForceLight,
+                Theme::Dark => adw::ColorScheme::ForceDark,
+                Theme::System => adw::ColorScheme::Default,
+            });
+            config.borrow_mut().theme = theme;
+            save_config();
+        });
     }
-    theme_group.add(&theme_row_widget);
+    theme_group.add(&theme_row);
 
     let tabs_row = adw::ComboRow::builder()
         .title("Tab Position")
@@ -733,6 +711,70 @@ pub fn show_preferences(
     }
     tabs_group.add(&new_tab_row);
 
+    let tab_width_row = adw::ComboRow::builder()
+        .title("Tab Width")
+        .subtitle("Share the bar between tabs, or keep each as wide as its title")
+        .model(&gtk4::StringList::new(&["Fill the Bar", "Fit the Title"]))
+        .build();
+    tab_width_row.set_selected(match config.borrow().tab_width {
+        TabWidth::Fill => 0,
+        TabWidth::Natural => 1,
+    });
+    let tab_overflow_row = adw::ComboRow::builder()
+        .title("When Tabs Do Not Fit")
+        .subtitle("Keep shrinking them, or hold a readable width and scroll")
+        .model(&gtk4::StringList::new(&["Squeeze", "Scroll"]))
+        .build();
+    tab_overflow_row.set_selected(match config.borrow().tab_overflow {
+        TabOverflow::Squeeze => 0,
+        TabOverflow::Scroll => 1,
+    });
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        let apply_tab_shape = apply_tab_shape.clone();
+        tab_width_row.connect_selected_notify(move |row| {
+            config.borrow_mut().tab_width = match row.selected() {
+                1 => TabWidth::Natural,
+                _ => TabWidth::Fill,
+            };
+            apply_tab_shape();
+            save_config();
+        });
+    }
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        let apply_tab_shape = apply_tab_shape.clone();
+        tab_overflow_row.connect_selected_notify(move |row| {
+            config.borrow_mut().tab_overflow = match row.selected() {
+                1 => TabOverflow::Scroll,
+                _ => TabOverflow::Squeeze,
+            };
+            apply_tab_shape();
+            save_config();
+        });
+    }
+    tabs_group.add(&tab_width_row);
+    tabs_group.add(&tab_overflow_row);
+
+    let search_btn_row = adw::SwitchRow::builder()
+        .title("Show the Search Button")
+        .subtitle("Magnifier in the header that opens the command palette")
+        .build();
+    search_btn_row.set_active(config.borrow().show_search_button);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        let set_search_visible = set_search_visible.clone();
+        search_btn_row.connect_active_notify(move |row| {
+            config.borrow_mut().show_search_button = row.is_active();
+            set_search_visible(row.is_active());
+            save_config();
+        });
+    }
+    tabs_group.add(&search_btn_row);
+
     let middle_row = adw::ComboRow::builder()
         .title("Middle Click on a Tab")
         .subtitle("Action bound to the middle mouse button")
@@ -811,6 +853,20 @@ pub fn show_preferences(
         });
     }
     font_group.add(&ligature_row);
+
+    let system_font_row = adw::SwitchRow::builder()
+        .title("Use the System Monospace Font")
+        .subtitle("Ignores the family above and follows your desktop setting")
+        .build();
+    system_font_row.set_active(config.borrow().use_system_font);
+    {
+        let update_all = update_all.clone();
+        system_font_row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            update_all(Rc::new(move |cfg| cfg.use_system_font = on));
+        });
+    }
+    font_group.add(&system_font_row);
 
     look_page.add(&theme_group);
     look_page.add(&font_group);
