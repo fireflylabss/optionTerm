@@ -2259,11 +2259,22 @@ fn measure_cell(da: &DrawingArea, config: &Config) -> (f64, f64) {
     disable_ligatures(&layout);
     layout.set_text("M");
 
-    // Widget PangoContext is already set up for the widget's coordinate space
-    // (logical pixels). Do not divide by scale_factor — that would under-size
-    // cells on HiDPI after we stopped calling update_context.
-    let (w, h) = layout.pixel_size();
-    ((w as f64).max(1.0), (h as f64).max(1.0))
+    layout_cell_size(&layout)
+}
+
+/// Pango reports logical extents in `PANGO_SCALE` units. Keep their fractional
+/// component: terminal geometry must match the advance used to render text.
+fn layout_cell_size(layout: &pango::Layout) -> (f64, f64) {
+    // The terminal grid and this Cairo context both use logical pixels.
+    // `pixel_size` rounds Pango's advance to an integer, which makes a
+    // fractional-width font report the wrong number of columns and shifts
+    // full-screen TUIs relative to Ghostty. Preserve the logical advance here;
+    // only the legacy PTY pixel-size fields are rounded at their boundary.
+    let (w, h) = layout.size();
+    (
+        (f64::from(w) / f64::from(pango::SCALE)).max(1.0),
+        (f64::from(h) / f64::from(pango::SCALE)).max(1.0),
+    )
 }
 
 fn disable_ligatures(layout: &pango::Layout) {
@@ -2320,6 +2331,26 @@ mod tests {
         let mut bold_italic = bold.clone();
         bold_italic.set_style(pango::Style::Italic);
         (layout, [regular, bold, italic, bold_italic])
+    }
+
+    #[test]
+    fn cell_measurement_preserves_pango_logical_advance() {
+        let (layout, fonts) = layout();
+        let mut font = fonts[0].clone();
+        // A half-point size makes a fractional logical advance on the
+        // monospace font used by the headless Pango test context.
+        font.set_size(pango::SCALE * 21 / 2);
+        layout.set_font_description(Some(&font));
+        layout.set_text("M");
+
+        let (w, h) = layout.size();
+        assert_eq!(
+            layout_cell_size(&layout),
+            (
+                (f64::from(w) / f64::from(pango::SCALE)).max(1.0),
+                (f64::from(h) / f64::from(pango::SCALE)).max(1.0),
+            )
+        );
     }
 
     fn style() -> Style {
