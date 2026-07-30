@@ -885,8 +885,54 @@ pub fn show_preferences(
     }
     font_group.add(&system_font_row);
 
+    // --- Scrolling ---
+    let scroll_group = adw::PreferencesGroup::builder().title("Scrolling").build();
+
+    let scroll_bar_row = adw::SwitchRow::builder()
+        .title("Show a Scrollbar")
+        .subtitle("Appears only once there is scrollback to reach")
+        .build();
+    scroll_bar_row.set_active(config.borrow().scroll_bar);
+    {
+        let update_all = update_all.clone();
+        scroll_bar_row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            update_all(Rc::new(move |cfg| cfg.scroll_bar = on));
+        });
+    }
+    scroll_group.add(&scroll_bar_row);
+
+    let scroll_btn_row = adw::SwitchRow::builder()
+        .title("Jump-to-Bottom Button")
+        .subtitle("Floating button while scrolled up")
+        .build();
+    scroll_btn_row.set_active(config.borrow().scroll_button);
+    {
+        let update_all = update_all.clone();
+        scroll_btn_row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            update_all(Rc::new(move |cfg| cfg.scroll_button = on));
+        });
+    }
+    scroll_group.add(&scroll_btn_row);
+
+    let scroll_keys_row = adw::SwitchRow::builder()
+        .title("Typing Returns to the Prompt")
+        .subtitle("Jumps to the bottom as soon as you type while scrolled up")
+        .build();
+    scroll_keys_row.set_active(config.borrow().scroll_on_keystroke);
+    {
+        let update_all = update_all.clone();
+        scroll_keys_row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            update_all(Rc::new(move |cfg| cfg.scroll_on_keystroke = on));
+        });
+    }
+    scroll_group.add(&scroll_keys_row);
+
     look_page.add(&theme_group);
     look_page.add(&font_group);
+    look_page.add(&scroll_group);
 
     // --- Session ---
     let session_group = adw::PreferencesGroup::builder().title("Session").build();

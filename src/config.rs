@@ -200,6 +200,12 @@ pub struct Config {
     pub bell_sound: bool,
     /// Play a sound when a long command finishes in an unfocused window.
     pub command_finished_sound: bool,
+    /// Jump back to the prompt when the user types while scrolled up.
+    pub scroll_on_keystroke: bool,
+    /// Floating "jump to the bottom" button while scrolled up.
+    pub scroll_button: bool,
+    /// Show a scrollbar whenever there is scrollback to reach.
+    pub scroll_bar: bool,
     /// Keep the session from idling while a pane has a foreground job.
     pub keep_awake: bool,
     pub background: RgbColor,
@@ -243,6 +249,9 @@ impl Default for Config {
             confirm_quit: true,
             bell_sound: true,
             command_finished_sound: false,
+            scroll_on_keystroke: true,
+            scroll_button: false,
+            scroll_bar: true,
             keep_awake: false,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
@@ -400,6 +409,15 @@ impl Config {
         if let Some(v) = bool_at("sound", "command_finished") {
             cfg.command_finished_sound = v;
         }
+        if let Some(v) = bool_at("scroll", "on_keystroke") {
+            cfg.scroll_on_keystroke = v;
+        }
+        if let Some(v) = bool_at("scroll", "show_button") {
+            cfg.scroll_button = v;
+        }
+        if let Some(v) = bool_at("scroll", "show_bar") {
+            cfg.scroll_bar = v;
+        }
         if let Some(v) = bool_at("window", "keep_awake") {
             cfg.keep_awake = v;
         }
@@ -512,6 +530,11 @@ keep_awake = {keep_awake}   # keep the session awake while a pane has a foregrou
 padding_x = {pad_x}
 padding_y = {pad_y}
 
+[scroll]
+on_keystroke = {scroll_keys}   # typing while scrolled up jumps back to the prompt
+show_button = {scroll_btn}   # floating button to jump to the bottom
+show_bar = {scroll_bar}   # scrollbar, shown only when there is scrollback
+
 [sound]
 bell = {bell}   # ring the system bell on BEL
 command_finished = {cmd_done}   # sound when a command finishes while the window is unfocused
@@ -539,6 +562,9 @@ palette = [
             confirm_quit = self.confirm_quit,
             keep_awake = self.keep_awake,
             bell = self.bell_sound,
+            scroll_keys = self.scroll_on_keystroke,
+            scroll_btn = self.scroll_button,
+            scroll_bar = self.scroll_bar,
             cmd_done = self.command_finished_sound,
             sidebar_always = self.sidebar_always,
             theme = self.theme.as_str(),
@@ -834,6 +860,9 @@ mod tests {
         assert!(cfg.confirm_quit, "closing a multi-tab window asks");
         assert!(!cfg.confirm_close_tab, "closing one tab does not ask");
         assert!(cfg.bell_sound);
+        assert!(cfg.scroll_on_keystroke, "typing returns to the prompt");
+        assert!(!cfg.scroll_button, "the floating button is opt-in");
+        assert!(cfg.scroll_bar);
         assert!(!cfg.keep_awake, "inhibiting idle must be opt-in");
         assert_eq!(cfg.new_tab_position, NewTabPosition::AfterCurrent);
         assert_eq!(cfg.middle_click_tab, MiddleClickTab::Ignore);
@@ -871,6 +900,9 @@ mod tests {
             confirm_quit: false,
             bell_sound: false,
             command_finished_sound: true,
+            scroll_on_keystroke: false,
+            scroll_button: true,
+            scroll_bar: false,
             keep_awake: true,
             padding_x: 8.0,
             padding_y: 6.0,
@@ -901,6 +933,9 @@ mod tests {
         assert_eq!(back.confirm_quit, cfg.confirm_quit);
         assert_eq!(back.bell_sound, cfg.bell_sound);
         assert_eq!(back.command_finished_sound, cfg.command_finished_sound);
+        assert_eq!(back.scroll_on_keystroke, cfg.scroll_on_keystroke);
+        assert_eq!(back.scroll_button, cfg.scroll_button);
+        assert_eq!(back.scroll_bar, cfg.scroll_bar);
         assert_eq!(back.keep_awake, cfg.keep_awake);
         assert_eq!(
             back.inherit_working_directory,

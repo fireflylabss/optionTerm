@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2026-07-29
+
+### Added
+
+- **`scroll.on_keystroke`** (default on) — typing while scrolled up jumps straight back to the prompt. Key releases are excluded, so the view does not move on its own.
+- **`scroll.show_bar`** (default on) — a scrollbar beside the terminal, shown only once there is scrollback to reach, so a fresh shell does not sit next to a dead one. Dragging it moves the viewport by rows.
+- **`scroll.show_button`** (default off) — a floating jump-to-bottom button, visible only while scrolled up.
+
+All three read the viewport position from the terminal rather than from a counter of our own: libghostty-vt has no getter for the scroll offset, so the top-left visible cell is converted from viewport space into screen space, which is by definition how far down the scrollback the view sits. A tracked counter would have drifted the moment the terminal scrolled without being asked.
+
 ## [0.1.11] - 2026-07-29
 
 ### Fixed

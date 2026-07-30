@@ -67,6 +67,21 @@ pub struct TerminalView {
     watcher: Rc<RefCell<Option<glib::SourceId>>>,
     /// Shared with the VT bell callback, which cannot reach `Session::config`.
     bell_sound: Rc<Cell<bool>>,
+    /// Pane root: the drawing area plus its scrollbar and jump-to-bottom button.
+    root: gtk4::Overlay,
+    scroll: Rc<ScrollUi>,
+}
+
+/// The scrollback affordances around a terminal.
+struct ScrollUi {
+    adjustment: gtk4::Adjustment,
+    scrollbar: gtk4::Scrollbar,
+    button: gtk4::Button,
+    show_bar: Cell<bool>,
+    show_button: Cell<bool>,
+    /// Set while pushing terminal state into the adjustment, so the resulting
+    /// `value-changed` is not mistaken for the user dragging the scrollbar.
+    syncing: Cell<bool>,
 }
 
 struct Session {
@@ -114,6 +129,40 @@ impl TerminalView {
         area.set_focus_on_click(true);
         area.add_css_class("terminal");
 
+        // Rows, not pixels: the adjustment speaks the terminal's own units.
+        let adjustment = gtk4::Adjustment::new(0.0, 0.0, 1.0, 1.0, 10.0, 1.0);
+        let scrollbar = gtk4::Scrollbar::new(gtk4::Orientation::Vertical, Some(&adjustment));
+        scrollbar.set_visible(false);
+
+        let button = gtk4::Button::from_icon_name("go-bottom-symbolic");
+        button.add_css_class("osd");
+        button.add_css_class("circular");
+        button.set_tooltip_text(Some("Jump to the prompt"));
+        button.set_halign(gtk4::Align::End);
+        button.set_valign(gtk4::Align::End);
+        button.set_margin_end(12);
+        button.set_margin_bottom(12);
+        button.set_visible(false);
+        // Focus must stay in the terminal; the button is a shortcut, not a stop.
+        button.set_can_focus(false);
+
+        let scroll = Rc::new(ScrollUi {
+            adjustment: adjustment.clone(),
+            scrollbar: scrollbar.clone(),
+            button: button.clone(),
+            show_bar: Cell::new(config.scroll_bar),
+            show_button: Cell::new(config.scroll_button),
+            syncing: Cell::new(false),
+        });
+
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        row.append(&area);
+        row.append(&scrollbar);
+
+        let root = gtk4::Overlay::new();
+        root.set_child(Some(&row));
+        root.add_overlay(&button);
+
         let state: Rc<RefCell<Option<Session>>> = Rc::new(RefCell::new(None));
         let title_cb: Rc<RefCell<Option<TitleCb>>> = Rc::new(RefCell::new(None));
         let exit_cb: Rc<RefCell<Option<ExitCb>>> = Rc::new(RefCell::new(None));
@@ -135,6 +184,7 @@ impl TerminalView {
             let watcher_attached = watcher_attached.clone();
             let watcher = watcher.clone();
             let bell_sound = bell_sound.clone();
+            let scroll = scroll.clone();
             area.set_draw_func(move |da, cr, width, height| {
                 let mut just_bootstrapped = false;
                 if state.borrow().is_none() {
@@ -174,6 +224,7 @@ impl TerminalView {
                     if let Err(err) = session.paint(da, cr, width, height) {
                         tracing::warn!("paint failed: {err:#}");
                     }
+                    sync_scroll_ui(&scroll, session);
                 }
                 // A freshly split/opened pane starts at its final size, so
                 // report the initial grid too (Ghostty shows it as well).
@@ -219,8 +270,42 @@ impl TerminalView {
             });
         }
 
+        {
+            let state = state.clone();
+            let area_c = area.clone();
+            let scroll_c = scroll.clone();
+            adjustment.connect_value_changed(move |adj| {
+                if scroll_c.syncing.get() {
+                    return;
+                }
+                if let Ok(mut borrow) = state.try_borrow_mut()
+                    && let Some(session) = borrow.as_mut()
+                {
+                    session
+                        .terminal
+                        .scroll_viewport(ScrollViewport::Row(adj.value() as usize));
+                }
+                area_c.queue_draw();
+            });
+        }
+        {
+            let state = state.clone();
+            let area_c = area.clone();
+            button.connect_clicked(move |_| {
+                if let Ok(mut borrow) = state.try_borrow_mut()
+                    && let Some(session) = borrow.as_mut()
+                {
+                    session.terminal.scroll_viewport(ScrollViewport::Bottom);
+                }
+                area_c.queue_draw();
+                area_c.grab_focus();
+            });
+        }
+
         Ok(Self {
             area,
+            root,
+            scroll,
             state,
             title_cb,
             exit_cb,
@@ -233,8 +318,10 @@ impl TerminalView {
         })
     }
 
-    pub fn widget(&self) -> &DrawingArea {
-        &self.area
+    /// The pane root. Not the drawing area: the scrollbar and the
+    /// jump-to-bottom button live alongside it.
+    pub fn widget(&self) -> &gtk4::Overlay {
+        &self.root
     }
 
     pub fn focus(&self) {
@@ -273,6 +360,9 @@ impl TerminalView {
         if let Some(session) = self.state.borrow_mut().as_mut() {
             f(&mut session.config);
             self.bell_sound.set(session.config.bell_sound);
+            self.scroll.show_bar.set(session.config.scroll_bar);
+            self.scroll.show_button.set(session.config.scroll_button);
+            sync_scroll_ui(&self.scroll, session);
             // Cursor style/blink live in the VT state, not just our config.
             let config = session.config.clone();
             if let Err(err) = config.apply_cursor_to_terminal(&mut session.terminal) {
@@ -665,6 +755,9 @@ fn attach_input(
                 && let Some(session) = borrow.as_mut()
             {
                 session.blink_on = true;
+                if session.config.scroll_on_keystroke {
+                    session.terminal.scroll_viewport(ScrollViewport::Bottom);
+                }
                 session.pty.write_all(text.as_bytes());
             }
             area.queue_draw();
@@ -724,6 +817,9 @@ fn attach_input(
                     im_text.as_deref(),
                 );
                 if !session.input.buf.is_empty() {
+                    if session.config.scroll_on_keystroke {
+                        session.terminal.scroll_viewport(ScrollViewport::Bottom);
+                    }
                     session.pty.write_all(&session.input.buf);
                     session.input.buf.clear();
                 }
@@ -1694,6 +1790,58 @@ fn accumulate_wheel(accum: &mut f64, dy: f64) -> Option<isize> {
     }
     *accum -= whole;
     Some(whole as isize)
+}
+
+/// Viewport position as `(offset, max_offset)` in rows from the top of the
+/// scrollback.
+///
+/// libghostty-vt has no getter for the scroll offset, so it is derived: the
+/// top-left visible cell is converted from viewport space into screen space,
+/// which is by definition how far down the scrollback the viewport sits.
+/// Deriving beats tracking a counter of our own, which would drift the moment
+/// the terminal scrolled without us asking.
+fn scroll_state(session: &Session) -> Option<(usize, usize)> {
+    let total = session.terminal.total_rows().ok()?;
+    let max = total.saturating_sub(session.rows as usize);
+    if max == 0 {
+        return Some((0, 0));
+    }
+    let top = session
+        .terminal
+        .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
+        .ok()?;
+    let screen = session
+        .terminal
+        .point_from_grid_ref(&top, PointSpace::Screen)
+        .ok()??;
+    Some(((screen.y as usize).min(max), max))
+}
+
+/// Reflect the viewport position in the scrollbar and the jump-to-bottom button.
+fn sync_scroll_ui(scroll: &ScrollUi, session: &Session) {
+    let Some((offset, max)) = scroll_state(session) else {
+        return;
+    };
+    let rows = f64::from(session.rows);
+    let scrollable = max > 0;
+
+    scroll.syncing.set(true);
+    scroll.adjustment.set_lower(0.0);
+    scroll.adjustment.set_upper(max as f64 + rows);
+    scroll.adjustment.set_page_size(rows);
+    scroll.adjustment.set_step_increment(1.0);
+    scroll.adjustment.set_page_increment(rows);
+    scroll.adjustment.set_value(offset as f64);
+    scroll.syncing.set(false);
+
+    // The bar only appears when there is somewhere to go, so a fresh shell does
+    // not sit next to a dead scrollbar.
+    scroll
+        .scrollbar
+        .set_visible(scroll.show_bar.get() && scrollable);
+    scroll
+        .button
+        .set_visible(scroll.show_button.get() && scrollable && offset < max);
 }
 
 /// Merges horizontally adjacent cells that share a background into one

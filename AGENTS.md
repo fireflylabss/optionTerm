@@ -118,6 +118,15 @@
   libadwaita. Use `has_property` antes: **`property_value` entra em pânico** se a
   propriedade não existe, e o primeiro widget do `pick` nunca tem. Se a libadwaita
   renomear, o clique do meio vira no-op em vez de fechar a aba errada.
+- **libghostty-vt 0.2.1 não tem getter do offset do viewport.** Para saber onde o
+  scroll está (scrollbar, botão de descer), converta o topo do viewport para espaço
+  de tela: `grid_ref(Point::Viewport{0,0})` + `point_from_grid_ref(.., Screen)`.
+  Não tente manter contador próprio — ele desvia na primeira vez que o terminal
+  rola sozinho. Ver `scroll_state`/`sync_scroll_ui` em `terminal.rs`.
+- `TerminalView::widget()` devolve o **`Overlay`** raiz (área de desenho + scrollbar +
+  botão), não a `DrawingArea`. A navegação entre splits caminha por essa árvore, então
+  trocar isso mexe em `collapse_split`/`compute_bounds`. Teste com restauração de
+  sessão de 2 painéis: é o caminho de split mais barato de exercitar.
 - **Restaurar posição de scroll é impossível hoje**: o `session.toml` não persiste
   scrollback (decisão de privacidade), então não existe histórico pra rolar de volta.
   Só dá pra implementar se o conteúdo do scrollback for pra disco.
