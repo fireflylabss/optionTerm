@@ -1,7 +1,7 @@
 # Maintainer: Firefly Labs <fireflylabss@users.noreply.github.com>
 
 pkgname=optionterm
-pkgver=0.1.10
+pkgver=0.1.11
 pkgrel=1
 pkgdesc='GTK4 + libadwaita terminal emulator powered by libghostty-vt'
 arch=('x86_64')

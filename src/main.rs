@@ -5,6 +5,7 @@ mod config;
 mod default_terminal;
 mod graphics;
 mod input;
+mod keys;
 mod profile;
 mod pty;
 mod session;

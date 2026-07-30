@@ -21,7 +21,7 @@ use crate::{
     session::{Session as SessionState, TabState},
     terminal::TerminalView,
     ui::{
-        SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
+        PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
         show_preferences, show_shortcuts, tab_menu, tiling_menu,
     },
 };
@@ -204,6 +204,28 @@ fn collapse_split(widget: &gtk4::Widget) {
 fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let config = Rc::new(RefCell::new(Config::load()?));
     let base_font_size = Rc::new(Cell::new(config.borrow().font_size));
+
+    // Shortcut overrides live in their own file. Only overridden actions are
+    // touched, so new built-in defaults still reach existing installs.
+    let bindings = Rc::new(RefCell::new(crate::keys::Bindings::load()));
+    let apply_bindings: Rc<dyn Fn()> = {
+        let app = app.clone();
+        let bindings = bindings.clone();
+        Rc::new(move || {
+            for (_, action, _) in crate::ui::COMMANDS {
+                let name = action.trim_start_matches("win.");
+                let Some(accel) = bindings.borrow().get(name).map(str::to_string) else {
+                    continue;
+                };
+                if accel.is_empty() {
+                    app.set_accels_for_action(action, &[]);
+                } else {
+                    let gtk_accel = crate::keys::to_gtk_accel(&accel);
+                    app.set_accels_for_action(action, &[&gtk_accel]);
+                }
+            }
+        })
+    };
     tracing::info!(
         "loaded config from {} (font={} size={})",
         config.borrow().source.display(),
@@ -1474,6 +1496,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let apply_tab_shape = apply_tab_shape.clone();
         let set_search_visible = set_search_visible.clone();
         let save_config = save_config.clone();
+        let bindings = bindings.clone();
+        let apply_bindings = apply_bindings.clone();
         window.add_action(&add_simple(
             "preferences",
             Box::new(move || {
@@ -1481,11 +1505,15 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                     &window_c,
                     &config,
                     &pages,
-                    apply_zoom.clone(),
-                    set_tabs_location.clone(),
-                    apply_tab_shape.clone(),
-                    set_search_visible.clone(),
-                    save_config.clone(),
+                    PrefsHooks {
+                        apply_zoom: apply_zoom.clone(),
+                        set_tabs_location: set_tabs_location.clone(),
+                        apply_tab_shape: apply_tab_shape.clone(),
+                        set_search_visible: set_search_visible.clone(),
+                        save_config: save_config.clone(),
+                        bindings: bindings.clone(),
+                        apply_bindings: apply_bindings.clone(),
+                    },
                 );
             }),
         ));
@@ -1702,6 +1730,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     app.set_accels_for_action("win.zoom-reset", &["<Control>0", "<Control>KP_0"]);
     app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 
+    // keys.toml wins over everything set above.
+    apply_bindings();
+
     // Focus terminal when switching tabs; sync window title + sidebar row.
     {
         let current_view = current_view.clone();
@@ -1795,12 +1826,32 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let window = window.clone();
         // The GTK inhibit cookie; 0 means "not inhibiting".
         let cookie = Rc::new(Cell::new(0u32));
+        // Was anything running last time we looked? A busy-to-idle transition
+        // is what "the command finished" means without shell integration.
+        let was_busy = Rc::new(Cell::new(false));
         glib::timeout_add_seconds_local(4, move || {
-            let wanted = config.borrow().keep_awake
-                && pages
-                    .borrow()
-                    .iter()
-                    .any(|(_, views)| views.iter().any(|v| v.is_busy()));
+            let busy = pages
+                .borrow()
+                .iter()
+                .any(|(_, views)| views.iter().any(|v| v.is_busy()));
+
+            let (keep_awake, notify) = {
+                let cfg = config.borrow();
+                (cfg.keep_awake, cfg.command_finished_sound)
+            };
+            // Only when unfocused: otherwise it beeps at someone who is already
+            // watching the command finish.
+            if notify
+                && was_busy.get()
+                && !busy
+                && !window.is_active()
+                && let Some(display) = gdk::Display::default()
+            {
+                display.beep();
+            }
+            was_busy.set(busy);
+
+            let wanted = keep_awake && busy;
             let held = cookie.get();
             if wanted && held == 0 {
                 cookie.set(app.inhibit(

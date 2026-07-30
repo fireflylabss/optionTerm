@@ -198,6 +198,8 @@ pub struct Config {
     pub confirm_quit: bool,
     /// Ring the system bell when the terminal writes BEL.
     pub bell_sound: bool,
+    /// Play a sound when a long command finishes in an unfocused window.
+    pub command_finished_sound: bool,
     /// Keep the session from idling while a pane has a foreground job.
     pub keep_awake: bool,
     pub background: RgbColor,
@@ -240,6 +242,7 @@ impl Default for Config {
             confirm_close_tab: false,
             confirm_quit: true,
             bell_sound: true,
+            command_finished_sound: false,
             keep_awake: false,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
@@ -394,6 +397,9 @@ impl Config {
         if let Some(v) = bool_at("sound", "bell") {
             cfg.bell_sound = v;
         }
+        if let Some(v) = bool_at("sound", "command_finished") {
+            cfg.command_finished_sound = v;
+        }
         if let Some(v) = bool_at("window", "keep_awake") {
             cfg.keep_awake = v;
         }
@@ -508,6 +514,7 @@ padding_y = {pad_y}
 
 [sound]
 bell = {bell}   # ring the system bell on BEL
+command_finished = {cmd_done}   # sound when a command finishes while the window is unfocused
 
 [colors]
 background = "{bg}"
@@ -532,6 +539,7 @@ palette = [
             confirm_quit = self.confirm_quit,
             keep_awake = self.keep_awake,
             bell = self.bell_sound,
+            cmd_done = self.command_finished_sound,
             sidebar_always = self.sidebar_always,
             theme = self.theme.as_str(),
             opacity = self.background_opacity,
@@ -718,13 +726,17 @@ palette = [
     }
 }
 
-/// `~/.option/terminal/config.toml`
-pub fn option_config_path() -> PathBuf {
+/// `~/.option/terminal`
+pub fn config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".option")
         .join("terminal")
-        .join("config.toml")
+}
+
+/// `~/.option/terminal/config.toml`
+pub fn option_config_path() -> PathBuf {
+    config_dir().join("config.toml")
 }
 
 fn hex(c: RgbColor) -> String {
@@ -858,6 +870,7 @@ mod tests {
             confirm_close_tab: true,
             confirm_quit: false,
             bell_sound: false,
+            command_finished_sound: true,
             keep_awake: true,
             padding_x: 8.0,
             padding_y: 6.0,
@@ -887,6 +900,7 @@ mod tests {
         assert_eq!(back.confirm_close_tab, cfg.confirm_close_tab);
         assert_eq!(back.confirm_quit, cfg.confirm_quit);
         assert_eq!(back.bell_sound, cfg.bell_sound);
+        assert_eq!(back.command_finished_sound, cfg.command_finished_sound);
         assert_eq!(back.keep_awake, cfg.keep_awake);
         assert_eq!(
             back.inherit_working_directory,

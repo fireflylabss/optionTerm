@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-07-29
+
+### Fixed
+
+- **Middle click on a tab closed it even when set to open a new one.** `AdwTabBar` closes tabs on middle click by itself, so the configured action ran *and* libadwaita closed the tab under the pointer — and "Nothing" still closed it. The gesture now runs ahead of libadwaita's and claims the event, which makes the setting authoritative for all three choices.
+- **Escape now closes the command palette.** It needed handling twice: `GtkSearchEntry` swallows the key to clear its own text, so the dialog never saw the first press, and once the list has focus the entry is not involved at all. Clicking outside dismisses it too.
+- **A configured font that is not installed** no longer silently resolves to whatever Fontconfig picks — which could be proportional and wreck the grid. It falls back to monospace and says so in the log.
+
+### Added
+
+- **Editable keyboard shortcuts**, stored in **`~/.option/terminal/keys.toml`**, separate from `config.toml`: bindings are edited far more often than colours, and a typo there must not cost you the rest of your configuration. Only overrides are saved, so new built-in defaults still reach existing installs. The Shortcuts page captures a key combination, refuses one already taken by another action (two actions on one key means one silently never fires), and offers a per-row reset.
+- **`sound.command_finished`** (default off) — plays when a command ends while the window is *not* focused, detected from the terminal's foreground process group going idle. No shell integration needed.
+- **`font.use_system`** (default off) — follow the desktop's monospace font instead of the configured family.
+- **`window.tab_width`** — tabs either share the bar (default) or stay as wide as their title.
+- **`window.tab_overflow`** — once tabs no longer fit, keep squeezing them (default) or hold a readable width and scroll.
+- **`window.show_search_button`** (default off) — the magnifier in the header that opens the command palette.
+- **Right-click on a tab** — rename, split, close.
+
+### Changed
+
+- **The `+` dropdown carries only the split directions.** Tab actions moved to the tab's own context menu.
+- **The terminal context menu is shorter** — clipboard, select all, clear and find, with the six split directions folded into one submenu.
+- **The theme picker is a dropdown in Preferences only.** Having it in the menu as well meant two controls for one setting.
+
 ## [0.1.10] - 2026-07-29
 
 ### Added

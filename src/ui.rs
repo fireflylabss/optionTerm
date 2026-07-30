@@ -18,6 +18,7 @@ use crate::{
         Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
         Theme,
     },
+    keys::Bindings,
     terminal::{Match, TerminalView},
 };
 
@@ -550,17 +551,33 @@ pub fn show_command_palette(window: &adw::ApplicationWindow) {
     entry.grab_focus();
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything Preferences needs to push a change back into the live window.
+#[derive(Clone)]
+pub struct PrefsHooks {
+    pub apply_zoom: Rc<dyn Fn(f32)>,
+    pub set_tabs_location: Rc<dyn Fn(TabsLocation)>,
+    pub apply_tab_shape: Rc<dyn Fn()>,
+    pub set_search_visible: Rc<dyn Fn(bool)>,
+    pub save_config: Rc<dyn Fn()>,
+    pub bindings: Rc<RefCell<Bindings>>,
+    pub apply_bindings: Rc<dyn Fn()>,
+}
+
 pub fn show_preferences(
     window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
     pages: &Pages,
-    apply_zoom: Rc<dyn Fn(f32)>,
-    set_tabs_location: Rc<dyn Fn(TabsLocation)>,
-    apply_tab_shape: Rc<dyn Fn()>,
-    set_search_visible: Rc<dyn Fn(bool)>,
-    save_config: Rc<dyn Fn()>,
+    hooks: PrefsHooks,
 ) {
+    let PrefsHooks {
+        apply_zoom,
+        set_tabs_location,
+        apply_tab_shape,
+        set_search_visible,
+        save_config,
+        bindings,
+        apply_bindings,
+    } = hooks;
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
         .build();
@@ -1086,6 +1103,25 @@ pub fn show_preferences(
     bell_group.add(&test_row);
     sound_page.add(&bell_group);
 
+    let notify_group = adw::PreferencesGroup::builder()
+        .title("Notifications")
+        .build();
+    let done_row = adw::SwitchRow::builder()
+        .title("Command Finished")
+        .subtitle("Sounds when a command ends while the window is not focused")
+        .build();
+    done_row.set_active(config.borrow().command_finished_sound);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        done_row.connect_active_notify(move |row| {
+            config.borrow_mut().command_finished_sound = row.is_active();
+            save_config();
+        });
+    }
+    notify_group.add(&done_row);
+    sound_page.add(&notify_group);
+
     // --- Default terminal ---
     let default_page = adw::PreferencesPage::builder()
         .title("Default Terminal")
@@ -1150,20 +1186,94 @@ pub fn show_preferences(
         .build();
     let shortcuts_group = adw::PreferencesGroup::builder()
         .title("Keyboard Shortcuts")
-        .description("Remapping is not implemented yet; these are the built-in bindings")
+        .description("Overrides are stored in keys.toml, separately from config.toml")
         .build();
-    for (label, _action, accel) in COMMANDS {
-        let row = adw::ActionRow::builder().title(*label).build();
-        if accel.is_empty() {
-            let none = gtk4::Label::new(Some("—"));
-            none.add_css_class("dim-label");
-            row.add_suffix(&none);
+    for (label, action, accel) in bindings.borrow().effective() {
+        let name = action.trim_start_matches("win.").to_string();
+        let row = adw::ActionRow::builder().title(label).build();
+
+        let shown = if accel.is_empty() {
+            "Unbound".to_string()
         } else {
-            let keys = gtk4::Label::new(Some(accel));
-            keys.add_css_class("dim-label");
-            keys.add_css_class("monospace");
-            row.add_suffix(&keys);
+            accel.clone()
+        };
+        let button = gtk4::Button::with_label(&shown);
+        button.add_css_class("flat");
+        button.set_valign(gtk4::Align::Center);
+        button.set_tooltip_text(Some("Click, then press the new shortcut"));
+
+        let reset = gtk4::Button::from_icon_name("edit-undo-symbolic");
+        reset.add_css_class("flat");
+        reset.set_valign(gtk4::Align::Center);
+        reset.set_tooltip_text(Some("Restore the default"));
+        reset.set_visible(bindings.borrow().get(&name).is_some());
+
+        {
+            let bindings = bindings.clone();
+            let apply_bindings = apply_bindings.clone();
+            let button_c = button.clone();
+            let reset_c = reset.clone();
+            let dialog_c = dialog.clone();
+            let name = name.clone();
+            button.connect_clicked(move |_| {
+                let bindings = bindings.clone();
+                let apply_bindings = apply_bindings.clone();
+                let button = button_c.clone();
+                let reset = reset_c.clone();
+                let dialog = dialog_c.clone();
+                let parent = dialog_c.clone();
+                let name = name.clone();
+                capture_shortcut(&parent, move |accel| {
+                    // Two actions on one key means one of them silently never
+                    // fires, so refuse rather than let it happen.
+                    if let Some(other) = bindings.borrow().conflict(&accel, &name) {
+                        dialog.add_toast(
+                            adw::Toast::builder()
+                                .title(format!("Already used by {other}"))
+                                .timeout(3)
+                                .build(),
+                        );
+                        return;
+                    }
+                    bindings.borrow_mut().set(&name, Some(&accel));
+                    if let Err(err) = bindings.borrow().save() {
+                        tracing::warn!("could not save shortcuts: {err:#}");
+                    }
+                    apply_bindings();
+                    button.set_label(&accel);
+                    reset.set_visible(true);
+                });
+            });
         }
+        {
+            let bindings = bindings.clone();
+            let apply_bindings = apply_bindings.clone();
+            let button = button.clone();
+            let reset_c = reset.clone();
+            let name = name.clone();
+            let builtin = COMMANDS
+                .iter()
+                .find(|(_, a, _)| a.trim_start_matches("win.") == name)
+                .map(|(_, _, d)| *d)
+                .unwrap_or("");
+            reset.connect_clicked(move |_| {
+                bindings.borrow_mut().set(&name, None);
+                if let Err(err) = bindings.borrow().save() {
+                    tracing::warn!("could not save shortcuts: {err:#}");
+                }
+                apply_bindings();
+                button.set_label(if builtin.is_empty() {
+                    "Unbound"
+                } else {
+                    builtin
+                });
+                reset_c.set_visible(false);
+            });
+        }
+
+        row.add_suffix(&button);
+        row.add_suffix(&reset);
+        row.set_activatable_widget(Some(&button));
         shortcuts_group.add(&row);
     }
     shortcuts_page.add(&shortcuts_group);
@@ -1175,6 +1285,75 @@ pub fn show_preferences(
     dialog.add(&default_page);
     dialog.add(&advanced_page);
     dialog.present(Some(window));
+}
+
+/// Ask the user to press a shortcut, reporting it in GTK accelerator syntax.
+///
+/// Modifier-only presses are ignored: they are what the user is holding on the
+/// way to the real key.
+fn capture_shortcut(parent: &impl IsA<gtk4::Widget>, on_captured: impl Fn(String) + 'static) {
+    let dialog = adw::AlertDialog::new(
+        Some("Press the new shortcut"),
+        Some("Escape cancels, Backspace unbinds the action."),
+    );
+    dialog.add_responses(&[("cancel", "Cancel")]);
+    dialog.set_close_response("cancel");
+
+    let keys = gtk4::EventControllerKey::new();
+    {
+        let dialog = dialog.clone();
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            // Only the modifiers that take part in accelerators.
+            let mods = mods
+                & (gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SUPER_MASK);
+            match key {
+                gdk::Key::Escape => {
+                    dialog.close();
+                    return glib::Propagation::Stop;
+                }
+                gdk::Key::BackSpace => {
+                    on_captured(String::new());
+                    dialog.close();
+                    return glib::Propagation::Stop;
+                }
+                gdk::Key::Control_L
+                | gdk::Key::Control_R
+                | gdk::Key::Shift_L
+                | gdk::Key::Shift_R
+                | gdk::Key::Alt_L
+                | gdk::Key::Alt_R
+                | gdk::Key::Super_L
+                | gdk::Key::Super_R => return glib::Propagation::Stop,
+                _ => {}
+            }
+            let name = key.name().unwrap_or_default();
+            if name.is_empty() {
+                return glib::Propagation::Stop;
+            }
+            let mut accel = String::new();
+            if mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                accel.push_str("<Control>");
+            }
+            if mods.contains(gdk::ModifierType::SHIFT_MASK) {
+                accel.push_str("<Shift>");
+            }
+            if mods.contains(gdk::ModifierType::ALT_MASK) {
+                accel.push_str("<Alt>");
+            }
+            if mods.contains(gdk::ModifierType::SUPER_MASK) {
+                accel.push_str("<Super>");
+            }
+            accel.push_str(&name);
+            on_captured(accel);
+            dialog.close();
+            glib::Propagation::Stop
+        });
+    }
+    dialog.add_controller(keys);
+    dialog.present(Some(parent));
 }
 
 pub fn show_shortcuts(window: &adw::ApplicationWindow) {

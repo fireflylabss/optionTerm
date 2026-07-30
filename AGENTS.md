@@ -60,6 +60,10 @@
   `makepkg --printsrcinfo > .SRCINFO` → `makepkg -f` (valida) → push no AUR.
 
 ## Arquitetura
+- `src/keys.rs` — `keys.toml` (overrides de atalho) + conversão da grafia humana
+  (`Ctrl+Shift+T`) para a do GTK (`<Control><Shift>t`).
+- `src/default_terminal.rs` — registra como terminal padrão: `xdg-terminals.list`
+  (portável) + chave do GNOME + `kdeglobals` do KDE, reportando o que conseguiu.
 - `src/config.rs` — config próprio em `~/.option/terminal/config.toml` (TOML).
   Na primeira execução é gerado a partir do config do Ghostty do sistema
   (`~/.config/ghostty/config`), com `window.tabs = "left"` (sidebar) por padrão.
@@ -97,6 +101,18 @@
 - Roda de mouse tem três destinos, nessa ordem: aplicação (se ligou mouse tracking),
   cursor keys (tela alternada, respeitando DECCKM), viewport (resto). Errar a ordem
   faz o scroll "não funcionar" em contextos específicos.
+- **`AdwTabBar` fecha aba no clique do meio por conta própria.** Para o config valer,
+  o gesto tem que rodar em `PropagationPhase::Capture` **e** chamar
+  `set_state(EventSequenceState::Claimed)`; sem isso a ação configurada roda e a
+  libadwaita fecha a aba junto.
+- `GtkSearchEntry` engole o Escape (limpa o texto e emite `stop-search`), então diálogo
+  com campo de busca precisa tratar Escape **duas vezes**: no `stop_search` e num
+  `EventControllerKey` em fase de captura.
+- `gtk4::accelerator_parse` exige **GTK inicializado** — não dá pra usar em teste nem
+  antes da janela existir. Comparação de atalho em `keys.rs` é textual de propósito.
+- Atalhos ficam em `keys.toml`, **separado** do `config.toml`: só overrides, então
+  default novo chega em instalação antiga. Arquivo inválido é ignorado com warning —
+  nunca derruba o resto da config.
 - **`AdwTabBar` não tem hit-testing nem sinal de clique do meio.** `tab_page_at` resolve
   a aba pelo `pick()` e sobe a árvore lendo a propriedade `page` do widget interno da
   libadwaita. Use `has_property` antes: **`property_value` entra em pânico** se a
