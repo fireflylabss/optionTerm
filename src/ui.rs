@@ -1,7 +1,7 @@
 //! Menus, context menu and dialogs (palette, preferences, shortcuts, about).
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
 };
 
@@ -19,7 +19,7 @@ use crate::{
         Theme,
     },
     keys::Bindings,
-    terminal::{Match, TerminalView},
+    terminal::TerminalView,
 };
 
 /// (label, action, accel) for menus and the command palette.
@@ -278,10 +278,6 @@ impl SearchBar {
         entry.set_placeholder_text(Some("Search scrollback…"));
         entry.set_hexpand(true);
 
-        let counter = gtk4::Label::new(None);
-        counter.add_css_class("dim-label");
-        counter.add_css_class("numeric");
-
         let prev = gtk4::Button::from_icon_name("go-up-symbolic");
         prev.set_tooltip_text(Some("Previous match (Shift+Enter)"));
         prev.add_css_class("flat");
@@ -291,7 +287,6 @@ impl SearchBar {
 
         let boxed = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         boxed.append(&entry);
-        boxed.append(&counter);
         boxed.append(&prev);
         boxed.append(&next);
 
@@ -302,92 +297,51 @@ impl SearchBar {
             .build();
         bar.connect_entry(&entry);
 
-        // Matches are computed once per query and then just indexed into, so
-        // stepping through hits never re-scans the scrollback.
-        let matches: Rc<RefCell<Vec<Match>>> = Rc::new(RefCell::new(Vec::new()));
-        let index = Rc::new(Cell::new(0usize));
-
-        let refresh_counter = {
-            let counter = counter.clone();
-            let matches = matches.clone();
-            let index = index.clone();
-            Rc::new(move |query_empty: bool| {
-                let total = matches.borrow().len();
-                counter.set_text(&if query_empty {
-                    String::new()
-                } else if total == 0 {
-                    "0/0".into()
-                } else {
-                    format!("{}/{}", index.get() + 1, total)
-                });
-            })
-        };
-
-        let step = {
-            let matches = matches.clone();
-            let index = index.clone();
-            let current_view = current_view.clone();
-            let refresh_counter = refresh_counter.clone();
-            Rc::new(move |delta: isize| {
-                let total = matches.borrow().len();
-                if total == 0 {
-                    return;
-                }
-                let cur = index.get() as isize;
-                // Wrap around in both directions.
-                let next = (cur + delta).rem_euclid(total as isize) as usize;
-                index.set(next);
-                if let (Some(view), Some(m)) = (current_view(), matches.borrow().get(next).copied())
-                {
-                    view.reveal_match(&m);
-                }
-                refresh_counter(false);
-            })
-        };
-
         {
-            let matches = matches.clone();
-            let index = index.clone();
             let current_view = current_view.clone();
-            let refresh_counter = refresh_counter.clone();
             entry.connect_search_changed(move |e| {
                 let query = e.text().to_string();
-                let found = match current_view() {
-                    Some(view) if !query.trim().is_empty() => view.search(&query),
-                    _ => Vec::new(),
-                };
-                let first = found.first().copied();
-                *matches.borrow_mut() = found;
-                index.set(0);
-                if let (Some(view), Some(m)) = (current_view(), first) {
-                    view.reveal_match(&m);
+                if let Some(view) = current_view() {
+                    view.search_set_query(&query);
+                    if !query.trim().is_empty() {
+                        let _ = view.search_find_next();
+                    }
                 }
-                refresh_counter(query.trim().is_empty());
             });
         }
         {
-            let step = step.clone();
-            entry.connect_activate(move |_| step(1));
+            let current_view = current_view.clone();
+            entry.connect_activate(move |_| {
+                if let Some(view) = current_view() {
+                    let _ = view.search_find_next();
+                }
+            });
         }
         {
-            let step = step.clone();
-            next.connect_clicked(move |_| step(1));
+            let current_view = current_view.clone();
+            next.connect_clicked(move |_| {
+                if let Some(view) = current_view() {
+                    let _ = view.search_find_next();
+                }
+            });
         }
         {
-            let step = step.clone();
-            prev.connect_clicked(move |_| step(-1));
+            let current_view = current_view.clone();
+            prev.connect_clicked(move |_| {
+                if let Some(view) = current_view() {
+                    let _ = view.search_find_previous();
+                }
+            });
         }
         {
-            // Shift+Enter walks backwards; Escape closes and returns focus to
-            // the terminal. The bar has no key-capture widget, so both have to
-            // be handled here.
-            let step = step.clone();
             let bar_weak = bar.downgrade();
             let current_view = current_view.clone();
             let key = gtk4::EventControllerKey::new();
             key.connect_key_pressed(move |_, keyval, _, modifier| {
                 if keyval == gdk::Key::Return && modifier.contains(gdk::ModifierType::SHIFT_MASK) {
-                    step(-1);
+                    if let Some(view) = current_view() {
+                        let _ = view.search_find_previous();
+                    }
                     return gtk4::glib::Propagation::Stop;
                 }
                 if keyval == gdk::Key::Escape {
@@ -395,6 +349,7 @@ impl SearchBar {
                         bar.set_search_mode(false);
                     }
                     if let Some(view) = current_view() {
+                        view.search_set_query("");
                         view.focus();
                     }
                     return gtk4::glib::Propagation::Stop;
@@ -951,21 +906,6 @@ pub fn show_preferences(
     }
     session_group.add(&restore_row);
 
-    let history_row = adw::SwitchRow::builder()
-        .title("Restore Scrollback History")
-        .subtitle("Also reopens each pane's screen contents (may store secrets on disk)")
-        .build();
-    history_row.set_active(config.borrow().session_restore_scrollback);
-    {
-        let config = config.clone();
-        let save_config = save_config.clone();
-        history_row.connect_active_notify(move |row| {
-            config.borrow_mut().session_restore_scrollback = row.is_active();
-            save_config();
-        });
-    }
-    session_group.add(&history_row);
-
     let inherit_row = adw::SwitchRow::builder()
         .title("Inherit Working Directory")
         .subtitle("New tabs and splits open in the focused pane's directory")
@@ -1076,7 +1016,7 @@ pub fn show_preferences(
     // --- Config file ---
     let cfg_group = adw::PreferencesGroup::builder()
         .title("Configuration")
-        .description("~/.option/terminal/config.toml (generated from Ghostty on first run)")
+        .description("~/.option/terminal/config.toml")
         .build();
 
     let source = config.borrow().source.clone();
@@ -1461,20 +1401,30 @@ pub fn show_about(window: &adw::ApplicationWindow) {
         .license_type(gtk4::License::Apache20)
         .website("https://github.com/fireflylabss/optionTerm")
         .issue_url("https://github.com/fireflylabss/optionTerm/issues")
-        .comments("GTK4 + libadwaita terminal powered by libghostty-vt")
+        .comments(
+            "Sidebar-first GTK4 terminal with tiling splits, Adwaita preferences, \
+             and a keyboard-driven workflow.",
+        )
         .build();
     about.add_acknowledgement_section(
         Some("Inspired by"),
-        &[
-            "Yacha (FoxTerminal) https://gitlab.com/OrangeFox/misc/FoxTerminal",
-            "Ghostty https://ghostty.org",
-        ],
+        &["Yacha (FoxTerminal) https://gitlab.com/OrangeFox/misc/FoxTerminal"],
     );
     about.add_legal_section(
         "FoxTerminal",
         // Ideas only: FoxTerminal is GPL-3.0-or-later and optionTerm is
         // Apache-2.0, so no code is shared between them.
         Some("optionTerm's sidebar-first workflow, its quick theme and font\ncontrols and the shape of its preferences were inspired by\nFoxTerminal by Yacha, whose terminal is why this one exists.\n\nFoxTerminal is licensed GPL-3.0-or-later. No FoxTerminal code is\nincluded in optionTerm; only ideas were borrowed."),
+        gtk4::License::Custom,
+        None,
+    );
+    about.add_legal_section(
+        "VTE",
+        Some(
+            "optionTerm dynamically links the system VTE library\n\
+             (LGPL-3.0-or-later). See NOTICE and your distribution's\n\
+             VTE package for license details.",
+        ),
         gtk4::License::Custom,
         None,
     );

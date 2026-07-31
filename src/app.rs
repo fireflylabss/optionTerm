@@ -267,7 +267,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     let header = adw::HeaderBar::new();
     // Always honor the system decoration layout (window buttons follow the
-    // user's GTK/Adwaita settings, like Ghostty does).
+    // user's GTK/Adwaita settings, from the user's GTK/Adwaita settings).
     header.set_show_start_title_buttons(true);
     header.set_show_end_title_buttons(true);
 
@@ -358,7 +358,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&content_box));
 
-    // Tabs-as-sidebar support (Ghostty `gtk-tabs-location = left|right`).
+    // Tabs-as-sidebar support 
     let sidebar_list = gtk4::ListBox::new();
     sidebar_list.add_css_class("navigation-sidebar");
     sidebar_list.set_selection_mode(gtk4::SelectionMode::Single);
@@ -367,7 +367,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     sidebar_scroll.set_vexpand(true);
     sidebar_scroll.set_child(Some(&sidebar_list));
 
-    // Raised split button, like Ghostty's titlebar "+" (system styling),
+    // Raised split button,
     // with the 4-direction tiling dropdown.
     let sidebar_new_btn = adw::SplitButton::builder()
         .icon_name("tab-new-symbolic")
@@ -415,7 +415,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     // A real HeaderBar inside the sidebar: window controls get the exact
     // system styling (theme CSS targets `headerbar windowcontrols`) and the
-    // bar is natively draggable. Ghostty-style: [● ● ●] [+ ▾] … [🔍] [☰]
+    // bar is natively draggable. [+ ▾] layout: [● ● ●] [+ ▾] … [🔍] [☰]
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.add_css_class("flat");
     sidebar_header.set_show_start_title_buttons(true);
@@ -633,7 +633,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         })
     };
 
-    // Resize indicator (Ghostty-style `cols × rows` overlay), deduplicated:
+    // Resize indicator (`cols × rows` overlay), deduplicated:
     // dragging a divider updates one toast instead of stacking dozens.
     let resize_toast: Rc<RefCell<Option<adw::Toast>>> = Rc::new(RefCell::new(None));
     let show_resize = {
@@ -667,7 +667,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let pages: Pages = Rc::new(RefCell::new(Vec::new()));
     let focused: Focused = Rc::new(RefCell::new(None));
 
-    // --- Split zoom (Ghostty `toggle_split_zoom`) ---
+    // --- Split zoom  (toggle split zoom) ---
     // Zooming hides every sibling pane so the focused split fills the tab.
     let zoom_hidden: Rc<RefCell<Vec<glib::WeakRef<gtk4::Widget>>>> =
         Rc::new(RefCell::new(Vec::new()));
@@ -694,14 +694,10 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let focused = focused.clone();
         Rc::new(
             move |page_slot: Rc<RefCell<Option<adw::TabPage>>>,
-                  cwd: Option<PathBuf>,
-                  scrollback: Option<Vec<u8>>|
+                  cwd: Option<PathBuf>|
                   -> anyhow::Result<Rc<TerminalView>> {
                 let cfg = config.borrow().clone();
-                let view = Rc::new(match scrollback {
-                    Some(data) => TerminalView::with_scrollback(cfg, cwd, Some(data))?,
-                    None => TerminalView::new(cfg, cwd)?,
-                });
+                let view = Rc::new(TerminalView::new(cfg, cwd)?);
                 attach_context_menu(&view);
 
                 {
@@ -814,11 +810,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let make_view = make_view.clone();
         let config = config.clone();
         Rc::new(
-            move |cwd: Option<PathBuf>,
-                  scrollback: Option<Vec<u8>>|
-                  -> anyhow::Result<adw::TabPage> {
+            move |cwd: Option<PathBuf>| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
-                let view = make_view(page_slot.clone(), cwd, scrollback)?;
+                let view = make_view(page_slot.clone(), cwd)?;
 
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 root.append(view.widget());
@@ -901,7 +895,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let inherit_cwd = inherit_cwd.clone();
         let unzoom = unzoom.clone();
         Rc::new(
-            move |orientation: gtk4::Orientation, before: bool, scrollback: Option<Vec<u8>>| {
+            move |orientation: gtk4::Orientation, before: bool| {
                 unzoom();
                 let Some(page) = tab_view.selected_page() else {
                     return;
@@ -909,7 +903,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 let Some(target) = current_view() else { return };
                 let page_slot = Rc::new(RefCell::new(Some(page.clone())));
                 let cwd = inherit_cwd();
-                let Ok(new_view) = make_view(page_slot, cwd, scrollback) else {
+                let Ok(new_view) = make_view(page_slot, cwd) else {
                     return;
                 };
 
@@ -945,7 +939,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         )
     };
 
-    // Directional focus between splits (Ghostty `goto_split`), based on the
+    // Directional focus between splits , based on the
     // on-screen geometry of each pane.
     let goto_split = {
         let tab_view = tab_view.clone();
@@ -1017,7 +1011,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         })
     };
 
-    // Move the nearest matching divider by 10px (Ghostty `resize_split`).
+    // Move the nearest matching divider by 10px .
     let resize_split = {
         let current_view = current_view.clone();
         Rc::new(move |dir: &str| {
@@ -1109,7 +1103,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             let action = config.borrow().middle_click_tab;
             match action {
                 MiddleClickTab::NewTab => {
-                    if let Err(err) = add_tab(inherit_cwd(), None) {
+                    if let Err(err) = add_tab(inherit_cwd()) {
                         tracing::error!("middle-click new tab failed: {err:#}");
                     }
                 }
@@ -1131,7 +1125,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let add_tab = add_tab.clone();
         let inherit_cwd = inherit_cwd.clone();
         let tab_view = tab_view.clone();
-        tab_overview.connect_create_tab(move |_| match add_tab(inherit_cwd(), None) {
+        tab_overview.connect_create_tab(move |_| match add_tab(inherit_cwd()) {
             Ok(page) => page,
             Err(err) => {
                 // The signal has to return a page, and a TabPage cannot be
@@ -1156,7 +1150,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         window.add_action(&add_simple(
             "new-tab",
             Box::new(move || {
-                if let Err(err) = add_tab(inherit_cwd(), None) {
+                if let Err(err) = add_tab(inherit_cwd()) {
                     tracing::error!("new tab failed: {err:#}");
                 }
             }),
@@ -1200,28 +1194,28 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-right",
-            Box::new(move || split(gtk4::Orientation::Horizontal, false, None)),
+            Box::new(move || split(gtk4::Orientation::Horizontal, false)),
         ));
     }
     {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-down",
-            Box::new(move || split(gtk4::Orientation::Vertical, false, None)),
+            Box::new(move || split(gtk4::Orientation::Vertical, false)),
         ));
     }
     {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-left",
-            Box::new(move || split(gtk4::Orientation::Horizontal, true, None)),
+            Box::new(move || split(gtk4::Orientation::Horizontal, true)),
         ));
     }
     {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-up",
-            Box::new(move || split(gtk4::Orientation::Vertical, true, None)),
+            Box::new(move || split(gtk4::Orientation::Vertical, true)),
         ));
     }
 
@@ -1440,7 +1434,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     }
 
     // Watch config.toml and pick up external edits automatically, like
-    // Ghostty does. Editors write via rename/replace, so CHANGED alone is not
+    // Editors write via rename/replace, so CHANGED alone is not
     // enough — react to created/renamed too, and debounce the burst.
     {
         let path = config.borrow().source.clone();
@@ -1712,7 +1706,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     app.set_accels_for_action("win.select-all", &["<Control><Shift>a"]);
     app.set_accels_for_action("win.clear-tab", &["<Control><Shift>k"]);
     app.set_accels_for_action("win.restart-tab", &["<Control><Shift>r"]);
-    // Split bindings copied from Ghostty's Linux defaults (Config.zig).
+    // Split bindings for tiling panes.
     app.set_accels_for_action("win.split-right", &["<Control><Shift>o"]);
     app.set_accels_for_action("win.split-down", &["<Control><Shift>e"]);
     app.set_accels_for_action("win.split-left", &["<Control><Shift>l"]);
@@ -1808,7 +1802,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         });
     }
 
-    // Apply Ghostty font family to chrome labels where useful.
+    // Apply font family to chrome labels where useful.
     {
         let css = gtk4::CssProvider::new();
         let cfg = config.borrow();
@@ -1892,7 +1886,6 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 SessionState::clear();
                 return;
             }
-            let save_history = config.borrow().session_restore_scrollback;
             let session = capture_session(&tab_view, &pages);
             match session.save() {
                 Ok(()) => {
@@ -1900,34 +1893,8 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 }
                 Err(err) => tracing::warn!("could not save session: {err:#}"),
             }
-            // Always wipe previous dumps first so a toggle-off or a shorter
-            // workspace cannot leave stale history behind.
-            SessionState::clear_scrollback();
-            if save_history {
-                // Walk tabs in TabView order so indices match `session.toml`
-                // and the restore loop below.
-                for tab_idx in 0..tab_view.n_pages() {
-                    let page = tab_view.nth_page(tab_idx);
-                    let Some(views) = pages
-                        .borrow()
-                        .iter()
-                        .find(|(p, _)| p == &page)
-                        .map(|(_, v)| v.clone())
-                    else {
-                        continue;
-                    };
-                    for (pane_idx, view) in views.iter().enumerate() {
-                        if let Some(data) = view.export_scrollback_vt()
-                            && let Err(err) =
-                                SessionState::save_scrollback(tab_idx as usize, pane_idx, &data)
-                        {
-                            tracing::warn!(
-                                "could not save scrollback for tab {tab_idx} pane {pane_idx}: {err:#}"
-                            );
-                        }
-                    }
-                }
-            }
+            // Drop leftover VT dumps from ≤0.1.x installs.
+            SessionState::clear_legacy_scrollback();
         })
     };
 
@@ -1988,32 +1955,23 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     match restored {
         Some(session) => {
-            let want_history = config.borrow().session_restore_scrollback;
-            if !want_history {
-                // Privacy: a previous opt-in must not keep dumps around.
-                SessionState::clear_scrollback();
-            }
-            for (tab_idx, tab) in session.tabs.iter().enumerate() {
-                let mut panes = tab.panes.iter().enumerate();
-                let Some((pane_idx, cwd)) = panes.next() else {
+            // Drop leftover VT dumps from ≤0.1.x installs.
+            SessionState::clear_legacy_scrollback();
+            for tab in &session.tabs {
+                let mut panes = tab.panes.iter();
+                let Some(cwd) = panes.next() else {
                     continue;
                 };
                 let cwd = cwd.clone().map(PathBuf::from);
-                let scrollback = want_history
-                    .then(|| SessionState::load_scrollback(tab_idx, pane_idx))
-                    .flatten();
-                let page = add_tab(cwd, scrollback)?;
+                let page = add_tab(cwd)?;
                 if let Some(title) = &tab.title {
                     set_tab_renamed(&page, true);
                     page.set_title(title);
                 }
                 // Extra panes are recreated as splits to the right. The
                 // original geometry is not stored, only the pane count.
-                for (pane_idx, _) in panes {
-                    let scrollback = want_history
-                        .then(|| SessionState::load_scrollback(tab_idx, pane_idx))
-                        .flatten();
-                    split(gtk4::Orientation::Horizontal, false, scrollback);
+                for _ in panes {
+                    split(gtk4::Orientation::Horizontal, false);
                 }
             }
             let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
@@ -2025,7 +1983,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             );
         }
         None => {
-            add_tab(None, None)?;
+            add_tab(None)?;
         }
     }
 
@@ -2053,7 +2011,7 @@ fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
     SessionState { tabs, active }
 }
 
-/// Leaf-weighted split equalization, like Ghostty's `equalize_splits`:
+/// Leaf-weighted split equalization, :
 /// each divider is placed proportionally to the terminal count on each side.
 fn equalize_splits(widget: &gtk4::Widget) -> i32 {
     let Some(paned) = widget.downcast_ref::<gtk4::Paned>() else {

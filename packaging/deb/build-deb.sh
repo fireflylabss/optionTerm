@@ -45,6 +45,7 @@ ln -s optionterm "$root/usr/bin/option-term"
 install -Dm644 "$ROOT/packaging/$APP_ID.desktop" \
   "$root/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$ROOT/LICENSE" "$root/usr/share/doc/$PKG/copyright"
+install -Dm644 "$ROOT/NOTICE" "$root/usr/share/doc/$PKG/NOTICE"
 install -Dm644 "$ROOT/README.md" "$root/usr/share/doc/$PKG/README.md"
 install -Dm644 "$ROOT/CHANGELOG.md" "$root/usr/share/doc/$PKG/changelog.md"
 gzip -9n "$root/usr/share/doc/$PKG/changelog.md"
@@ -72,18 +73,17 @@ Version: $version
 Section: utils
 Priority: optional
 Architecture: $arch
-Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libpango-1.0-0, libcairo2, libglib2.0-0
+Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0, libpango-1.0-0, libcairo2, libglib2.0-0
 Conflicts: option-term
 Replaces: option-term
 Provides: option-term
 Maintainer: Firefly Labs <fireflylabss@users.noreply.github.com>
 Homepage: https://github.com/fireflylabss/optionTerm
 Installed-Size: $installed_kb
-Description: GTK4 terminal emulator powered by libghostty-vt
- optionTerm is a GTK4 + libadwaita terminal emulator built on Ghostty's VT
- engine. It supports tabs and Ghostty-style tiling splits, the Kitty
- graphics protocol, a command palette, scrollback search, clickable links
- and its own TOML configuration.
+Description: Sidebar-first GTK4 terminal with tiling splits
+ optionTerm is a GTK4 + libadwaita terminal with a sidebar-first tab
+ workflow, tiling splits, a command palette, scrollback search,
+ clickable links, and its own TOML configuration.
 EOF
 
 mkdir -p "$OUT_DIR"

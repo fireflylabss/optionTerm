@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=optionTerm
-Comment=AI-ready terminal powered by libghostty-vt
+Comment=Sidebar-first terminal with tiling splits and Adwaita preferences
 Exec=optionterm
 Icon=utilities-terminal
 Terminal=false

@@ -22,15 +22,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev \
             libadwaita-1-dev \
+            libvte-2.91-gtk4-dev \
             libpango1.0-dev \
             libcairo2-dev \
             pkg-config
-
-      # libghostty-vt-sys compiles vendored Zig code and requires Zig 0.15.x
-      - name: Set up Zig 0.15.2
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -39,9 +34,6 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Show Zig version
-        run: zig version
 
       - name: Check formatting
         run: cargo fmt --all --check

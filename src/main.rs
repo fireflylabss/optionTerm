@@ -1,12 +1,9 @@
-//! optionTerm AI — GTK4 + libadwaita terminal on libghostty-vt.
+//! optionTerm — sidebar-first GTK4 + libadwaita terminal.
 
 mod app;
 mod config;
 mod default_terminal;
-mod graphics;
-mod input;
 mod keys;
-mod profile;
 mod pty;
 mod session;
 mod terminal;
@@ -19,8 +16,6 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-
-    let _ = libghostty_vt::set_logger(Some(Box::new(libghostty_vt::log::TracingLogger)));
 
     app::run()
 }

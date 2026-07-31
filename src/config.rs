@@ -1,11 +1,18 @@
-//! Ghostty-compatible config loader (`key = value`).
+//! optionTerm config (`~/.option/terminal/config.toml`).
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use libghostty_vt::style::{PaletteIndex, RgbColor};
 
-/// Default cursor shape (Ghostty `cursor-style`).
+/// RGB color used by the palette and theme fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgbColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+/// Default cursor shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -14,7 +21,7 @@ pub enum CursorStyle {
     BlockHollow,
 }
 
-/// Where the tab list lives (Ghostty `gtk-tabs-location`).
+/// Where the tab list lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabsLocation {
     Top,
@@ -23,7 +30,7 @@ pub enum TabsLocation {
     Hidden,
 }
 
-/// Interface color scheme (Ghostty `window-theme`).
+/// Interface color scheme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
     System,
@@ -52,13 +59,9 @@ impl Theme {
 /// Where a freshly created tab is inserted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewTabPosition {
-    /// Immediately after the current tab (the default).
     AfterCurrent,
-    /// Immediately before the current tab.
     BeforeCurrent,
-    /// End of the tab strip.
     End,
-    /// Start of the tab strip.
     Start,
 }
 
@@ -85,7 +88,6 @@ impl NewTabPosition {
 /// What a middle click on a tab does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MiddleClickTab {
-    /// Nothing at all (the default).
     Ignore,
     NewTab,
     CloseTab,
@@ -112,9 +114,7 @@ impl MiddleClickTab {
 /// How tabs share the width of the bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabWidth {
-    /// Tabs stretch to fill the bar and split the space between them.
     Fill,
-    /// Each tab is only as wide as its title needs.
     Natural,
 }
 
@@ -137,9 +137,7 @@ impl TabWidth {
 /// What happens once there are more tabs than fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabOverflow {
-    /// Keep shrinking the tabs.
     Squeeze,
-    /// Hold a readable width and scroll the bar instead.
     Scroll,
 }
 
@@ -159,13 +157,12 @@ impl TabOverflow {
     }
 }
 
-/// Visual + sizing settings we honor from Ghostty's config file.
+/// Visual + sizing settings.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub font_family: String,
     pub font_size: f32,
-    /// Shape programming ligatures (`->`, `=>`, `!=`). Only affects runs of
-    /// cells with the same style, so the grid is preserved either way.
+    /// Shape programming ligatures (`->`, `=>`, `!=`).
     pub font_ligatures: bool,
     /// Use the desktop's monospace font instead of `font_family`.
     pub use_system_font: bool,
@@ -175,40 +172,24 @@ pub struct Config {
     /// Show the tab sidebar even with a single tab.
     pub sidebar_always: bool,
     pub theme: Theme,
-    /// Window/terminal background alpha, 0.0..=1.0 (Ghostty `background-opacity`).
+    /// Window/terminal background alpha, 0.0..=1.0.
     pub background_opacity: f64,
     /// Restore tabs/splits and their working directories on start.
     pub session_restore: bool,
-    /// Also restore each pane's screen/scrollback (opt-in: may hold secrets).
-    pub session_restore_scrollback: bool,
-    /// New tabs and splits start in the focused pane's directory
-    /// (Ghostty `window-inherit-working-directory`).
+    /// New tabs and splits start in the focused pane's directory.
     pub inherit_working_directory: bool,
-    /// Where a new tab is inserted in the strip.
     pub new_tab_position: NewTabPosition,
-    /// Whether tabs fill the bar or stay as wide as their titles.
     pub tab_width: TabWidth,
-    /// Squeeze or scroll once the tabs no longer fit.
     pub tab_overflow: TabOverflow,
-    /// Show the command palette button in the header.
     pub show_search_button: bool,
-    /// Action bound to a middle click on a tab.
     pub middle_click_tab: MiddleClickTab,
-    /// Ask before closing a tab that is still running something.
     pub confirm_close_tab: bool,
-    /// Ask before closing the window with more than one tab.
     pub confirm_quit: bool,
-    /// Ring the system bell when the terminal writes BEL.
     pub bell_sound: bool,
-    /// Play a sound when a long command finishes in an unfocused window.
     pub command_finished_sound: bool,
-    /// Jump back to the prompt when the user types while scrolled up.
     pub scroll_on_keystroke: bool,
-    /// Floating "jump to the bottom" button while scrolled up.
     pub scroll_button: bool,
-    /// Show a scrollbar whenever there is scrollback to reach.
     pub scroll_bar: bool,
-    /// Keep the session from idling while a pane has a foreground job.
     pub keep_awake: bool,
     pub background: RgbColor,
     pub foreground: RgbColor,
@@ -228,25 +209,19 @@ impl Default for Config {
             font_family: "monospace".into(),
             font_size: 13.0,
             font_ligatures: true,
-            // Off by default: a terminal font is a deliberate choice, and the
-            // generated config already carries the user's Ghostty family.
             use_system_font: false,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
-            tabs_location: TabsLocation::Top,
+            // Sidebar-first is the product default on first run.
+            tabs_location: TabsLocation::Left,
             sidebar_always: false,
             theme: Theme::System,
             background_opacity: 1.0,
-            // Restoring the workspace is what people expect from a terminal
-            // that has tabs and splits, so it is on by default.
             session_restore: true,
-            // Scrollback can hold secrets; keep it opt-in.
-            session_restore_scrollback: false,
             inherit_working_directory: true,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_width: TabWidth::Fill,
             tab_overflow: TabOverflow::Squeeze,
-            // The palette has a shortcut; the button is extra chrome.
             show_search_button: false,
             middle_click_tab: MiddleClickTab::Ignore,
             confirm_close_tab: false,
@@ -273,7 +248,7 @@ impl Default for Config {
 
 impl Config {
     /// Load `~/.option/terminal/config.toml`. On first run the file is
-    /// generated from the system Ghostty config (sidebar tabs by default).
+    /// generated from built-in defaults (sidebar tabs).
     pub fn load() -> Result<Self> {
         let path = option_config_path();
         if path.exists() {
@@ -284,8 +259,7 @@ impl Config {
             return Ok(cfg);
         }
 
-        let mut cfg = Self::load_ghostty();
-        cfg.tabs_location = TabsLocation::Left;
+        let mut cfg = Self::default();
         cfg.source = path.clone();
         if let Err(err) = cfg.write_to(&path) {
             tracing::warn!(
@@ -296,21 +270,6 @@ impl Config {
             tracing::info!("generated default config at {}", path.display());
         }
         Ok(cfg)
-    }
-
-    /// Load the system Ghostty config (used to seed the default config.toml).
-    fn load_ghostty() -> Self {
-        let path = ghostty_config_path();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text),
-            Err(_) => {
-                tracing::warn!(
-                    "Ghostty config not found at {}, using built-in defaults",
-                    path.display()
-                );
-                Self::default()
-            }
-        }
     }
 
     pub fn parse_toml(text: &str) -> Result<Self> {
@@ -428,9 +387,8 @@ impl Config {
         if let Some(v) = bool_at("window", "session_restore") {
             cfg.session_restore = v;
         }
-        if let Some(v) = bool_at("window", "session_restore_scrollback") {
-            cfg.session_restore_scrollback = v;
-        }
+        // Ignored legacy key from ≤0.1.x (scrollback-content restore removed).
+        let _ = bool_at("window", "session_restore_scrollback");
         if let Some(v) = num_at("window", "padding_x") {
             cfg.padding_x = v;
         }
@@ -467,9 +425,6 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Persist the current settings back to the file they were loaded from.
-    /// Called whenever a setting is changed from the UI so preferences
-    /// survive a restart.
     pub fn save(&self) -> Result<()> {
         let path = if self.source.as_os_str().is_empty() {
             option_config_path()
@@ -479,7 +434,6 @@ impl Config {
         self.write_to(&path)
     }
 
-    /// Serialize as config.toml (with comments) and write it to `path`.
     pub fn write_to(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -505,7 +459,6 @@ impl Config {
             .join("\n");
         let text = format!(
             r##"# optionTerm — ~/.option/terminal/config.toml
-# Generated from the system Ghostty config.
 
 [font]
 family = "{family}"
@@ -525,7 +478,6 @@ sidebar_always = {sidebar_always}   # show the sidebar even with a single tab
 theme = "{theme}"   # system | light | dark
 background_opacity = {opacity}   # 0.15 .. 1.0
 session_restore = {session_restore}   # restore tabs/splits and cwd on start
-session_restore_scrollback = {session_scrollback}   # also restore screen/scrollback (may hold secrets)
 inherit_working_directory = {inherit_cwd}   # new tabs/splits open in the focused pane's directory
 new_tab_position = "{new_tab_pos}"   # after_current | before_current | end | start
 tab_width = "{tab_width}"   # fill (share the bar) | natural (as wide as the title)
@@ -578,7 +530,6 @@ palette = [
             theme = self.theme.as_str(),
             opacity = self.background_opacity,
             session_restore = self.session_restore,
-            session_scrollback = self.session_restore_scrollback,
             blink = self.cursor_blink,
             cursor = hex(self.cursor),
             cursor_text = hex(self.cursor_text),
@@ -590,174 +541,6 @@ palette = [
             sel_fg = hex(self.selection_foreground),
         );
         std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
-    }
-
-    pub fn parse(text: &str) -> Self {
-        let mut cfg = Self::default();
-        for raw in text.lines() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let value = strip_quotes(value.trim());
-            match key {
-                "font-family" => {
-                    if value.is_empty() {
-                        cfg.font_family = "monospace".into();
-                    } else {
-                        cfg.font_family = value.to_string();
-                    }
-                }
-                "font-size" => {
-                    if let Ok(v) = value.parse::<f32>() {
-                        cfg.font_size = v;
-                    }
-                }
-                // Ghostty spells this as a font feature list; the common case
-                // by far is switching ligatures off wholesale.
-                "font-feature" => {
-                    if matches!(value, "-liga" | "-calt" | "-clig" | "-dlig") {
-                        cfg.font_ligatures = false;
-                    }
-                }
-                "window-inherit-working-directory" => {
-                    cfg.inherit_working_directory = value != "false";
-                }
-                "cursor-style" => {
-                    cfg.cursor_style = match value {
-                        "bar" => CursorStyle::Bar,
-                        "underline" => CursorStyle::Underline,
-                        "block_hollow" => CursorStyle::BlockHollow,
-                        _ => CursorStyle::Block,
-                    };
-                }
-                "gtk-tabs-location" => {
-                    cfg.tabs_location = match value {
-                        "left" => TabsLocation::Left,
-                        "right" => TabsLocation::Right,
-                        "hidden" => TabsLocation::Hidden,
-                        // `bottom` is not supported; treat it as top.
-                        _ => TabsLocation::Top,
-                    };
-                }
-                "window-theme" => {
-                    cfg.theme = Theme::parse(value);
-                }
-                "background-opacity" => {
-                    if let Ok(v) = value.parse::<f64>() {
-                        cfg.background_opacity = v.clamp(0.15, 1.0);
-                    }
-                }
-                "cursor-style-blink" => {
-                    if let Ok(v) = value.parse::<bool>() {
-                        cfg.cursor_blink = v;
-                    }
-                }
-                "background" => {
-                    if let Some(c) = parse_color(value) {
-                        cfg.background = c;
-                    }
-                }
-                "foreground" => {
-                    if let Some(c) = parse_color(value) {
-                        cfg.foreground = c;
-                    }
-                }
-                "cursor-color" => {
-                    if let Some(c) = parse_color(value) {
-                        cfg.cursor = c;
-                    }
-                }
-                "cursor-text" => {
-                    if let Some(c) = parse_color(value) {
-                        cfg.cursor_text = c;
-                    }
-                }
-                "selection-background" => {
-                    if let Some(c) = parse_color(value) {
-                        cfg.selection_background = c;
-                    }
-                }
-                "selection-foreground" => {
-                    if let Some(c) = parse_color(value) {
-                        cfg.selection_foreground = c;
-                    }
-                }
-                "window-padding-x" => {
-                    if let Ok(v) = value.parse::<f64>() {
-                        cfg.padding_x = v;
-                    }
-                }
-                "window-padding-y" => {
-                    if let Ok(v) = value.parse::<f64>() {
-                        cfg.padding_y = v;
-                    }
-                }
-                "palette" => {
-                    if let Some((idx, color)) = parse_palette_entry(value)
-                        && idx < 16
-                    {
-                        cfg.palette[idx] = color;
-                    }
-                }
-                _ => {}
-            }
-        }
-        cfg
-    }
-
-    /// Push `cursor-style` / `cursor-style-blink` into the terminal so they
-    /// become the DECSCUSR defaults. Without this the VT reports a
-    /// non-blinking cursor and `cursor.blink = true` never takes effect.
-    pub fn apply_cursor_to_terminal(
-        &self,
-        terminal: &mut libghostty_vt::Terminal<'_, '_>,
-    ) -> Result<()> {
-        use anyhow::anyhow;
-        use libghostty_vt::terminal::CursorStyle as VtCursorStyle;
-        let style = match self.cursor_style {
-            CursorStyle::Block => VtCursorStyle::Block,
-            CursorStyle::Bar => VtCursorStyle::Bar,
-            CursorStyle::Underline => VtCursorStyle::Underline,
-            CursorStyle::BlockHollow => VtCursorStyle::BlockHollow,
-        };
-        terminal
-            .set_default_cursor_style(Some(style))
-            .map_err(|e| anyhow!("{e:?}"))?;
-        terminal
-            .set_default_cursor_blink(Some(self.cursor_blink))
-            .map_err(|e| anyhow!("{e:?}"))?;
-        Ok(())
-    }
-
-    /// Apply colors onto a libghostty terminal.
-    pub fn apply_to_terminal(&self, terminal: &mut libghostty_vt::Terminal<'_, '_>) -> Result<()> {
-        use anyhow::anyhow;
-        self.apply_cursor_to_terminal(terminal)?;
-        terminal
-            .set_default_fg_color(Some(self.foreground))
-            .map_err(|e| anyhow!("{e:?}"))?;
-        terminal
-            .set_default_bg_color(Some(self.background))
-            .map_err(|e| anyhow!("{e:?}"))?;
-        terminal
-            .set_default_cursor_color(Some(self.cursor))
-            .map_err(|e| anyhow!("{e:?}"))?;
-
-        let mut palette = terminal
-            .default_color_palette()
-            .map_err(|e| anyhow!("{e:?}"))?;
-        for (i, color) in self.palette.iter().enumerate() {
-            palette.set(PaletteIndex(i as u8), *color);
-        }
-        terminal
-            .set_default_color_palette(Some(palette))
-            .map_err(|e| anyhow!("{e:?}"))?;
-        Ok(())
     }
 }
 
@@ -776,33 +559,6 @@ pub fn option_config_path() -> PathBuf {
 
 fn hex(c: RgbColor) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
-}
-
-pub fn ghostty_config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ghostty")
-        .join("config")
-}
-
-fn strip_quotes(value: &str) -> &str {
-    let v = value.trim();
-    if v.len() >= 2 {
-        let bytes = v.as_bytes();
-        if (bytes[0] == b'"' && bytes[v.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[v.len() - 1] == b'\'')
-        {
-            return &v[1..v.len() - 1];
-        }
-    }
-    v
-}
-
-fn parse_palette_entry(value: &str) -> Option<(usize, RgbColor)> {
-    let (idx_s, color_s) = value.split_once('=')?;
-    let idx: usize = idx_s.trim().parse().ok()?;
-    let color = parse_color(color_s.trim())?;
-    Some((idx, color))
 }
 
 fn parse_color(value: &str) -> Option<RgbColor> {
@@ -855,43 +611,25 @@ mod tests {
     fn ligatures_and_cwd_inheritance_default_on() {
         let cfg = Config::default();
         assert!(cfg.font_ligatures);
-        assert!(cfg.inherit_working_directory, "matches Ghostty's default");
+        assert!(cfg.inherit_working_directory);
     }
 
-    /// These defaults are a deliberate contract, so pin them.
     #[test]
     fn defaults_match_the_documented_behaviour() {
         let cfg = Config::default();
-        assert!(
-            cfg.session_restore,
-            "restoring the workspace is the default"
-        );
-        assert!(
-            !cfg.session_restore_scrollback,
-            "scrollback restore must be opt-in"
-        );
-        assert!(cfg.confirm_quit, "closing a multi-tab window asks");
-        assert!(!cfg.confirm_close_tab, "closing one tab does not ask");
+        assert!(cfg.session_restore);
+        assert!(cfg.confirm_quit);
+        assert!(!cfg.confirm_close_tab);
         assert!(cfg.bell_sound);
-        assert!(cfg.scroll_on_keystroke, "typing returns to the prompt");
-        assert!(!cfg.scroll_button, "the floating button is opt-in");
+        assert!(cfg.scroll_on_keystroke);
+        assert!(!cfg.scroll_button);
         assert!(cfg.scroll_bar);
-        assert!(!cfg.keep_awake, "inhibiting idle must be opt-in");
+        assert!(!cfg.keep_awake);
         assert_eq!(cfg.new_tab_position, NewTabPosition::AfterCurrent);
         assert_eq!(cfg.middle_click_tab, MiddleClickTab::Ignore);
+        assert_eq!(cfg.tabs_location, TabsLocation::Left);
     }
 
-    /// Ghostty's own spellings must keep working, since the first run is
-    /// generated from the user's Ghostty config.
-    #[test]
-    fn reads_the_ghostty_spellings() {
-        let cfg = Config::parse("font-feature = -liga\nwindow-inherit-working-directory = false\n");
-        assert!(!cfg.font_ligatures);
-        assert!(!cfg.inherit_working_directory);
-    }
-
-    /// Everything we persist must survive a save/load round trip, otherwise
-    /// preferences silently reset on the next start.
     #[test]
     fn config_round_trips_through_toml() {
         let mut cfg = Config {
@@ -904,7 +642,6 @@ mod tests {
             theme: Theme::Dark,
             background_opacity: 0.85,
             session_restore: true,
-            session_restore_scrollback: true,
             font_ligatures: false,
             use_system_font: true,
             inherit_working_directory: false,
@@ -939,10 +676,6 @@ mod tests {
         assert_eq!(back.theme, cfg.theme);
         assert_eq!(back.background_opacity, cfg.background_opacity);
         assert_eq!(back.session_restore, cfg.session_restore);
-        assert_eq!(
-            back.session_restore_scrollback,
-            cfg.session_restore_scrollback
-        );
         assert_eq!(back.font_ligatures, cfg.font_ligatures);
         assert_eq!(back.use_system_font, cfg.use_system_font);
         assert_eq!(back.new_tab_position, cfg.new_tab_position);
@@ -965,36 +698,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Regression: `cursor.blink = true` did nothing because the VT default
-    /// was never set, so the render snapshot always reported a static cursor.
     #[test]
-    fn cursor_blink_reaches_the_terminal() {
-        use libghostty_vt::{Terminal, TerminalOptions, render::RenderState};
-
-        let make = || {
-            Terminal::new(TerminalOptions {
-                cols: 20,
-                rows: 5,
-                max_scrollback: 0,
-            })
-            .expect("terminal")
-        };
-
-        let mut cfg = Config {
-            cursor_blink: true,
-            ..Config::default()
-        };
-        let mut terminal = make();
-        cfg.apply_cursor_to_terminal(&mut terminal).expect("apply");
-        let mut state = RenderState::new().expect("render state");
-        let snapshot = state.update(&terminal).expect("snapshot");
-        assert!(snapshot.cursor_blinking().unwrap());
-
-        cfg.cursor_blink = false;
-        let mut terminal = make();
-        cfg.apply_cursor_to_terminal(&mut terminal).expect("apply");
-        let mut state = RenderState::new().expect("render state");
-        let snapshot = state.update(&terminal).expect("snapshot");
-        assert!(!snapshot.cursor_blinking().unwrap());
+    fn ignores_legacy_scrollback_restore_key() {
+        let cfg = Config::parse_toml(
+            "\n[window]\nsession_restore = true\nsession_restore_scrollback = true\n",
+        )
+        .expect("parse");
+        assert!(cfg.session_restore);
     }
 }

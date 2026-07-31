@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-31
+### Changed
+- **Engine rewrite** — terminal surface now embeds stock system VTE via
+  `vte4` instead of `libghostty-vt` + custom Cairo paint. No Zig at build
+  time. Public copy focuses on sidebar-first Adwaita chrome (no Ghostty /
+  “powered by VTE” taglines). `NOTICE` documents the LGPL VTE dependency.
+- **Config** — first run writes built-in defaults only; Ghostty
+  `~/.config/ghostty/config` import and key=value parser are gone. Existing
+  optionTerm `config.toml` keys are kept.
+- **Search** — rewired to VTE `search_set_regex` / find next/previous
+  (match-count UI removed).
+- **Session restore** — layout + cwd only. Scrollback-content restore
+  (`session_restore_scrollback` / VT dumps) removed; leftover dumps from
+  ≤0.1.x are deleted on save/restore.
+- **Environment** — `TERM=xterm-256color` (was `xterm-ghostty`).
+
+### Removed
+- Kitty graphics protocol support (`graphics.rs`).
+- OSC 52 clipboard-write path (upstream VTE refuses).
+- Custom PTY read loop / paint profiler / input encoder modules.
+- Zig / `libghostty-vt` / `png` crate build dependencies.
+
 ## [0.1.14] - 2026-07-31
 ### Added
 - **`TERM_PROGRAM` / `TERM_PROGRAM_VERSION`** — set on every PTY so CLIs can
