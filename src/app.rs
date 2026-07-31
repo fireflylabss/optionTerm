@@ -694,9 +694,14 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let focused = focused.clone();
         Rc::new(
             move |page_slot: Rc<RefCell<Option<adw::TabPage>>>,
-                  cwd: Option<PathBuf>|
+                  cwd: Option<PathBuf>,
+                  scrollback: Option<Vec<u8>>|
                   -> anyhow::Result<Rc<TerminalView>> {
-                let view = Rc::new(TerminalView::new(config.borrow().clone(), cwd)?);
+                let cfg = config.borrow().clone();
+                let view = Rc::new(match scrollback {
+                    Some(data) => TerminalView::with_scrollback(cfg, cwd, Some(data))?,
+                    None => TerminalView::new(cfg, cwd)?,
+                });
                 attach_context_menu(&view);
 
                 {
@@ -809,9 +814,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let make_view = make_view.clone();
         let config = config.clone();
         Rc::new(
-            move |cwd: Option<PathBuf>| -> anyhow::Result<adw::TabPage> {
+            move |cwd: Option<PathBuf>,
+                  scrollback: Option<Vec<u8>>|
+                  -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
-                let view = make_view(page_slot.clone(), cwd)?;
+                let view = make_view(page_slot.clone(), cwd, scrollback)?;
 
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 root.append(view.widget());
@@ -893,47 +900,49 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let current_view = current_view.clone();
         let inherit_cwd = inherit_cwd.clone();
         let unzoom = unzoom.clone();
-        Rc::new(move |orientation: gtk4::Orientation, before: bool| {
-            unzoom();
-            let Some(page) = tab_view.selected_page() else {
-                return;
-            };
-            let Some(target) = current_view() else { return };
-            let page_slot = Rc::new(RefCell::new(Some(page.clone())));
-            let cwd = inherit_cwd();
-            let Ok(new_view) = make_view(page_slot, cwd) else {
-                return;
-            };
+        Rc::new(
+            move |orientation: gtk4::Orientation, before: bool, scrollback: Option<Vec<u8>>| {
+                unzoom();
+                let Some(page) = tab_view.selected_page() else {
+                    return;
+                };
+                let Some(target) = current_view() else { return };
+                let page_slot = Rc::new(RefCell::new(Some(page.clone())));
+                let cwd = inherit_cwd();
+                let Ok(new_view) = make_view(page_slot, cwd, scrollback) else {
+                    return;
+                };
 
-            let old = target.widget().clone().upcast::<gtk4::Widget>();
-            // Start with an even 50/50 split for a predictable layout.
-            let half = match orientation {
-                gtk4::Orientation::Horizontal => old.width(),
-                _ => old.height(),
-            } / 2;
-            let paned = gtk4::Paned::new(orientation);
-            paned.set_wide_handle(true);
-            paned.set_resize_start_child(true);
-            paned.set_resize_end_child(true);
-            paned.set_shrink_start_child(false);
-            paned.set_shrink_end_child(false);
-            replace_in_parent(&old, paned.upcast_ref());
-            if before {
-                paned.set_start_child(Some(new_view.widget()));
-                paned.set_end_child(Some(&old));
-            } else {
-                paned.set_start_child(Some(&old));
-                paned.set_end_child(Some(new_view.widget()));
-            }
-            if half > 0 {
-                paned.set_position(half);
-            }
+                let old = target.widget().clone().upcast::<gtk4::Widget>();
+                // Start with an even 50/50 split for a predictable layout.
+                let half = match orientation {
+                    gtk4::Orientation::Horizontal => old.width(),
+                    _ => old.height(),
+                } / 2;
+                let paned = gtk4::Paned::new(orientation);
+                paned.set_wide_handle(true);
+                paned.set_resize_start_child(true);
+                paned.set_resize_end_child(true);
+                paned.set_shrink_start_child(false);
+                paned.set_shrink_end_child(false);
+                replace_in_parent(&old, paned.upcast_ref());
+                if before {
+                    paned.set_start_child(Some(new_view.widget()));
+                    paned.set_end_child(Some(&old));
+                } else {
+                    paned.set_start_child(Some(&old));
+                    paned.set_end_child(Some(new_view.widget()));
+                }
+                if half > 0 {
+                    paned.set_position(half);
+                }
 
-            if let Some((_, views)) = pages.borrow_mut().iter_mut().find(|(p, _)| p == &page) {
-                views.push(new_view.clone());
-            }
-            new_view.focus();
-        })
+                if let Some((_, views)) = pages.borrow_mut().iter_mut().find(|(p, _)| p == &page) {
+                    views.push(new_view.clone());
+                }
+                new_view.focus();
+            },
+        )
     };
 
     // Directional focus between splits (Ghostty `goto_split`), based on the
@@ -1100,7 +1109,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             let action = config.borrow().middle_click_tab;
             match action {
                 MiddleClickTab::NewTab => {
-                    if let Err(err) = add_tab(inherit_cwd()) {
+                    if let Err(err) = add_tab(inherit_cwd(), None) {
                         tracing::error!("middle-click new tab failed: {err:#}");
                     }
                 }
@@ -1122,7 +1131,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let add_tab = add_tab.clone();
         let inherit_cwd = inherit_cwd.clone();
         let tab_view = tab_view.clone();
-        tab_overview.connect_create_tab(move |_| match add_tab(inherit_cwd()) {
+        tab_overview.connect_create_tab(move |_| match add_tab(inherit_cwd(), None) {
             Ok(page) => page,
             Err(err) => {
                 // The signal has to return a page, and a TabPage cannot be
@@ -1147,7 +1156,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         window.add_action(&add_simple(
             "new-tab",
             Box::new(move || {
-                if let Err(err) = add_tab(inherit_cwd()) {
+                if let Err(err) = add_tab(inherit_cwd(), None) {
                     tracing::error!("new tab failed: {err:#}");
                 }
             }),
@@ -1191,28 +1200,28 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-right",
-            Box::new(move || split(gtk4::Orientation::Horizontal, false)),
+            Box::new(move || split(gtk4::Orientation::Horizontal, false, None)),
         ));
     }
     {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-down",
-            Box::new(move || split(gtk4::Orientation::Vertical, false)),
+            Box::new(move || split(gtk4::Orientation::Vertical, false, None)),
         ));
     }
     {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-left",
-            Box::new(move || split(gtk4::Orientation::Horizontal, true)),
+            Box::new(move || split(gtk4::Orientation::Horizontal, true, None)),
         ));
     }
     {
         let split = split.clone();
         window.add_action(&add_simple(
             "split-up",
-            Box::new(move || split(gtk4::Orientation::Vertical, true)),
+            Box::new(move || split(gtk4::Orientation::Vertical, true, None)),
         ));
     }
 
@@ -1883,12 +1892,41 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 SessionState::clear();
                 return;
             }
+            let save_history = config.borrow().session_restore_scrollback;
             let session = capture_session(&tab_view, &pages);
             match session.save() {
                 Ok(()) => {
                     tracing::info!("saved {} tab(s) for the next session", session.tabs.len())
                 }
                 Err(err) => tracing::warn!("could not save session: {err:#}"),
+            }
+            // Always wipe previous dumps first so a toggle-off or a shorter
+            // workspace cannot leave stale history behind.
+            SessionState::clear_scrollback();
+            if save_history {
+                // Walk tabs in TabView order so indices match `session.toml`
+                // and the restore loop below.
+                for tab_idx in 0..tab_view.n_pages() {
+                    let page = tab_view.nth_page(tab_idx);
+                    let Some(views) = pages
+                        .borrow()
+                        .iter()
+                        .find(|(p, _)| p == &page)
+                        .map(|(_, v)| v.clone())
+                    else {
+                        continue;
+                    };
+                    for (pane_idx, view) in views.iter().enumerate() {
+                        if let Some(data) = view.export_scrollback_vt()
+                            && let Err(err) =
+                                SessionState::save_scrollback(tab_idx as usize, pane_idx, &data)
+                        {
+                            tracing::warn!(
+                                "could not save scrollback for tab {tab_idx} pane {pane_idx}: {err:#}"
+                            );
+                        }
+                    }
+                }
             }
         })
     };
@@ -1950,18 +1988,32 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     match restored {
         Some(session) => {
-            for tab in &session.tabs {
-                let mut panes = tab.panes.iter();
-                let first = panes.next().cloned().flatten().map(PathBuf::from);
-                let page = add_tab(first)?;
+            let want_history = config.borrow().session_restore_scrollback;
+            if !want_history {
+                // Privacy: a previous opt-in must not keep dumps around.
+                SessionState::clear_scrollback();
+            }
+            for (tab_idx, tab) in session.tabs.iter().enumerate() {
+                let mut panes = tab.panes.iter().enumerate();
+                let Some((pane_idx, cwd)) = panes.next() else {
+                    continue;
+                };
+                let cwd = cwd.clone().map(PathBuf::from);
+                let scrollback = want_history
+                    .then(|| SessionState::load_scrollback(tab_idx, pane_idx))
+                    .flatten();
+                let page = add_tab(cwd, scrollback)?;
                 if let Some(title) = &tab.title {
                     set_tab_renamed(&page, true);
                     page.set_title(title);
                 }
                 // Extra panes are recreated as splits to the right. The
                 // original geometry is not stored, only the pane count.
-                for _ in panes {
-                    split(gtk4::Orientation::Horizontal, false);
+                for (pane_idx, _) in panes {
+                    let scrollback = want_history
+                        .then(|| SessionState::load_scrollback(tab_idx, pane_idx))
+                        .flatten();
+                    split(gtk4::Orientation::Horizontal, false, scrollback);
                 }
             }
             let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
@@ -1973,7 +2025,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             );
         }
         None => {
-            add_tab(None)?;
+            add_tab(None, None)?;
         }
     }
 

@@ -81,7 +81,8 @@
   premultiplicado e cache de `cairo::ImageSurface` por frame.
   ⚠️ `set_png_decoder` é **thread-local**: instale por thread, nunca com `Once`.
 - `src/session.rs` — `~/.option/terminal/session.toml` (abas, nº de painéis, cwd, títulos).
-  Só a forma do workspace é salva; nunca o scrollback.
+  Com `window.session_restore_scrollback` também grava VT dumps em
+  `~/.option/terminal/scrollback/{tab}-{pane}.vt` (opt-in: pode ter segredos).
 
 ## Detalhes que já morderam
 - `cursor.blink` só funciona se for empurrado para o VT via `set_default_cursor_blink`
@@ -127,9 +128,9 @@
   botão), não a `DrawingArea`. A navegação entre splits caminha por essa árvore, então
   trocar isso mexe em `collapse_split`/`compute_bounds`. Teste com restauração de
   sessão de 2 painéis: é o caminho de split mais barato de exercitar.
-- **Restaurar posição de scroll é impossível hoje**: o `session.toml` não persiste
-  scrollback (decisão de privacidade), então não existe histórico pra rolar de volta.
-  Só dá pra implementar se o conteúdo do scrollback for pra disco.
+- **Scrollback na sessão é opt-in** (`window.session_restore_scrollback`): dumps VT
+  por painel em `scrollback/`. Desligado por padrão (privacidade). Truncar um dump
+  grande no meio da stream corrompe o restore — dumps > 4 MiB são ignorados.
 - `AdwTabView::close_page` aceita resposta assíncrona: devolva `Propagation::Stop` e
   chame `close_page_finish` no callback do diálogo. Não remova a página do `pages`
   antes de confirmar, senão cancelar deixa a lista inconsistente.

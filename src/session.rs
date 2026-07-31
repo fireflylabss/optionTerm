@@ -1,7 +1,9 @@
 //! Session persistence: remember open tabs and their working directories.
 //!
-//! Only the shape of the workspace is stored (tabs, how many panes, cwd and
-//! custom titles) — never scrollback contents, which could hold secrets.
+//! The shape of the workspace is always stored in `session.toml` (tabs, how
+//! many panes, cwd and custom titles). Scrollback is optional and opt-in:
+//! when enabled it is written beside the session as VT dumps under
+//! `scrollback/`, because it can hold secrets (tokens, passwords, …).
 
 use std::path::PathBuf;
 
@@ -55,6 +57,51 @@ impl Session {
     /// Remove a stored session (used when restore is turned off).
     pub fn clear() {
         let _ = std::fs::remove_file(Self::path());
+        Self::clear_scrollback();
+    }
+
+    /// `~/.option/terminal/scrollback/`
+    pub fn scrollback_dir() -> PathBuf {
+        Self::path()
+            .parent()
+            .map(|p| p.join("scrollback"))
+            .unwrap_or_else(|| PathBuf::from("scrollback"))
+    }
+
+    /// Drop every saved VT dump. Called when history restore is off, so a
+    /// previous opt-in does not leave secrets on disk.
+    pub fn clear_scrollback() {
+        let _ = std::fs::remove_dir_all(Self::scrollback_dir());
+    }
+
+    pub fn scrollback_path(tab: usize, pane: usize) -> PathBuf {
+        Self::scrollback_dir().join(format!("{tab}-{pane}.vt"))
+    }
+
+    /// Persist one pane's VT dump. Oversized dumps are skipped rather than
+    /// truncated mid-sequence (a partial VT stream would corrupt the restore).
+    pub fn save_scrollback(tab: usize, pane: usize, data: &[u8]) -> Result<()> {
+        const MAX_BYTES: usize = 4 * 1024 * 1024;
+        if data.is_empty() {
+            return Ok(());
+        }
+        if data.len() > MAX_BYTES {
+            tracing::warn!(
+                "scrollback for tab {tab} pane {pane} is {} bytes; skipping",
+                data.len()
+            );
+            return Ok(());
+        }
+        let dir = Self::scrollback_dir();
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = Self::scrollback_path(tab, pane);
+        std::fs::write(&path, data).with_context(|| format!("writing {}", path.display()))
+    }
+
+    pub fn load_scrollback(tab: usize, pane: usize) -> Option<Vec<u8>> {
+        std::fs::read(Self::scrollback_path(tab, pane))
+            .ok()
+            .filter(|d| !d.is_empty())
     }
 
     pub fn to_toml(&self) -> String {
@@ -178,5 +225,11 @@ mod tests {
     #[test]
     fn empty_session_is_ignored() {
         assert!(Session::parse("active = 0\n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn scrollback_paths_are_stable() {
+        let path = Session::scrollback_path(2, 1);
+        assert!(path.ends_with("scrollback/2-1.vt"));
     }
 }

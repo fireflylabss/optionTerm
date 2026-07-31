@@ -951,6 +951,21 @@ pub fn show_preferences(
     }
     session_group.add(&restore_row);
 
+    let history_row = adw::SwitchRow::builder()
+        .title("Restore Scrollback History")
+        .subtitle("Also reopens each pane's screen contents (may store secrets on disk)")
+        .build();
+    history_row.set_active(config.borrow().session_restore_scrollback);
+    {
+        let config = config.clone();
+        let save_config = save_config.clone();
+        history_row.connect_active_notify(move |row| {
+            config.borrow_mut().session_restore_scrollback = row.is_active();
+            save_config();
+        });
+    }
+    session_group.add(&history_row);
+
     let inherit_row = adw::SwitchRow::builder()
         .title("Inherit Working Directory")
         .subtitle("New tabs and splits open in the focused pane's directory")

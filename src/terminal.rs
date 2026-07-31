@@ -13,7 +13,7 @@ use gtk4::{
 };
 use libghostty_vt::{
     Terminal, TerminalOptions,
-    fmt::{Formatter, FormatterOptions},
+    fmt::{Format, Formatter, FormatterOptions},
     kitty::graphics::{Layer as KittyLayer, PlacementIterator},
     mouse, paste,
     render::{CellIterator, CursorVisualStyle, RenderState, RowIterator},
@@ -24,9 +24,9 @@ use libghostty_vt::{
     },
     style::{RgbColor, Style, Underline},
     terminal::{
-        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, ModeKind,
-        Point, PointCoordinate, PointSpace, PrimaryDeviceAttributes, ScrollViewport,
-        SecondaryDeviceAttributes, SizeReportSize,
+        ClipboardLocation, ClipboardWriteError, ConformanceLevel, DeviceAttributeFeature,
+        DeviceAttributes, DeviceType, Mode, ModeKind, Point, PointCoordinate, PointSpace,
+        PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
     },
     unicode::codepoint_width,
 };
@@ -120,6 +120,16 @@ struct Session {
 
 impl TerminalView {
     pub fn new(config: Config, cwd: Option<PathBuf>) -> Result<Self> {
+        Self::with_scrollback(config, cwd, None)
+    }
+
+    /// Create a pane and, on first paint, replay `scrollback` (a VT dump) into
+    /// the fresh terminal before the PTY watcher starts draining the shell.
+    pub fn with_scrollback(
+        config: Config,
+        cwd: Option<PathBuf>,
+        scrollback: Option<Vec<u8>>,
+    ) -> Result<Self> {
         let area = DrawingArea::new();
         let bell_sound = Rc::new(Cell::new(config.bell_sound));
         area.set_hexpand(true);
@@ -173,6 +183,8 @@ impl TerminalView {
 
         let resize_cb: Rc<RefCell<Option<ResizeCb>>> = Rc::new(RefCell::new(None));
         let link_cb: Rc<RefCell<Option<LinkCb>>> = Rc::new(RefCell::new(None));
+        // Taken on first bootstrap so a restored VT dump is applied once.
+        let pending_scrollback = Rc::new(RefCell::new(scrollback));
 
         {
             let state = state.clone();
@@ -185,9 +197,11 @@ impl TerminalView {
             let watcher = watcher.clone();
             let bell_sound = bell_sound.clone();
             let scroll = scroll.clone();
+            let pending_scrollback = pending_scrollback.clone();
             area.set_draw_func(move |da, cr, width, height| {
                 let mut just_bootstrapped = false;
                 if state.borrow().is_none() {
+                    let scrollback = pending_scrollback.borrow_mut().take();
                     match bootstrap_session(
                         bell_sound.clone(),
                         &config,
@@ -196,6 +210,7 @@ impl TerminalView {
                         height,
                         da,
                         cwd.as_deref(),
+                        scrollback.as_deref(),
                     ) {
                         Ok(session) => {
                             *state.borrow_mut() = Some(session);
@@ -380,6 +395,23 @@ impl TerminalView {
             .and_then(|s| s.selection_text())
     }
 
+    /// Dump the active screen (including scrollback) as VT sequences, for
+    /// session restore. Returns `None` when the pane has not started yet.
+    pub fn export_scrollback_vt(&self) -> Option<Vec<u8>> {
+        let borrow = self.state.borrow();
+        let session = borrow.as_ref()?;
+        let opts = FormatterOptions::new()
+            .with_format(Format::Vt)
+            .with_unwrap(true)
+            .with_trim(true)
+            .with_style(true)
+            .with_cursor(true);
+        let mut formatter = Formatter::new(&session.terminal, opts).ok()?;
+        let bytes = formatter.format_alloc(None).ok()?;
+        let data = bytes.as_ref().to_vec();
+        (!data.is_empty()).then_some(data)
+    }
+
     /// Paste text into the terminal (honors bracketed paste mode).
     pub fn paste(&self, text: &str) {
         if let Some(session) = self.state.borrow_mut().as_mut() {
@@ -504,6 +536,7 @@ fn bootstrap_session(
     height: i32,
     da: &DrawingArea,
     cwd: Option<&std::path::Path>,
+    scrollback: Option<&[u8]>,
 ) -> Result<Session> {
     let mut config = config.clone();
     config.font_family = resolve_font_family(&da.pango_context(), &config.font_family);
@@ -591,7 +624,42 @@ fn bootstrap_session(
         .map_err(|e| anyhow!("{e:?}"))?;
 
     terminal
-        .on_xtversion(|_term| Some("optionTerm"))
+        .on_xtversion(|_term| Some(concat!("optionTerm ", env!("CARGO_PKG_VERSION"))))
+        .map_err(|e| anyhow!("{e:?}"))?;
+
+    // OSC 52 / iTerm2 copy: libghostty normalises the protocol and hands us
+    // decoded MIME parts. Without this callback, CLIs that copy via OSC 52
+    // (Grok, OpenCode, …) silently fail.
+    terminal
+        .on_clipboard_write(|_term, write| {
+            let location = write.location();
+            let mut chosen: Option<String> = None;
+            for content in write.contents() {
+                let mime = content.mime;
+                if mime == "text/plain" || mime.starts_with("text/") {
+                    chosen = Some(content.data.to_owned());
+                    break;
+                }
+                if chosen.is_none() {
+                    chosen = Some(content.data.to_owned());
+                }
+            }
+            let Some(text) = chosen else {
+                return Err(ClipboardWriteError::InvalidData);
+            };
+            let Some(display) = gdk::Display::default() else {
+                return Err(ClipboardWriteError::Busy);
+            };
+            // OSC 52 `c` → CLIPBOARD; `p`/`s` → PRIMARY (X11 selection).
+            let clipboard = match location {
+                ClipboardLocation::Standard => display.clipboard(),
+                ClipboardLocation::Primary | ClipboardLocation::Selection => {
+                    display.primary_clipboard()
+                }
+            };
+            clipboard.set_text(&text);
+            Ok(())
+        })
         .map_err(|e| anyhow!("{e:?}"))?;
 
     // BEL rings the system bell. Done here rather than in the widget because
@@ -612,6 +680,14 @@ fn bootstrap_session(
     terminal
         .on_color_scheme(|_term| None)
         .map_err(|e| anyhow!("{e:?}"))?;
+
+    // Replay a previous session's screen+scrollback before the PTY watcher
+    // starts. The shell is already spawned, but its output is still buffered
+    // on the master until we attach the fd source, so history lands first.
+    if let Some(data) = scrollback.filter(|d| !d.is_empty()) {
+        terminal.vt_write(data);
+        let _ = terminal.scroll_viewport(ScrollViewport::Bottom);
+    }
 
     Ok(Session {
         config: config.clone(),

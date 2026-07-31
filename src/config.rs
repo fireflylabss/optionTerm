@@ -179,6 +179,8 @@ pub struct Config {
     pub background_opacity: f64,
     /// Restore tabs/splits and their working directories on start.
     pub session_restore: bool,
+    /// Also restore each pane's screen/scrollback (opt-in: may hold secrets).
+    pub session_restore_scrollback: bool,
     /// New tabs and splits start in the focused pane's directory
     /// (Ghostty `window-inherit-working-directory`).
     pub inherit_working_directory: bool,
@@ -238,6 +240,8 @@ impl Default for Config {
             // Restoring the workspace is what people expect from a terminal
             // that has tabs and splits, so it is on by default.
             session_restore: true,
+            // Scrollback can hold secrets; keep it opt-in.
+            session_restore_scrollback: false,
             inherit_working_directory: true,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_width: TabWidth::Fill,
@@ -424,6 +428,9 @@ impl Config {
         if let Some(v) = bool_at("window", "session_restore") {
             cfg.session_restore = v;
         }
+        if let Some(v) = bool_at("window", "session_restore_scrollback") {
+            cfg.session_restore_scrollback = v;
+        }
         if let Some(v) = num_at("window", "padding_x") {
             cfg.padding_x = v;
         }
@@ -518,6 +525,7 @@ sidebar_always = {sidebar_always}   # show the sidebar even with a single tab
 theme = "{theme}"   # system | light | dark
 background_opacity = {opacity}   # 0.15 .. 1.0
 session_restore = {session_restore}   # restore tabs/splits and cwd on start
+session_restore_scrollback = {session_scrollback}   # also restore screen/scrollback (may hold secrets)
 inherit_working_directory = {inherit_cwd}   # new tabs/splits open in the focused pane's directory
 new_tab_position = "{new_tab_pos}"   # after_current | before_current | end | start
 tab_width = "{tab_width}"   # fill (share the bar) | natural (as wide as the title)
@@ -570,6 +578,7 @@ palette = [
             theme = self.theme.as_str(),
             opacity = self.background_opacity,
             session_restore = self.session_restore,
+            session_scrollback = self.session_restore_scrollback,
             blink = self.cursor_blink,
             cursor = hex(self.cursor),
             cursor_text = hex(self.cursor_text),
@@ -857,6 +866,10 @@ mod tests {
             cfg.session_restore,
             "restoring the workspace is the default"
         );
+        assert!(
+            !cfg.session_restore_scrollback,
+            "scrollback restore must be opt-in"
+        );
         assert!(cfg.confirm_quit, "closing a multi-tab window asks");
         assert!(!cfg.confirm_close_tab, "closing one tab does not ask");
         assert!(cfg.bell_sound);
@@ -891,6 +904,7 @@ mod tests {
             theme: Theme::Dark,
             background_opacity: 0.85,
             session_restore: true,
+            session_restore_scrollback: true,
             font_ligatures: false,
             use_system_font: true,
             inherit_working_directory: false,
@@ -925,6 +939,10 @@ mod tests {
         assert_eq!(back.theme, cfg.theme);
         assert_eq!(back.background_opacity, cfg.background_opacity);
         assert_eq!(back.session_restore, cfg.session_restore);
+        assert_eq!(
+            back.session_restore_scrollback,
+            cfg.session_restore_scrollback
+        );
         assert_eq!(back.font_ligatures, cfg.font_ligatures);
         assert_eq!(back.use_system_font, cfg.use_system_font);
         assert_eq!(back.new_tab_position, cfg.new_tab_position);

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.1.14] - 2026-07-31
+### Added
+- **`TERM_PROGRAM` / `TERM_PROGRAM_VERSION`** — set on every PTY so CLIs can
+  recognise optionTerm (Grok `/doctor`, OpenCode, …). `XTVERSION` now includes
+  the package version as well.
+- **OSC 52 clipboard writes** — `on_clipboard_write` copies into the GTK
+  clipboard (or primary selection), so tools that copy via escape sequences
+  no longer fail silently.
+- **`window.session_restore_scrollback`** (default off) — when session restore
+  is on, also persist each pane's screen/scrollback as a VT dump under
+  `~/.option/terminal/scrollback/`. Opt-in because history can hold secrets.
+
 ## [0.1.13] - 2026-07-30
 ### Fixed
 - **Terminal cell geometry now retains Pango's fractional advance.** Rounding it to whole pixels could report the wrong column count for FiraCode and shift full-screen TUIs relative to Ghostty.

@@ -59,9 +59,13 @@ impl Pty {
                 };
                 let arg0 = shell.file_name().unwrap_or(shell.as_os_str());
                 let mut command = Command::new(&shell);
+                // TERM_PROGRAM / VERSION are how CLIs (Grok, OpenCode, etc.)
+                // recognise the host terminal. XTVERSION alone is not enough.
                 command
                     .env("TERM", "xterm-ghostty")
                     .env("COLORTERM", "truecolor")
+                    .env("TERM_PROGRAM", "optionTerm")
+                    .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
                     .arg0(arg0);
                 // Restored sessions start where they left off; a stale
                 // directory must not stop the shell from launching.

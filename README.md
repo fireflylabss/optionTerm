@@ -159,6 +159,7 @@ theme = "system"           # system | light | dark
 sidebar_always = false     # show the sidebar even with a single tab
 background_opacity = 1.0   # 0.15 .. 1.0, needs a compositor
 session_restore = false    # reopen tabs/panes and their cwd on start
+session_restore_scrollback = false  # also restore screen/scrollback (may hold secrets)
 padding_x = 4
 padding_y = 4
 
@@ -181,7 +182,7 @@ palette = [
 
 The file is watched: editing it in any editor re-applies the settings immediately. Settings changed from the menus or Preferences are saved back to it automatically.
 
-With `session_restore = true`, the open tabs, their pane count and each pane's working directory are written to `~/.option/terminal/session.toml` on exit and restored on the next start. Scrollback contents are never stored.
+With `session_restore = true`, the open tabs, their pane count and each pane's working directory are written to `~/.option/terminal/session.toml` on exit and restored on the next start. Set `session_restore_scrollback = true` to also persist each pane's screen/scrollback under `~/.option/terminal/scrollback/` (off by default — history can hold secrets).
 
 ## Keyboard shortcuts
 
