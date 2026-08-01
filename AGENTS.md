@@ -25,8 +25,10 @@
 ## Release / AUR
 - Publicado no AUR como **`optionterm`**.
 - Fluxo: bump no `Cargo.toml` → `CHANGELOG.md` → commit → `git tag -a vX.Y.Z` →
-  `gh release create` → atualizar `pkgver`+`sha256sums` no `PKGBUILD` →
-  `makepkg --printsrcinfo > .SRCINFO` → `makepkg -f` → push no AUR.
+  `git push origin vX.Y.Z` (ou `gh release create`).
+  - `release.yml` — .deb + AppImage no GitHub Release
+  - `publish-aur.yml` — bump `PKGBUILD`/`.SRCINFO` + push AUR (`AUR_SSH_PRIVATE_KEY`)
+- Fallback local: `./packaging/aur/publish.sh [vX.Y.Z]` (ver `packaging/aur/README.md`).
 - Dependências de runtime incluem `vte4`; makedepends: `cargo`, `pkgconf`
   (sem Zig/git para clonar fontes).
 

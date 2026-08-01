@@ -117,7 +117,7 @@ optionterm -- vim README.md
 
 ## Packaging
 
-- **AUR** — `optionterm` (`packaging/aur/`)
+- **AUR** — `optionterm` (`packaging/aur/`); CI publishes on each GitHub Release
 - **.deb** — `./packaging/deb/build-deb.sh` after a release build
 - **AppImage** — `./packaging/appimage/build-appimage.sh` (prefer Ubuntu 24.04 hosts)
 

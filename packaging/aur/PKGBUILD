@@ -26,12 +26,8 @@ makedepends=(
   'cargo'
   'pkgconf'
 )
-source=(
-  "$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
-)
-sha256sums=(
-  '8b7503b4e0adfe92d92e5ac09e039d9cd43967769924cdc3b31ca463c6bd1d5e'
-)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('8b7503b4e0adfe92d92e5ac09e039d9cd43967769924cdc3b31ca463c6bd1d5e')
 
 _srcdir="optionTerm-$pkgver"
 
