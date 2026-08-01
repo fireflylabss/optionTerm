@@ -25,9 +25,18 @@ pub enum CursorStyle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabsLocation {
     Top,
+    Bottom,
     Left,
     Right,
     Hidden,
+}
+
+/// A named launch preset from `[[command]]` in config.toml.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandPreset {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
 }
 
 /// Interface color scheme.
@@ -190,6 +199,10 @@ pub struct Config {
     pub scroll_on_keystroke: bool,
     pub scroll_button: bool,
     pub scroll_bar: bool,
+    /// VTE scrollback length in lines.
+    pub scroll_lines: i64,
+    /// Named launch presets (`[[command]]`).
+    pub commands: Vec<CommandPreset>,
     pub keep_awake: bool,
     pub background: RgbColor,
     pub foreground: RgbColor,
@@ -231,6 +244,8 @@ impl Default for Config {
             scroll_on_keystroke: true,
             scroll_button: false,
             scroll_bar: true,
+            scroll_lines: 10_000,
+            commands: Vec::new(),
             keep_awake: false,
             background: rgb(0x28, 0x2c, 0x34),
             foreground: rgb(0xff, 0xff, 0xff),
@@ -328,6 +343,7 @@ impl Config {
         if let Some(v) = str_at("window", "tabs") {
             cfg.tabs_location = match v.as_str() {
                 "top" => TabsLocation::Top,
+                "bottom" => TabsLocation::Bottom,
                 "right" => TabsLocation::Right,
                 "hidden" => TabsLocation::Hidden,
                 _ => TabsLocation::Left,
@@ -380,6 +396,41 @@ impl Config {
         }
         if let Some(v) = bool_at("scroll", "show_bar") {
             cfg.scroll_bar = v;
+        }
+        if let Some(v) = num_at("scroll", "lines") {
+            cfg.scroll_lines = (v as i64).clamp(0, 1_000_000);
+        }
+        if let Some(items) = table.get("command").and_then(|v| v.as_array()) {
+            cfg.commands = items
+                .iter()
+                .filter_map(|item| {
+                    let t = item.as_table()?;
+                    let name = t.get("name")?.as_str()?.trim();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let argv = t
+                        .get("argv")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>();
+                    if argv.is_empty() {
+                        return None;
+                    }
+                    let cwd = t
+                        .get("cwd")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Some(CommandPreset {
+                        name: name.to_string(),
+                        argv,
+                        cwd,
+                    })
+                })
+                .collect();
         }
         if let Some(v) = bool_at("window", "keep_awake") {
             cfg.keep_awake = v;
@@ -447,9 +498,31 @@ impl Config {
         };
         let tabs = match self.tabs_location {
             TabsLocation::Top => "top",
+            TabsLocation::Bottom => "bottom",
             TabsLocation::Left => "left",
             TabsLocation::Right => "right",
             TabsLocation::Hidden => "hidden",
+        };
+        let commands_toml = if self.commands.is_empty() {
+            String::new()
+        } else {
+            let mut block =
+                String::from("\n# Named launch presets — open from the command palette.\n");
+            for cmd in &self.commands {
+                block.push_str("\n[[command]]\n");
+                block.push_str(&format!("name = \"{}\"\n", escape_toml(&cmd.name)));
+                let args = cmd
+                    .argv
+                    .iter()
+                    .map(|a| format!("\"{}\"", escape_toml(a)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                block.push_str(&format!("argv = [{args}]\n"));
+                if let Some(cwd) = &cmd.cwd {
+                    block.push_str(&format!("cwd = \"{}\"\n", escape_toml(cwd)));
+                }
+            }
+            block
         };
         let palette = self
             .palette
@@ -473,7 +546,7 @@ color = "{cursor}"
 text = "{cursor_text}"
 
 [window]
-tabs = "{tabs}"     # top | left | right | hidden
+tabs = "{tabs}"     # top | bottom | left | right | hidden
 sidebar_always = {sidebar_always}   # show the sidebar even with a single tab
 theme = "{theme}"   # system | light | dark
 background_opacity = {opacity}   # 0.15 .. 1.0
@@ -494,6 +567,7 @@ padding_y = {pad_y}
 on_keystroke = {scroll_keys}   # typing while scrolled up jumps back to the prompt
 show_button = {scroll_btn}   # floating button to jump to the bottom
 show_bar = {scroll_bar}   # scrollbar, shown only when there is scrollback
+lines = {scroll_lines}   # VTE scrollback length (0 disables)
 
 [sound]
 bell = {bell}   # ring the system bell on BEL
@@ -507,6 +581,7 @@ selection_foreground = "{sel_fg}"
 palette = [
 {palette}
 ]
+{commands}
 "##,
             family = self.font_family,
             size = self.font_size,
@@ -525,6 +600,8 @@ palette = [
             scroll_keys = self.scroll_on_keystroke,
             scroll_btn = self.scroll_button,
             scroll_bar = self.scroll_bar,
+            scroll_lines = self.scroll_lines,
+            commands = commands_toml,
             cmd_done = self.command_finished_sound,
             sidebar_always = self.sidebar_always,
             theme = self.theme.as_str(),
@@ -555,6 +632,13 @@ pub fn config_dir() -> PathBuf {
 /// `~/.option/terminal/config.toml`
 pub fn option_config_path() -> PathBuf {
     config_dir().join("config.toml")
+}
+
+fn escape_toml(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 fn hex(c: RgbColor) -> String {
@@ -624,6 +708,8 @@ mod tests {
         assert!(cfg.scroll_on_keystroke);
         assert!(!cfg.scroll_button);
         assert!(cfg.scroll_bar);
+        assert_eq!(cfg.scroll_lines, 10_000);
+        assert!(cfg.commands.is_empty());
         assert!(!cfg.keep_awake);
         assert_eq!(cfg.new_tab_position, NewTabPosition::AfterCurrent);
         assert_eq!(cfg.middle_click_tab, MiddleClickTab::Ignore);
@@ -654,6 +740,12 @@ mod tests {
             scroll_on_keystroke: false,
             scroll_button: true,
             scroll_bar: false,
+            scroll_lines: 50_000,
+            commands: vec![CommandPreset {
+                name: "htop".into(),
+                argv: vec!["htop".into()],
+                cwd: Some("/tmp".into()),
+            }],
             keep_awake: true,
             padding_x: 8.0,
             padding_y: 6.0,
@@ -687,6 +779,8 @@ mod tests {
         assert_eq!(back.scroll_on_keystroke, cfg.scroll_on_keystroke);
         assert_eq!(back.scroll_button, cfg.scroll_button);
         assert_eq!(back.scroll_bar, cfg.scroll_bar);
+        assert_eq!(back.scroll_lines, cfg.scroll_lines);
+        assert_eq!(back.commands, cfg.commands);
         assert_eq!(back.keep_awake, cfg.keep_awake);
         assert_eq!(
             back.inherit_working_directory,

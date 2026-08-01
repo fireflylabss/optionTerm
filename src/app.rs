@@ -18,7 +18,8 @@ use crate::{
         Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
         Theme,
     },
-    session::{Session as SessionState, TabState},
+    launch::LaunchRequest,
+    session::{PaneLayout, Session as SessionState, SplitOrientation, TabState},
     terminal::TerminalView,
     ui::{
         PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
@@ -34,15 +35,78 @@ const SELF_WRITE_GRACE: std::time::Duration = std::time::Duration::from_millis(1
 pub type Pages = Rc<RefCell<Vec<(adw::TabPage, Vec<Rc<TerminalView>>)>>>;
 type Toast = Rc<dyn Fn(&str)>;
 type Focused = Rc<RefCell<Option<Weak<TerminalView>>>>;
+type MakeViewFn = Rc<
+    dyn Fn(
+        Rc<RefCell<Option<adw::TabPage>>>,
+        Option<PathBuf>,
+        Option<Vec<String>>,
+    ) -> anyhow::Result<Rc<TerminalView>>,
+>;
+
+/// Shared between `command-line` and the open window so a second instance can
+/// open a tab in the primary process.
+struct SharedLaunch {
+    pending: RefCell<Vec<LaunchRequest>>,
+    open_in_window: RefCell<Option<Rc<dyn Fn(LaunchRequest)>>>,
+}
 
 pub fn run() -> anyhow::Result<()> {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
 
-    app.connect_activate(|app| {
-        if let Err(err) = build_window(app) {
-            tracing::error!("failed to open window: {err:#}");
-        }
+    let shared = Rc::new(SharedLaunch {
+        pending: RefCell::new(Vec::new()),
+        open_in_window: RefCell::new(None),
     });
+
+    {
+        let shared = shared.clone();
+        app.connect_command_line(move |app, cmdline| {
+            let args: Vec<String> = cmdline
+                .arguments()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            if args.iter().any(|a| a == "-h" || a == "--help") {
+                let help = "Usage: optionterm [OPTIONS] [DIRECTORY]\n\n\
+Options:\n\
+  -d, --working-directory DIR   Start in DIR\n\
+  -e, --command CMD [ARGS…]     Run CMD instead of the shell\n\
+  -- CMD [ARGS…]                Same as -e\n\
+  -h, --help                    Show this help\n";
+                eprintln!("{help}");
+                return 0;
+            }
+            let req = crate::launch::parse_args(&args);
+            if let Some(open) = shared.open_in_window.borrow().clone() {
+                open(req);
+            } else {
+                shared.pending.borrow_mut().push(req);
+            }
+            app.activate();
+            0
+        });
+    }
+
+    {
+        let shared = shared.clone();
+        app.connect_activate(move |app| {
+            if !app.windows().is_empty() {
+                if let Some(win) = app.active_window() {
+                    win.present();
+                } else if let Some(win) = app.windows().into_iter().next() {
+                    win.present();
+                }
+                return;
+            }
+            let initial = shared.pending.borrow_mut().pop().unwrap_or_default();
+            if let Err(err) = build_window(app, shared.clone(), initial) {
+                tracing::error!("failed to open window: {err:#}");
+            }
+        });
+    }
 
     let code = app.run();
     if code == glib::ExitCode::SUCCESS {
@@ -201,7 +265,11 @@ fn collapse_split(widget: &gtk4::Widget) {
     }
 }
 
-fn build_window(app: &adw::Application) -> anyhow::Result<()> {
+fn build_window(
+    app: &adw::Application,
+    shared: Rc<SharedLaunch>,
+    initial: LaunchRequest,
+) -> anyhow::Result<()> {
     let config = Rc::new(RefCell::new(Config::load()?));
     let base_font_size = Rc::new(Cell::new(config.borrow().font_size));
 
@@ -266,8 +334,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let toolbar = adw::ToolbarView::new();
 
     let header = adw::HeaderBar::new();
-    // Always honor the system decoration layout (window buttons follow the
-    // user's GTK/Adwaita settings, from the user's GTK/Adwaita settings).
+    header.add_css_class("option-chrome");
+    // Title-button packing follows `gtk-decoration-layout` (see
+    // `apply_desktop_chrome` below).
     header.set_show_start_title_buttons(true);
     header.set_show_end_title_buttons(true);
 
@@ -358,7 +427,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&content_box));
 
-    // Tabs-as-sidebar support 
+    // Tabs-as-sidebar support
     let sidebar_list = gtk4::ListBox::new();
     sidebar_list.add_css_class("navigation-sidebar");
     sidebar_list.set_selection_mode(gtk4::SelectionMode::Single);
@@ -443,9 +512,18 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         .build();
     split_view.set_content(Some(&tab_overview));
 
+    // Bottom tab strip holder — empty until `tabs = "bottom"`.
+    let bottom_tabs = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    bottom_tabs.add_css_class("option-chrome");
+    bottom_tabs.set_visible(false);
+
     toolbar.add_top_bar(&header);
+    toolbar.add_bottom_bar(&bottom_tabs);
     toolbar.set_content(Some(&split_view));
     window.set_content(Some(&toolbar));
+
+    // Follow desktop GTK settings for chrome font / scale / decorations.
+    apply_desktop_chrome(&header, &window);
 
     // Rebuild the sidebar rows from the current TabView pages.
     let sidebar_syncing = Rc::new(Cell::new(false));
@@ -568,7 +646,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         tab_view.connect_page_reordered(move |_, _, _| rebuild_sidebar());
     }
 
-    // Switch between top tab bar, sidebar tab list or hidden tabs.
+    // Switch between top/bottom tab bar, sidebar tab list or hidden tabs.
     // The sidebar auto-hides with a single tab unless `sidebar_always` is set.
     let set_tabs_location = {
         let split_view = split_view.clone();
@@ -578,6 +656,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let rebuild_sidebar = rebuild_sidebar.clone();
         let tab_view = tab_view.clone();
         let config = config.clone();
+        let bottom_tabs = bottom_tabs.clone();
         Rc::new(move |location: TabsLocation| {
             let sidebar_mode = matches!(location, TabsLocation::Left | TabsLocation::Right);
             let show_sidebar =
@@ -585,11 +664,30 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             // When the sidebar is visible the whole header moves into it
             // (system window controls, new tab, palette, menu).
             header.set_visible(!show_sidebar);
+            // Detach the tab bar from whichever parent currently holds it.
+            if let Some(parent) = tab_bar.parent() {
+                if let Some(bx) = parent.downcast_ref::<gtk4::Box>() {
+                    bx.remove(&tab_bar);
+                } else if let Some(hb) = parent.downcast_ref::<adw::HeaderBar>() {
+                    // Clearing the title widget releases the tab bar.
+                    if hb.title_widget().as_ref() == Some(tab_bar.upcast_ref()) {
+                        hb.set_title_widget(gtk4::Widget::NONE);
+                    }
+                }
+            }
+            bottom_tabs.set_visible(false);
             match location {
                 TabsLocation::Top => {
                     split_view.set_show_sidebar(false);
                     tab_bar.set_visible(true);
                     header.set_title_widget(Some(&tab_bar));
+                }
+                TabsLocation::Bottom => {
+                    split_view.set_show_sidebar(false);
+                    tab_bar.set_visible(true);
+                    header.set_title_widget(Some(&window_title));
+                    bottom_tabs.append(&tab_bar);
+                    bottom_tabs.set_visible(true);
                 }
                 TabsLocation::Hidden => {
                     split_view.set_show_sidebar(false);
@@ -683,7 +781,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
     };
 
     // Build a TerminalView wired to a page (title/exit/focus/context menu).
-    let make_view = {
+    let make_view: MakeViewFn = {
         let unzoom = unzoom.clone();
         let toast = toast.clone();
         let show_resize = show_resize.clone();
@@ -694,10 +792,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let focused = focused.clone();
         Rc::new(
             move |page_slot: Rc<RefCell<Option<adw::TabPage>>>,
-                  cwd: Option<PathBuf>|
+                  cwd: Option<PathBuf>,
+                  command: Option<Vec<String>>|
                   -> anyhow::Result<Rc<TerminalView>> {
                 let cfg = config.borrow().clone();
-                let view = Rc::new(TerminalView::new(cfg, cwd)?);
+                let view = Rc::new(TerminalView::new(cfg, cwd, command)?);
                 attach_context_menu(&view);
 
                 {
@@ -810,9 +909,9 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let make_view = make_view.clone();
         let config = config.clone();
         Rc::new(
-            move |cwd: Option<PathBuf>| -> anyhow::Result<adw::TabPage> {
+            move |launch: LaunchRequest| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
-                let view = make_view(page_slot.clone(), cwd)?;
+                let view = make_view(page_slot.clone(), launch.cwd, launch.command)?;
 
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 root.append(view.widget());
@@ -840,6 +939,53 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 pages.borrow_mut().push((page.clone(), vec![view.clone()]));
                 tab_view.set_selected_page(&page);
                 view.focus();
+                Ok(page)
+            },
+        )
+    };
+
+    // Restore a tab from a nested split tree.
+    let add_tab_layout = {
+        let tab_view = tab_view.clone();
+        let pages = pages.clone();
+        let make_view = make_view.clone();
+        let config = config.clone();
+        Rc::new(
+            move |title: Option<String>, layout: &PaneLayout| -> anyhow::Result<adw::TabPage> {
+                let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
+                let (child, views) = build_layout_widget(layout, &make_view, &page_slot)?;
+
+                let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                root.append(&child);
+
+                let page = match config.borrow().new_tab_position {
+                    NewTabPosition::End => tab_view.append(&root),
+                    NewTabPosition::Start => tab_view.insert(&root, 0),
+                    NewTabPosition::AfterCurrent => match tab_view.selected_page() {
+                        Some(current) => {
+                            tab_view.insert(&root, tab_view.page_position(&current) + 1)
+                        }
+                        None => tab_view.append(&root),
+                    },
+                    NewTabPosition::BeforeCurrent => match tab_view.selected_page() {
+                        Some(current) => tab_view.insert(&root, tab_view.page_position(&current)),
+                        None => tab_view.append(&root),
+                    },
+                };
+                if let Some(title) = title {
+                    set_tab_renamed(&page, true);
+                    page.set_title(&title);
+                } else {
+                    page.set_title("Terminal");
+                }
+                page.set_live_thumbnail(true);
+                *page_slot.borrow_mut() = Some(page.clone());
+
+                pages.borrow_mut().push((page.clone(), views.clone()));
+                tab_view.set_selected_page(&page);
+                if let Some(view) = views.first() {
+                    view.focus();
+                }
                 Ok(page)
             },
         )
@@ -894,49 +1040,47 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let current_view = current_view.clone();
         let inherit_cwd = inherit_cwd.clone();
         let unzoom = unzoom.clone();
-        Rc::new(
-            move |orientation: gtk4::Orientation, before: bool| {
-                unzoom();
-                let Some(page) = tab_view.selected_page() else {
-                    return;
-                };
-                let Some(target) = current_view() else { return };
-                let page_slot = Rc::new(RefCell::new(Some(page.clone())));
-                let cwd = inherit_cwd();
-                let Ok(new_view) = make_view(page_slot, cwd) else {
-                    return;
-                };
+        Rc::new(move |orientation: gtk4::Orientation, before: bool| {
+            unzoom();
+            let Some(page) = tab_view.selected_page() else {
+                return;
+            };
+            let Some(target) = current_view() else { return };
+            let page_slot = Rc::new(RefCell::new(Some(page.clone())));
+            let cwd = inherit_cwd();
+            let Ok(new_view) = make_view(page_slot, cwd, None) else {
+                return;
+            };
 
-                let old = target.widget().clone().upcast::<gtk4::Widget>();
-                // Start with an even 50/50 split for a predictable layout.
-                let half = match orientation {
-                    gtk4::Orientation::Horizontal => old.width(),
-                    _ => old.height(),
-                } / 2;
-                let paned = gtk4::Paned::new(orientation);
-                paned.set_wide_handle(true);
-                paned.set_resize_start_child(true);
-                paned.set_resize_end_child(true);
-                paned.set_shrink_start_child(false);
-                paned.set_shrink_end_child(false);
-                replace_in_parent(&old, paned.upcast_ref());
-                if before {
-                    paned.set_start_child(Some(new_view.widget()));
-                    paned.set_end_child(Some(&old));
-                } else {
-                    paned.set_start_child(Some(&old));
-                    paned.set_end_child(Some(new_view.widget()));
-                }
-                if half > 0 {
-                    paned.set_position(half);
-                }
+            let old = target.widget().clone().upcast::<gtk4::Widget>();
+            // Start with an even 50/50 split for a predictable layout.
+            let half = match orientation {
+                gtk4::Orientation::Horizontal => old.width(),
+                _ => old.height(),
+            } / 2;
+            let paned = gtk4::Paned::new(orientation);
+            paned.set_wide_handle(true);
+            paned.set_resize_start_child(true);
+            paned.set_resize_end_child(true);
+            paned.set_shrink_start_child(false);
+            paned.set_shrink_end_child(false);
+            replace_in_parent(&old, paned.upcast_ref());
+            if before {
+                paned.set_start_child(Some(new_view.widget()));
+                paned.set_end_child(Some(&old));
+            } else {
+                paned.set_start_child(Some(&old));
+                paned.set_end_child(Some(new_view.widget()));
+            }
+            if half > 0 {
+                paned.set_position(half);
+            }
 
-                if let Some((_, views)) = pages.borrow_mut().iter_mut().find(|(p, _)| p == &page) {
-                    views.push(new_view.clone());
-                }
-                new_view.focus();
-            },
-        )
+            if let Some((_, views)) = pages.borrow_mut().iter_mut().find(|(p, _)| p == &page) {
+                views.push(new_view.clone());
+            }
+            new_view.focus();
+        })
     };
 
     // Directional focus between splits , based on the
@@ -1103,7 +1247,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
             let action = config.borrow().middle_click_tab;
             match action {
                 MiddleClickTab::NewTab => {
-                    if let Err(err) = add_tab(inherit_cwd()) {
+                    let launch = LaunchRequest {
+                        cwd: inherit_cwd(),
+                        command: None,
+                    };
+                    if let Err(err) = add_tab(launch) {
                         tracing::error!("middle-click new tab failed: {err:#}");
                     }
                 }
@@ -1125,13 +1273,19 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let add_tab = add_tab.clone();
         let inherit_cwd = inherit_cwd.clone();
         let tab_view = tab_view.clone();
-        tab_overview.connect_create_tab(move |_| match add_tab(inherit_cwd()) {
-            Ok(page) => page,
-            Err(err) => {
-                // The signal has to return a page, and a TabPage cannot be
-                // built standalone, so hand back an empty one.
-                tracing::error!("new tab from overview failed: {err:#}");
-                tab_view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0))
+        tab_overview.connect_create_tab(move |_| {
+            let launch = LaunchRequest {
+                cwd: inherit_cwd(),
+                command: None,
+            };
+            match add_tab(launch) {
+                Ok(page) => page,
+                Err(err) => {
+                    // The signal has to return a page, and a TabPage cannot be
+                    // built standalone, so hand back an empty one.
+                    tracing::error!("new tab from overview failed: {err:#}");
+                    tab_view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0))
+                }
             }
         });
     }
@@ -1150,7 +1304,11 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         window.add_action(&add_simple(
             "new-tab",
             Box::new(move || {
-                if let Err(err) = add_tab(inherit_cwd()) {
+                let launch = LaunchRequest {
+                    cwd: inherit_cwd(),
+                    command: None,
+                };
+                if let Err(err) = add_tab(launch) {
                     tracing::error!("new tab failed: {err:#}");
                 }
             }),
@@ -1524,9 +1682,21 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     {
         let window_c = window.clone();
+        let config_c = config.clone();
+        let add_tab_c = add_tab.clone();
         window.add_action(&add_simple(
             "command-palette",
-            Box::new(move || show_command_palette(&window_c)),
+            Box::new(move || {
+                let open_launch: Rc<dyn Fn(LaunchRequest)> = {
+                    let add_tab = add_tab_c.clone();
+                    Rc::new(move |req| {
+                        if let Err(err) = add_tab(req) {
+                            tracing::error!("palette launch failed: {err:#}");
+                        }
+                    })
+                };
+                show_command_palette(&window_c, &config_c, open_launch);
+            }),
         ));
     }
 
@@ -1604,6 +1774,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     let tabs_pos_initial = match config.borrow().tabs_location {
         TabsLocation::Top => "top",
+        TabsLocation::Bottom => "bottom",
         TabsLocation::Left => "left",
         TabsLocation::Right => "right",
         TabsLocation::Hidden => "hidden",
@@ -1620,6 +1791,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         tabs_pos_action.connect_activate(move |action, param| {
             let value = param.and_then(|p| p.str()).unwrap_or("top");
             let location = match value {
+                "bottom" => TabsLocation::Bottom,
                 "left" => TabsLocation::Left,
                 "right" => TabsLocation::Right,
                 "hidden" => TabsLocation::Hidden,
@@ -1875,6 +2047,7 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
         let config = config.clone();
         let tab_view = tab_view.clone();
         let pages = pages.clone();
+        let window = window.clone();
         // SIGTERM saves and then closes the window, which would otherwise run
         // the same work again through `close-request`.
         let saved = Cell::new(false);
@@ -1886,7 +2059,10 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
                 SessionState::clear();
                 return;
             }
-            let session = capture_session(&tab_view, &pages);
+            let mut session = capture_session(&tab_view, &pages);
+            session.width = Some(window.width().max(1));
+            session.height = Some(window.height().max(1));
+            session.maximized = window.is_maximized();
             match session.save() {
                 Ok(()) => {
                     tracing::info!("saved {} tab(s) for the next session", session.tabs.len())
@@ -1947,51 +2123,65 @@ fn build_window(app: &adw::Application) -> anyhow::Result<()> {
 
     // Apply the configured tab layout, then open the tabs.
     set_tabs_location(config.borrow().tabs_location);
-    let restored = config
-        .borrow()
-        .session_restore
-        .then(SessionState::load)
-        .flatten();
+
+    // A non-default CLI launch (`-e` / cwd) skips session restore so the
+    // requested command/directory is what the user sees.
+    let skip_restore = !initial.is_default();
+    let restored = if skip_restore {
+        None
+    } else {
+        config
+            .borrow()
+            .session_restore
+            .then(SessionState::load)
+            .flatten()
+    };
 
     match restored {
         Some(session) => {
             // Drop leftover VT dumps from ≤0.1.x installs.
             SessionState::clear_legacy_scrollback();
-            for tab in &session.tabs {
-                let mut panes = tab.panes.iter();
-                let Some(cwd) = panes.next() else {
-                    continue;
-                };
-                let cwd = cwd.clone().map(PathBuf::from);
-                let page = add_tab(cwd)?;
-                if let Some(title) = &tab.title {
-                    set_tab_renamed(&page, true);
-                    page.set_title(title);
-                }
-                // Extra panes are recreated as splits to the right. The
-                // original geometry is not stored, only the pane count.
-                for _ in panes {
-                    split(gtk4::Orientation::Horizontal, false);
-                }
+            if let (Some(w), Some(h)) = (session.width, session.height) {
+                window.set_default_size(w, h);
             }
-            let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
-            let page = tab_view.nth_page(index as i32);
-            tab_view.set_selected_page(&page);
+            for tab in &session.tabs {
+                add_tab_layout(tab.title.clone(), &tab.layout)?;
+            }
+            if tab_view.n_pages() == 0 {
+                add_tab(LaunchRequest::default())?;
+            } else {
+                let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
+                let page = tab_view.nth_page(index as i32);
+                tab_view.set_selected_page(&page);
+            }
+            if session.maximized {
+                window.maximize();
+            }
             tracing::info!(
                 "restored {} tab(s) from the last session",
                 session.tabs.len()
             );
         }
         None => {
-            add_tab(None)?;
+            add_tab(initial)?;
         }
+    }
+
+    // Second instances hand their argv to this callback.
+    {
+        let add_tab = add_tab.clone();
+        *shared.open_in_window.borrow_mut() = Some(Rc::new(move |req| {
+            if let Err(err) = add_tab(req) {
+                tracing::error!("launch from second instance failed: {err:#}");
+            }
+        }));
     }
 
     window.present();
     Ok(())
 }
 
-/// Snapshot the open tabs, their custom titles and each pane's directory.
+/// Snapshot the open tabs, nested split trees and each leaf's directory.
 fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
     let mut tabs = Vec::new();
     for i in 0..tab_view.n_pages() {
@@ -1999,16 +2189,186 @@ fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
         let Some((_, views)) = pages.borrow().iter().find(|(p, _)| p == &page).cloned() else {
             continue;
         };
+        let layout = capture_pane_layout(&page.child(), &views);
         tabs.push(TabState {
             title: tab_is_renamed(&page).then(|| page.title().to_string()),
-            panes: views.iter().map(|v| v.pwd()).collect(),
+            layout,
         });
     }
     let active = tab_view
         .selected_page()
         .map(|p| tab_view.page_position(&p).max(0) as usize)
         .unwrap_or(0);
-    SessionState { tabs, active }
+    SessionState {
+        tabs,
+        active,
+        width: None,
+        height: None,
+        maximized: false,
+    }
+}
+
+/// Walk a tab's widget tree into a `PaneLayout`.
+fn capture_pane_layout(widget: &gtk4::Widget, views: &[Rc<TerminalView>]) -> PaneLayout {
+    if let Ok(paned) = widget.clone().downcast::<gtk4::Paned>() {
+        let orientation = match paned.orientation() {
+            gtk4::Orientation::Horizontal => SplitOrientation::Horizontal,
+            _ => SplitOrientation::Vertical,
+        };
+        let size = match paned.orientation() {
+            gtk4::Orientation::Horizontal => paned.width(),
+            _ => paned.height(),
+        };
+        let ratio = if size > 0 {
+            (paned.position() as f64 / size as f64).clamp(0.05, 0.95)
+        } else {
+            0.5
+        };
+        let start = paned
+            .start_child()
+            .map(|c| capture_pane_layout(&c, views))
+            .unwrap_or_default();
+        let end = paned
+            .end_child()
+            .map(|c| capture_pane_layout(&c, views))
+            .unwrap_or_default();
+        PaneLayout::Split {
+            orientation,
+            ratio,
+            start: Box::new(start),
+            end: Box::new(end),
+        }
+    } else if let Ok(overlay) = widget.clone().downcast::<gtk4::Overlay>() {
+        let cwd = views
+            .iter()
+            .find(|v| v.widget() == &overlay)
+            .and_then(|v| v.pwd());
+        PaneLayout::Leaf { cwd }
+    } else if let Ok(bx) = widget.clone().downcast::<gtk4::Box>() {
+        if let Some(child) = bx.first_child() {
+            capture_pane_layout(&child, views)
+        } else {
+            PaneLayout::Leaf { cwd: None }
+        }
+    } else {
+        PaneLayout::Leaf { cwd: None }
+    }
+}
+
+/// Recreate a nested split tree as widgets + TerminalViews.
+fn build_layout_widget(
+    layout: &PaneLayout,
+    make_view: &MakeViewFn,
+    page_slot: &Rc<RefCell<Option<adw::TabPage>>>,
+) -> anyhow::Result<(gtk4::Widget, Vec<Rc<TerminalView>>)> {
+    match layout {
+        PaneLayout::Leaf { cwd } => {
+            let view = make_view(page_slot.clone(), cwd.clone().map(PathBuf::from), None)?;
+            Ok((view.widget().clone().upcast(), vec![view]))
+        }
+        PaneLayout::Split {
+            orientation,
+            ratio,
+            start,
+            end,
+        } => {
+            let (start_w, mut start_views) = build_layout_widget(start, make_view, page_slot)?;
+            let (end_w, end_views) = build_layout_widget(end, make_view, page_slot)?;
+            let orient = match orientation {
+                SplitOrientation::Horizontal => gtk4::Orientation::Horizontal,
+                SplitOrientation::Vertical => gtk4::Orientation::Vertical,
+            };
+            let paned = gtk4::Paned::new(orient);
+            paned.set_wide_handle(true);
+            paned.set_resize_start_child(true);
+            paned.set_resize_end_child(true);
+            paned.set_shrink_start_child(false);
+            paned.set_shrink_end_child(false);
+            paned.set_start_child(Some(&start_w));
+            paned.set_end_child(Some(&end_w));
+            let ratio = (*ratio).clamp(0.05, 0.95);
+            // Apply the saved divider once the paned has a real size.
+            paned.connect_map(move |p| {
+                let size = match p.orientation() {
+                    gtk4::Orientation::Horizontal => p.width(),
+                    _ => p.height(),
+                };
+                if size > 0 {
+                    p.set_position((size as f64 * ratio) as i32);
+                }
+            });
+            start_views.extend(end_views);
+            Ok((paned.upcast(), start_views))
+        }
+    }
+}
+
+/// Honor `gtk-decoration-layout`, chrome font and text scaling.
+fn apply_desktop_chrome(header: &adw::HeaderBar, window: &adw::ApplicationWindow) {
+    let Some(settings) = gtk4::Settings::default() else {
+        return;
+    };
+
+    let apply_decoration = {
+        let header = header.clone();
+        let settings = settings.clone();
+        Rc::new(move || {
+            let layout = settings.gtk_decoration_layout().unwrap_or_default();
+            let mut parts = layout.splitn(2, ':');
+            let start = parts.next().unwrap_or("");
+            let end = parts.next().unwrap_or("");
+            header.set_show_start_title_buttons(!start.is_empty());
+            header.set_show_end_title_buttons(!end.is_empty());
+        })
+    };
+    apply_decoration();
+    {
+        let apply_decoration = apply_decoration.clone();
+        settings.connect_gtk_decoration_layout_notify(move |_| apply_decoration());
+    }
+
+    let provider = gtk4::CssProvider::new();
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
+        );
+    }
+    let apply_font = {
+        let settings = settings.clone();
+        let provider = provider.clone();
+        let window = window.clone();
+        Rc::new(move || {
+            let font = settings.gtk_font_name().unwrap_or_else(|| "Sans 10".into());
+            let scale = settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0;
+            let scale = if scale <= 0.0 { 1.0 } else { scale };
+            // Prefer the desktop text-scaling-factor when available via settings.
+            let text_scale = settings
+                .property_value("gtk-xft-dpi")
+                .get::<i32>()
+                .ok()
+                .map(|dpi| dpi as f64 / 1024.0 / 96.0)
+                .unwrap_or(scale);
+            let css = format!(
+                ".option-chrome, .option-chrome * {{ font: {font}; }}\n\
+                 window {{ font-size: {}pt; }}",
+                10.0 * text_scale.max(0.5)
+            );
+            provider.load_from_string(&css);
+            let _ = &window;
+        })
+    };
+    apply_font();
+    {
+        let apply_font = apply_font.clone();
+        settings.connect_gtk_font_name_notify(move |_| apply_font());
+    }
+    {
+        let apply_font = apply_font.clone();
+        settings.connect_gtk_xft_dpi_notify(move |_| apply_font());
+    }
+    // Animations: leave GtkSettings alone so gtk-enable-animations is honored.
 }
 
 /// Leaf-weighted split equalization, :

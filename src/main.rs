@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod default_terminal;
 mod keys;
+mod launch;
 mod pty;
 mod session;
 mod terminal;

@@ -1,9 +1,6 @@
 //! Menus, context menu and dialogs (palette, preferences, shortcuts, about).
 
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use gtk4::gdk;
 use gtk4::gio;
@@ -370,7 +367,11 @@ impl SearchBar {
     }
 }
 
-pub fn show_command_palette(window: &adw::ApplicationWindow) {
+pub fn show_command_palette(
+    window: &adw::ApplicationWindow,
+    config: &Rc<RefCell<Config>>,
+    open_launch: Rc<dyn Fn(crate::launch::LaunchRequest)>,
+) {
     let dialog = adw::Dialog::builder()
         .title("Command Palette")
         .content_width(460)
@@ -391,8 +392,35 @@ pub fn show_command_palette(window: &adw::ApplicationWindow) {
     list.set_selection_mode(gtk4::SelectionMode::Single);
     list.add_css_class("boxed-list");
 
-    // Rows map 1:1 onto COMMANDS by index; filtering never reorders them.
-    for (label, _, accel) in COMMANDS {
+    #[derive(Clone)]
+    enum PaletteAction {
+        Win(&'static str),
+        Launch(crate::launch::LaunchRequest),
+    }
+
+    let mut entries: Vec<(String, String, PaletteAction)> = COMMANDS
+        .iter()
+        .map(|(label, action, accel)| {
+            (
+                (*label).to_string(),
+                (*accel).to_string(),
+                PaletteAction::Win(action),
+            )
+        })
+        .collect();
+    for cmd in &config.borrow().commands {
+        entries.push((
+            format!("Run: {}", cmd.name),
+            String::new(),
+            PaletteAction::Launch(crate::launch::LaunchRequest {
+                cwd: cmd.cwd.as_ref().map(PathBuf::from),
+                command: Some(cmd.argv.clone()),
+            }),
+        ));
+    }
+    let entries = Rc::new(entries);
+
+    for (label, accel, _) in entries.iter() {
         let row = gtk4::ListBoxRow::new();
         let hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
         hbox.set_margin_top(8);
@@ -416,12 +444,13 @@ pub fn show_command_palette(window: &adw::ApplicationWindow) {
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     {
         let query = query.clone();
+        let entries = entries.clone();
         list.set_filter_func(move |row| {
             let q = query.borrow();
             if q.is_empty() {
                 return true;
             }
-            COMMANDS
+            entries
                 .get(row.index() as usize)
                 .map(|(label, _, _)| {
                     let needle = label.to_lowercase();
@@ -442,12 +471,19 @@ pub fn show_command_palette(window: &adw::ApplicationWindow) {
     let activate = {
         let window = window.clone();
         let dialog = dialog.clone();
+        let entries = entries.clone();
+        let open_launch = open_launch.clone();
         Rc::new(move |row: &gtk4::ListBoxRow| {
-            let Some((_, action, _)) = COMMANDS.get(row.index() as usize) else {
+            let Some((_, _, action)) = entries.get(row.index() as usize) else {
                 return;
             };
             dialog.close();
-            gtk4::prelude::WidgetExt::activate_action(&window, action, None).ok();
+            match action {
+                PaletteAction::Win(action) => {
+                    gtk4::prelude::WidgetExt::activate_action(&window, action, None).ok();
+                }
+                PaletteAction::Launch(req) => open_launch(req.clone()),
+            }
         })
     };
 
@@ -605,6 +641,7 @@ pub fn show_preferences(
         .subtitle("config.toml: window.tabs")
         .model(&gtk4::StringList::new(&[
             "Top",
+            "Bottom",
             "Sidebar (left)",
             "Sidebar (right)",
             "Hidden",
@@ -612,9 +649,10 @@ pub fn show_preferences(
         .build();
     tabs_row.set_selected(match config.borrow().tabs_location {
         TabsLocation::Top => 0,
-        TabsLocation::Left => 1,
-        TabsLocation::Right => 2,
-        TabsLocation::Hidden => 3,
+        TabsLocation::Bottom => 1,
+        TabsLocation::Left => 2,
+        TabsLocation::Right => 3,
+        TabsLocation::Hidden => 4,
     });
     {
         let config = config.clone();
@@ -622,9 +660,10 @@ pub fn show_preferences(
         let save_config = save_config.clone();
         tabs_row.connect_selected_notify(move |row| {
             let location = match row.selected() {
-                1 => TabsLocation::Left,
-                2 => TabsLocation::Right,
-                3 => TabsLocation::Hidden,
+                1 => TabsLocation::Bottom,
+                2 => TabsLocation::Left,
+                3 => TabsLocation::Right,
+                4 => TabsLocation::Hidden,
                 _ => TabsLocation::Top,
             };
             config.borrow_mut().tabs_location = location;
@@ -885,6 +924,29 @@ pub fn show_preferences(
     }
     scroll_group.add(&scroll_keys_row);
 
+    let scroll_lines_row = adw::SpinRow::builder()
+        .title("Scrollback Lines")
+        .subtitle("config.toml: scroll.lines — 0 disables scrollback")
+        .adjustment(
+            &gtk4::Adjustment::builder()
+                .lower(0.0)
+                .upper(1_000_000.0)
+                .step_increment(1_000.0)
+                .page_increment(10_000.0)
+                .value(config.borrow().scroll_lines as f64)
+                .build(),
+        )
+        .digits(0)
+        .build();
+    {
+        let update_all = update_all.clone();
+        scroll_lines_row.connect_changed(move |row| {
+            let lines = row.value() as i64;
+            update_all(Rc::new(move |cfg| cfg.scroll_lines = lines));
+        });
+    }
+    scroll_group.add(&scroll_lines_row);
+
     look_page.add(&theme_group);
     look_page.add(&font_group);
     look_page.add(&scroll_group);
@@ -893,7 +955,7 @@ pub fn show_preferences(
     let session_group = adw::PreferencesGroup::builder().title("Session").build();
     let restore_row = adw::SwitchRow::builder()
         .title("Restore Tabs on Start")
-        .subtitle("Reopens tabs, panes and their working directories")
+        .subtitle("Reopens tabs, nested splits, working directories and window size")
         .build();
     restore_row.set_active(config.borrow().session_restore);
     {

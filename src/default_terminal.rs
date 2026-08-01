@@ -72,14 +72,15 @@ pub fn set_default() -> Result<Vec<String>> {
                 BINARY,
             ],
         );
-        // exec-arg matters: the default is `-e`, which optionTerm does not take.
+        // exec-arg: GNOME appends the command after this; `-e` is the
+        // conventional flag and optionTerm accepts it.
         let arg_ok = run(
             "gsettings",
             &[
                 "set",
                 "org.gnome.desktop.default-applications.terminal",
                 "exec-arg",
-                "",
+                "-e",
             ],
         );
         if ok && arg_ok {

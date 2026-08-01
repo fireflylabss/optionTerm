@@ -2,8 +2,12 @@
 Name=optionTerm
 Comment=Sidebar-first terminal with tiling splits and Adwaita preferences
 Exec=optionterm
+TryExec=optionterm
+# File managers / xdg-terminal-exec may pass a directory or `-e` command;
+# optionTerm accepts `--working-directory` / `-d` and `-e` / `--`.
 Icon=utilities-terminal
 Terminal=false
 Type=Application
 Categories=System;TerminalEmulator;
 StartupWMClass=io.option.terminal
+Keywords=shell;prompt;command;terminal;

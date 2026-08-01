@@ -69,8 +69,13 @@
 - `cargo clippy --fix` desformata: rode `cargo fmt` depois.
 
 ## TODO
-- [ ] Respeitar `gtk-enable-animations`, `gtk-font-name` no chrome e
-      `text-scaling-factor`.
-- [ ] `gtk-decoration-layout` dinâmico.
-- [ ] `gtk-tabs-location = bottom` (hoje mapeado para `top`).
-- [ ] Salvar a **geometria** dos splits na sessão (hoje só o nº de painéis).
+- [ ] Respeitar `text-scaling-factor` do GNOME Settings (hoje usa DPI/`gtk-font-name`).
+- [x] Respeitar `gtk-enable-animations`, `gtk-font-name` no chrome e
+      `gtk-decoration-layout` dinâmico.
+- [x] `gtk-tabs-location` / `tabs = "bottom"`.
+- [x] Salvar a **geometria** dos splits na sessão.
+
+## Release channels
+- Ver [VERSIONING.md](VERSIONING.md): changelog usa `x.y.z-stable` (ou
+  alpha/beta); `Cargo.toml` / tags git ficam numéricos (`0.2.1`, `v0.2.1`).
+- Não marque `stable` no changelog sem estar pronto pra release/AUR.

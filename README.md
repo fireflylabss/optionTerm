@@ -21,10 +21,14 @@ and Adwaita preferences.
 - **Clear & restart** — wipe the screen and scrollback (`Ctrl+Shift+K`) or respawn the shell in place keeping the split layout (`Ctrl+Shift+R`).
 - **Clickable links** — `Ctrl+click` or `Shift+click` opens hyperlinks, bare URLs and existing file paths.
 - **Scrollback search** — `Ctrl+Shift+F` with wrap-around next/previous.
-- **Session restore** — reopen tabs, panes and their working directories on start (layout only).
+- **Session restore** — reopen tabs, nested split trees (orientation + divider
+  ratios), working directories and window size on start (layout only).
+- **CLI launch** — `--working-directory` / `-d`, `-e` / `--` to run a command;
+  second instances open a tab in the primary window.
 - **Translucent background** — `background_opacity`, plus automatic config reload when `config.toml` changes.
 - **Tiling splits** — split panes in any direction, directional focus, cycle focus, equalize, resize, and toggle zoom.
-- **Command palette** — `Ctrl+Shift+P` to search every action and its shortcut.
+- **Command palette** — `Ctrl+Shift+P` to search every action and its shortcut,
+  plus named `[[command]]` presets from config.
 - **Stylized cursor** — block, bar, underline, or hollow block; blinking and custom colors.
 - **TOML configuration** — `~/.option/terminal/config.toml`, generated with defaults on first run.
 
@@ -80,17 +84,36 @@ style = "block"   # block | bar | underline | block_hollow
 blink = true
 
 [window]
-tabs = "left"     # top | left | right | hidden
+tabs = "left"     # top | bottom | left | right | hidden
 session_restore = true
 inherit_working_directory = true
 background_opacity = 1.0
+
+[scroll]
+lines = 10000
 ```
 
 Shortcuts live in `~/.option/terminal/keys.toml` (overrides only).
 
-With `session_restore = true`, open tabs, pane count and each pane's working
-directory are written to `~/.option/terminal/session.toml` on exit and restored
-on the next start.
+Named launch presets (optional):
+
+```toml
+[[command]]
+name = "htop"
+argv = ["htop"]
+```
+
+With `session_restore = true`, open tabs, nested split layout, each pane's
+working directory and the window size are written to
+`~/.option/terminal/session.toml` on exit and restored on the next start.
+
+CLI examples:
+
+```bash
+optionterm --working-directory ~/src
+optionterm -e htop
+optionterm -- vim README.md
+```
 
 ## Packaging
 

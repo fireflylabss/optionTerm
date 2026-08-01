@@ -4,7 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+Versioning and release channels: see [VERSIONING.md](VERSIONING.md).
+
+## [0.2.1-stable] - 2026-08-01
+
+### Added
+
+- **Split-tree session restore** — nested pane orientation and divider ratios
+  are saved in `session.toml` (legacy flat `panes` lists still load as a
+  horizontal chain).
+- **Window geometry in the session** — width, height and maximized state round-
+  trip with the tabs.
+- **CLI launch surface** — `--working-directory` / `-d`, `-e` / `--command` /
+  `--`, and a directory positional. Second instances open a new tab in the
+  primary window (`GApplication` command-line).
+- **`tabs = "bottom"`** — tab bar under the content; Preferences and
+  `window.tabs` accept `bottom`.
+- **`scroll.lines`** — configurable VTE scrollback length (default 10 000).
+- **Named `[[command]]` presets** — `name` + `argv` (+ optional `cwd`) in
+  `config.toml`, listed in the command palette as “Run: …”.
+- **Desktop chrome fidelity** — follow `gtk-decoration-layout`, chrome font
+  from `gtk-font-name` / DPI; leave `gtk-enable-animations` alone.
+
+### Changed
+
+- GNOME default-terminal registration sets `exec-arg` to `-e` again (now
+  supported).
+- Release channel labeling follows optionMusic (`x.y.z-stable` in the
+  changelog; Cargo/git tags stay numeric).
 
 ## [0.2.0] - 2026-07-31
 ### Changed

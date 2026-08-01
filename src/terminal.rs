@@ -9,14 +9,14 @@ use std::{
 
 use anyhow::Result;
 use gtk4::{
+    EventControllerKey, GestureClick, Overlay, ScrolledWindow,
     gdk::{self, RGBA},
     gio, glib,
     pango::FontDescription,
     prelude::*,
-    EventControllerKey, GestureClick, Overlay, ScrolledWindow,
 };
 use vte4::{
-    prelude::*, CursorBlinkMode, CursorShape, Format, PtyFlags, Regex, Terminal as VteTerminal,
+    CursorBlinkMode, CursorShape, Format, PtyFlags, Regex, Terminal as VteTerminal, prelude::*,
 };
 
 use crate::{
@@ -31,6 +31,8 @@ pub struct TerminalView {
     config: Rc<RefCell<Config>>,
     child_pid: Rc<Cell<i32>>,
     cwd: Rc<RefCell<Option<PathBuf>>>,
+    /// Optional one-shot command argv (instead of the login shell).
+    command: Option<Vec<String>>,
     title: Rc<RefCell<String>>,
     on_title: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
     on_exit: Rc<RefCell<Option<Box<dyn Fn()>>>>,
@@ -41,7 +43,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(config: Config, cwd: Option<PathBuf>) -> Result<Self> {
+    pub fn new(config: Config, cwd: Option<PathBuf>, command: Option<Vec<String>>) -> Result<Self> {
         let terminal = VteTerminal::new();
         terminal.set_hexpand(true);
         terminal.set_vexpand(true);
@@ -49,7 +51,7 @@ impl TerminalView {
         terminal.set_allow_hyperlink(true);
         terminal.set_enable_fallback_scrolling(false);
         terminal.set_scroll_unit_is_pixels(true);
-        terminal.set_scrollback_lines(10_000);
+        terminal.set_scrollback_lines(config.scroll_lines);
         terminal.search_set_wrap_around(true);
 
         let url_regexes = install_url_matches(&terminal);
@@ -272,6 +274,7 @@ impl TerminalView {
             config,
             child_pid,
             cwd,
+            command,
             title,
             on_title,
             on_exit,
@@ -280,7 +283,7 @@ impl TerminalView {
             on_link,
             scroll_btn,
         };
-        view.spawn_shell();
+        view.spawn_process();
         Ok(view)
     }
 
@@ -404,23 +407,6 @@ impl TerminalView {
         self.terminal.reset(true, true);
     }
 
-    pub fn restart(&self) {
-        let pid = self.child_pid.get();
-        if pid > 0 {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGHUP,
-            );
-            self.child_pid.set(-1);
-        }
-        // Remember cwd before the child exits clears it.
-        if let Some(pwd) = self.pwd() {
-            *self.cwd.borrow_mut() = Some(PathBuf::from(pwd));
-        }
-        self.terminal.reset(true, true);
-        self.spawn_shell();
-    }
-
     fn sync_scroll_chrome(&self) {
         let cfg = self.config.borrow();
         if let Some(scroll) = self
@@ -443,6 +429,7 @@ impl TerminalView {
         self.terminal
             .set_scroll_on_keystroke(cfg.scroll_on_keystroke);
         self.terminal.set_audible_bell(cfg.bell_sound);
+        self.terminal.set_scrollback_lines(cfg.scroll_lines);
     }
 
     fn pty_fd(&self) -> Option<i32> {
@@ -450,7 +437,24 @@ impl TerminalView {
         Some(pty.fd().as_raw_fd())
     }
 
-    fn spawn_shell(&self) {
+    pub fn restart(&self) {
+        let pid = self.child_pid.get();
+        if pid > 0 {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGHUP,
+            );
+            self.child_pid.set(-1);
+        }
+        // Remember cwd before the child exits clears it.
+        if let Some(pwd) = self.pwd() {
+            *self.cwd.borrow_mut() = Some(PathBuf::from(pwd));
+        }
+        self.terminal.reset(true, true);
+        self.spawn_process();
+    }
+
+    fn spawn_process(&self) {
         let shell = match std::env::var_os("SHELL") {
             Some(s) if !s.is_empty() => PathBuf::from(s),
             _ => match nix::unistd::User::from_uid(nix::unistd::getuid()) {
@@ -459,7 +463,14 @@ impl TerminalView {
             },
         };
         let shell_s = shell.to_string_lossy().into_owned();
-        let argv = [shell_s.as_str()];
+
+        // Own the argv strings for the duration of spawn_async.
+        let argv_owned: Vec<String> = if let Some(cmd) = &self.command {
+            cmd.clone()
+        } else {
+            vec![shell_s]
+        };
+        let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
 
         let env_term = "TERM=xterm-256color".to_string();
         let env_color = "COLORTERM=truecolor".to_string();
@@ -484,7 +495,7 @@ impl TerminalView {
         self.terminal.spawn_async(
             PtyFlags::DEFAULT,
             cwd,
-            &argv,
+            &argv_refs,
             &envv,
             glib::SpawnFlags::DEFAULT,
             || {},
@@ -493,7 +504,7 @@ impl TerminalView {
             move |result| match result {
                 Ok(pid) => child_pid.set(pid.0),
                 Err(err) => {
-                    tracing::error!("failed to spawn shell: {err}");
+                    tracing::error!("failed to spawn process: {err}");
                     child_pid.set(-1);
                 }
             },
@@ -507,6 +518,7 @@ fn apply_visuals(terminal: &VteTerminal, config: &Config) {
     apply_cursor(terminal, config);
     terminal.set_scroll_on_keystroke(config.scroll_on_keystroke);
     terminal.set_audible_bell(config.bell_sound);
+    terminal.set_scrollback_lines(config.scroll_lines);
     terminal.set_enable_shaping(config.font_ligatures);
 
     let pad_x = config.padding_x.max(0.0);
@@ -605,19 +617,7 @@ fn regex_escape(s: &str) -> String {
     for c in s.chars() {
         if matches!(
             c,
-            '\\' | '.'
-                | '+'
-                | '*'
-                | '?'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '^'
-                | '$'
-                | '|'
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|'
         ) {
             out.push('\\');
         }
