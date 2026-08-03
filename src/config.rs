@@ -617,16 +617,14 @@ palette = [
             sel_bg = hex(self.selection_background),
             sel_fg = hex(self.selection_foreground),
         );
-        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+        option_sdk::atomic_write(path, text.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
     }
 }
 
 /// `~/.option/terminal`
 pub fn config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".option")
-        .join("terminal")
+    option_sdk::App::TERMINAL.dir()
 }
 
 /// `~/.option/terminal/config.toml`

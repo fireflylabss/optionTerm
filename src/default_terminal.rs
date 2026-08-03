@@ -56,7 +56,7 @@ pub fn set_default() -> Result<Vec<String>> {
             .filter(|line| !line.is_empty() && *line != DESKTOP_ID)
             .collect();
         lines.insert(0, DESKTOP_ID);
-        std::fs::write(&path, format!("{}\n", lines.join("\n")))
+        option_sdk::atomic_write(&path, format!("{}\n", lines.join("\n")).as_bytes())
             .with_context(|| format!("writing {}", path.display()))?;
         applied.push(format!("{}", path.display()));
     }

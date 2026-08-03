@@ -118,7 +118,8 @@ impl Bindings {
         for (action, accel) in &self.0 {
             out.push_str(&format!("{action} = \"{accel}\"\n"));
         }
-        std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))
+        option_sdk::atomic_write(&path, out.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
     }
 }
 

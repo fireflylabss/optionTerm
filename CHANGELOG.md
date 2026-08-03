@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 Versioning and release channels: see [VERSIONING.md](VERSIONING.md).
 
+## v0.2.2-stable · 03/08/2026
+
+Shared Option paths and atomic terminal state persistence. This version was made for GNOME with a stable release channel on 03/08/2026 (v0.2.2-stable).
+
+- Adopt `optionSDK` 0.1.3 for `~/.option/terminal` identity and session paths.
+- Write config and session files through a flushed, synced sibling temporary file.
+- Keep the existing `dirs` integration for desktop default-terminal discovery only.
+
 ## [0.2.1-stable] - 2026-08-01
 
 ### Added

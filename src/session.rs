@@ -126,11 +126,7 @@ impl Session {
 
     /// `~/.option/terminal/session.toml`
     pub fn path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".option")
-            .join("terminal")
-            .join("session.toml")
+        option_sdk::App::TERMINAL.session_toml()
     }
 
     pub fn load() -> Option<Self> {
@@ -144,7 +140,8 @@ impl Session {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(&path, self.to_toml()).with_context(|| format!("writing {}", path.display()))
+        option_sdk::atomic_write(&path, self.to_toml().as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// Remove a stored session (used when restore is turned off).
