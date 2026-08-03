@@ -73,7 +73,7 @@ Version: $version
 Section: utils
 Priority: optional
 Architecture: $arch
-Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0, libpango-1.0-0, libcairo2, libglib2.0-0
+Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0, libwebkitgtk-6.0-4, libpango-1.0-0, libcairo2, libglib2.0-0
 Conflicts: option-term
 Replaces: option-term
 Provides: option-term

@@ -49,6 +49,7 @@ pkgbase = optionterm
 	depends = cairo
 	depends = pango
 	depends = vte4
+	depends = webkitgtk-6.0
 	provides = option-term
 	conflicts = option-term
 	replaces = option-term

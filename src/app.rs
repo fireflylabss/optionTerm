@@ -14,6 +14,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::{
+    browser,
     config::{
         Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
         Theme,
@@ -184,6 +185,8 @@ fn tab_page_at(tab_bar: &adw::TabBar, x: f64, y: f64) -> Option<adw::TabPage> {
 
 /// Key used to remember that the user renamed a tab by hand.
 const RENAMED_KEY: &str = "option-term-renamed";
+/// Key used to keep browser pages out of terminal split operations.
+const BROWSER_TAB_KEY: &str = "option-term-browser";
 
 /// Whether the user gave this tab a custom title, in which case the shell's
 /// OSC title updates must not overwrite it.
@@ -194,6 +197,14 @@ fn tab_is_renamed(page: &adw::TabPage) -> bool {
 
 fn set_tab_renamed(page: &adw::TabPage, renamed: bool) {
     unsafe { page.set_data(RENAMED_KEY, renamed) };
+}
+
+fn is_browser_tab(page: &adw::TabPage) -> bool {
+    unsafe { page.data::<bool>(BROWSER_TAB_KEY).map(|v| *v.as_ref()) }.unwrap_or(false)
+}
+
+fn set_browser_tab(page: &adw::TabPage) {
+    unsafe { page.set_data(BROWSER_TAB_KEY, true) };
 }
 
 /// Ask for a new tab title. Clearing the field restores the shell's title.
@@ -914,6 +925,8 @@ fn build_window(
                 let view = make_view(page_slot.clone(), launch.cwd, launch.command)?;
 
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                root.set_hexpand(true);
+                root.set_vexpand(true);
                 root.append(view.widget());
 
                 let page = match config.borrow().new_tab_position {
@@ -944,6 +957,18 @@ fn build_window(
         )
     };
 
+    let add_browser_tab = {
+        let tab_view = tab_view.clone();
+        Rc::new(move || {
+            let root = browser::new_tab();
+            let page = tab_view.append(&root);
+            set_browser_tab(&page);
+            page.set_title("Browser");
+            page.set_live_thumbnail(true);
+            tab_view.set_selected_page(&page);
+        })
+    };
+
     // Restore a tab from a nested split tree.
     let add_tab_layout = {
         let tab_view = tab_view.clone();
@@ -956,6 +981,8 @@ fn build_window(
                 let (child, views) = build_layout_widget(layout, &make_view, &page_slot)?;
 
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                root.set_hexpand(true);
+                root.set_vexpand(true);
                 root.append(&child);
 
                 let page = match config.borrow().new_tab_position {
@@ -1045,6 +1072,9 @@ fn build_window(
             let Some(page) = tab_view.selected_page() else {
                 return;
             };
+            if is_browser_tab(&page) {
+                return;
+            }
             let Some(target) = current_view() else { return };
             let page_slot = Rc::new(RefCell::new(Some(page.clone())));
             let cwd = inherit_cwd();
@@ -1059,6 +1089,8 @@ fn build_window(
                 _ => old.height(),
             } / 2;
             let paned = gtk4::Paned::new(orientation);
+            paned.set_hexpand(true);
+            paned.set_vexpand(true);
             paned.set_wide_handle(true);
             paned.set_resize_start_child(true);
             paned.set_resize_end_child(true);
@@ -1706,6 +1738,14 @@ fn build_window(
     }
 
     {
+        let add_browser_tab = add_browser_tab.clone();
+        window.add_action(&add_simple(
+            "open-browser",
+            Box::new(move || add_browser_tab()),
+        ));
+    }
+
+    {
         let tab_view = tab_view.clone();
         let window_c = window.clone();
         window.add_action(&add_simple(
@@ -1896,6 +1936,7 @@ fn build_window(
     app.set_accels_for_action("win.toggle-split-zoom", &["<Control><Shift>Return"]);
     app.set_accels_for_action("win.command-palette", &["<Control><Shift>p"]);
     app.set_accels_for_action("win.find", &["<Control><Shift>f"]);
+    app.set_accels_for_action("win.open-browser", &["<Control><Shift>b"]);
     app.set_accels_for_action("win.rename-tab", &["F2"]);
     app.set_accels_for_action(
         "win.zoom-in",
@@ -1908,17 +1949,55 @@ fn build_window(
     // keys.toml wins over everything set above.
     apply_bindings();
 
+    // Browser tabs keep split and tiling actions unavailable.
+    let sync_split_actions: Rc<dyn Fn(Option<adw::TabPage>)> = {
+        let window = window.clone();
+        Rc::new(move |page| {
+            let enabled = page.map(|page| !is_browser_tab(&page)).unwrap_or(true);
+            for name in [
+                "split-right",
+                "split-down",
+                "split-left",
+                "split-up",
+                "toggle-split-zoom",
+                "equalize-splits",
+                "focus-split-left",
+                "focus-split-right",
+                "focus-split-up",
+                "focus-split-down",
+                "focus-split-previous",
+                "focus-split-next",
+                "resize-split-left",
+                "resize-split-right",
+                "resize-split-up",
+                "resize-split-down",
+            ] {
+                if let Some(action) = window
+                    .lookup_action(name)
+                    .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
+                {
+                    action.set_enabled(enabled);
+                }
+            }
+        })
+    };
+    sync_split_actions(tab_view.selected_page());
+
     // Focus terminal when switching tabs; sync window title + sidebar row.
     {
         let current_view = current_view.clone();
         let window = window.clone();
         let sidebar_list = sidebar_list.clone();
         let sidebar_syncing = sidebar_syncing.clone();
+        let sync_split_actions = sync_split_actions.clone();
         tab_view.connect_notify_local(Some("selected-page"), move |tv, _| {
+            sync_split_actions(tv.selected_page());
             if let Some(page) = tv.selected_page() {
                 if let Some(view) = current_view() {
                     window.set_title(Some(&view.title()));
                     view.focus();
+                } else {
+                    window.set_title(Some(&page.title()));
                 }
                 sidebar_syncing.set(true);
                 let idx = tv.page_position(&page);

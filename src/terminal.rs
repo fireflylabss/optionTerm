@@ -64,6 +64,9 @@ impl TerminalView {
             .propagate_natural_width(false)
             .propagate_natural_height(false)
             .build();
+        // The terminal is the pane surface, not a framed document. Removing the
+        // ScrolledWindow frame prevents a one-pixel inset around every pane.
+        scroll.set_has_frame(false);
         // VTE is already a Scrollable; wrapping still gives us a themed bar
         // when the config asks for one.
         scroll.set_policy(

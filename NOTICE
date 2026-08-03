@@ -10,3 +10,11 @@ This product includes software developed as system dependencies:
 
 VTE is dynamically linked from the host system. See the VTE package
 license files on your distribution for the full LGPL-3.0-or-later text.
+
+  WebKitGTK
+  Copyright © WebKit contributors
+  License: LGPL-2.1-or-later
+  https://webkitgtk.org/
+
+WebKitGTK is dynamically linked from the host system. See the WebKitGTK
+package license files on your distribution for the full license text.

@@ -21,6 +21,7 @@ depends=(
   'cairo'
   'pango'
   'vte4'
+  'webkitgtk-6.0'
 )
 makedepends=(
   'cargo'

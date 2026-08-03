@@ -1,6 +1,7 @@
 //! optionTerm — sidebar-first GTK4 + libadwaita terminal.
 
 mod app;
+mod browser;
 mod config;
 mod default_terminal;
 mod keys;

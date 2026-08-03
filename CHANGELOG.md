@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 Versioning and release channels: see [VERSIONING.md](VERSIONING.md).
 
+## v0.2.3-stable · 03/08/2026
+
+Integrated browser tabs, borderless terminal panes and browser navigation controls. This version was made for GNOME with a stable release channel on 03/08/2026 (v0.2.3-stable).
+
+- Browser opens as a native GTK4/WebKitGTK6 tab inside optionTerm, using the same tab surface and Adwaita chrome.
+- Browser tabs expose back, forward, reload and address navigation while split and tiling actions stay disabled.
+- The `+` menu now includes **Open Browser…** alongside terminal split actions.
+- Terminal panes fill the available content area without the ScrolledWindow frame inset.
+- Various other UI polish
+
 ## v0.2.2-stable · 03/08/2026
 
 Shared Option paths and atomic terminal state persistence. This version was made for GNOME with a stable release channel on 03/08/2026 (v0.2.2-stable).

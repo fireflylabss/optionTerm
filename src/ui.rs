@@ -51,6 +51,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Decrease Font Size", "win.zoom-out", "Ctrl+-"),
     ("Default Font Size", "win.zoom-reset", "Ctrl+0"),
     ("Find in Scrollback", "win.find", "Ctrl+Shift+F"),
+    ("Open Browser", "win.open-browser", "Ctrl+Shift+B"),
     ("Rename Tab", "win.rename-tab", "F2"),
     ("Reload Configuration", "win.reload-config", ""),
     ("Preferences", "win.preferences", "Ctrl+,"),
@@ -70,11 +71,14 @@ fn splits_menu() -> gio::Menu {
     split
 }
 
-/// Menu behind the `+` split button: the split directions and nothing else.
-/// Clicking the button itself opens a tab, so tab actions live on the tab's own
-/// context menu instead of being buried here.
+/// Menu behind the `+` split button: split directions plus another way to
+/// open the browser tab. Clicking the button itself still opens a terminal tab.
 pub fn tiling_menu() -> gio::Menu {
-    splits_menu()
+    let menu = splits_menu();
+    let browser = gio::Menu::new();
+    browser.append(Some("Open Browser…"), Some("win.open-browser"));
+    menu.append_section(None, &browser);
+    menu
 }
 
 /// Right-click on a tab: rename, split, close.
@@ -114,6 +118,7 @@ fn main_menu() -> gio::Menu {
 
     let tools = gio::Menu::new();
     tools.append(Some("Find…"), Some("win.find"));
+    tools.append(Some("Open Browser…"), Some("win.open-browser"));
     tools.append(Some("Command Palette"), Some("win.command-palette"));
     menu.append_section(None, &tools);
 

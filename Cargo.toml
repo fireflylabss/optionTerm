@@ -1,6 +1,6 @@
 [package]
 name = "optionterm"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Sidebar-first GTK4 terminal with tiling splits and Adwaita preferences"
 license = "Apache-2.0"
@@ -22,6 +22,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 vte4 = { version = "0.8", features = ["v0_76"] }
+webkit6 = "0.4"
 
 [profile.release]
 lto = true
