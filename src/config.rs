@@ -617,7 +617,7 @@ palette = [
             sel_bg = hex(self.selection_background),
             sel_fg = hex(self.selection_foreground),
         );
-        option_sdk::atomic_write(path, text.as_bytes())
+        crate::storage::atomic_write(path, text.as_bytes())
             .with_context(|| format!("writing {}", path.display()))
     }
 }

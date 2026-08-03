@@ -140,7 +140,7 @@ impl Session {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        option_sdk::atomic_write(&path, self.to_toml().as_bytes())
+        crate::storage::atomic_write(&path, self.to_toml().as_bytes())
             .with_context(|| format!("writing {}", path.display()))
     }
 

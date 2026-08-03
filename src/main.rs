@@ -8,6 +8,7 @@ mod keys;
 mod launch;
 mod pty;
 mod session;
+mod storage;
 mod terminal;
 mod ui;
 
