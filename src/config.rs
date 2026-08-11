@@ -254,8 +254,10 @@ impl Default for Config {
             selection_background: rgb(0x3a, 0x3a, 0x3a),
             selection_foreground: rgb(0xff, 0xff, 0xff),
             palette: default_ansi(),
-            padding_x: 2.0,
-            padding_y: 2.0,
+            // A terminal pane is a full-bleed surface by default. Padding is
+            // still configurable for people who deliberately want it.
+            padding_x: 0.0,
+            padding_y: 0.0,
             source: PathBuf::new(),
         }
     }

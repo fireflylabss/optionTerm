@@ -152,6 +152,16 @@ fn install_css(display: &gdk::Display) {
          window.transparent-bg > * ,
          window.transparent-bg .terminal { background-color: transparent; }
 
+         .terminal-surface,
+         .terminal-surface > scrolledwindow,
+         .terminal-surface > scrolledwindow > viewport {
+           border: none;
+           border-radius: 0px;
+           box-shadow: none;
+           margin: 0px;
+           padding: 0px;
+         }
+
          .quick-settings { padding: 8px 14px 4px 14px; }",
     );
     gtk4::style_context_add_provider_for_display(
@@ -433,9 +443,13 @@ fn build_window(
 
     // Search bar sits above the tabs so it spans whichever pane is focused.
     let content_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    content_box.set_hexpand(true);
+    content_box.set_vexpand(true);
     content_box.append(&tab_view);
 
     let toast_overlay = adw::ToastOverlay::new();
+    toast_overlay.set_hexpand(true);
+    toast_overlay.set_vexpand(true);
     toast_overlay.set_child(Some(&content_box));
 
     // Tabs-as-sidebar support
@@ -510,6 +524,8 @@ fn build_window(
     sidebar_box.append(&sidebar_scroll);
 
     let split_view = adw::OverlaySplitView::new();
+    split_view.set_hexpand(true);
+    split_view.set_vexpand(true);
     split_view.set_sidebar_width_fraction(0.22);
     split_view.set_max_sidebar_width(280.0);
     split_view.set_min_sidebar_width(160.0);
@@ -521,6 +537,8 @@ fn build_window(
         .enable_new_tab(true)
         .child(&toast_overlay)
         .build();
+    tab_overview.set_hexpand(true);
+    tab_overview.set_vexpand(true);
     split_view.set_content(Some(&tab_overview));
 
     // Bottom tab strip holder — empty until `tabs = "bottom"`.

@@ -64,6 +64,7 @@ impl TerminalView {
             .propagate_natural_width(false)
             .propagate_natural_height(false)
             .build();
+        scroll.add_css_class("terminal-surface");
         // The terminal is the pane surface, not a framed document. Removing the
         // ScrolledWindow frame prevents a one-pixel inset around every pane.
         scroll.set_has_frame(false);
@@ -89,6 +90,7 @@ impl TerminalView {
         scroll_btn.set_visible(false);
 
         let overlay = Overlay::new();
+        overlay.add_css_class("terminal-surface");
         overlay.set_hexpand(true);
         overlay.set_vexpand(true);
         overlay.set_child(Some(&scroll));

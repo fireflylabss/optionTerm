@@ -607,7 +607,7 @@ checksum = "e08d7bef833f1ce6ea916624d0007f251cb14e5c37ff26d910cf72ce857bced2"
 
 [[package]]
 name = "optionterm"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "dirs",

@@ -1,10 +1,41 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+We follow [Semantic Versioning](https://semver.org/) and [Keep a Changelog](https://keepachangelog.com/). optionTerm is a single GNOME surface.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+<details>
+<summary>To see more about versioning, expand this.</summary>
 
-Versioning and release channels: see [VERSIONING.md](VERSIONING.md).
+Every version string starts with `v` (required), e.g. `v0.2.4-stable`, `v0.2.3-stable`.
+
+The installable surface is **GNOME** (GTK4 + libadwaita), delivered as the `optionterm` desktop terminal.
+
+| Part | What you install | Example |
+| --- | --- | --- |
+| **GNOME** | `optionterm` desktop terminal | `v0.2.4-stable` |
+
+With one surface there is no `m` in the changelog version and no per-surface sections — just the version notes.
+
+Each release heading is the version and date (`## v0.2.4-stable · 11/08/2026`); its short summary ends by naming the GNOME surface, channel, date, and version again.
+
+### What the channel suffix means
+
+| Suffix | In plain words |
+| --- | --- |
+| **-alpha** | Very early. Expect missing pieces and lots of bugs. |
+| **-beta** | Mostly there, but still rough. Fine to try; not the official install. |
+| **-stable** | Ready for daily use. This is what we put on GitHub Releases and the AUR. |
+
+We only call something **stable** when we mean it. While a change is being validated, builds stay **beta**.
+
+</details>
+
+## v0.2.4-stable · 11/08/2026
+
+Full-bleed terminal panes with no visual frame around the terminal surface. This version was made for GNOME with a stable release channel on 11/08/2026 (v0.2.4-stable).
+
+- Terminal panes now expand through the complete content area below the chrome, including nested app containers.
+- Removed the terminal surface's CSS frame, corner radius, shadow and outer spacing while preserving the optional scrollbar and jump-to-bottom control.
+- New installations default to zero terminal padding; the Appearance preference remains available for an intentional inner margin.
 
 ## v0.2.3-stable · 03/08/2026
 
