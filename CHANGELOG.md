@@ -29,6 +29,22 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.6-stable · 14/08/2026
+
+Kitty graphics protocol support through a patched VTE, with file-based image transfer. This version was made for GNOME with a stable release channel on 14/08/2026 (v0.2.6-stable).
+
+- Kitty graphics protocol images render inline again: a patched VTE (built by `scripts/build-vte.sh` into `vte-dist/`) answers the `a=q` query and draws `a=T` / `a=p` placements on the cell grid.
+- File-based transmit (`t=f`) is supported, so tools that send a base64 file path instead of pixel data work too — including optionFiles previews and `kitten icat`.
+- Image numbers (`I=`), placement ids (`p=`), replace-in-place placement updates and delete-by-number (`a=d,d=n`) follow the kitty spec.
+- The VTE string parser cap was raised from 4k to 64k so single-chunk PNG payloads are no longer silently dropped.
+
+## v0.2.5-stable · 12/08/2026
+
+Align the shared family SDK on the latest optionSDK. This version was made for GNOME with a stable release channel on 12/08/2026 (v0.2.5-stable).
+
+- Bumped `optionSDK` from `0.1.2` to `0.1.3` to match the rest of the family.
+- Bumped crate version from `0.2.4` to `0.2.5`.
+
 ## v0.2.4-stable · 11/08/2026
 
 Full-bleed terminal panes with no visual frame around the terminal surface. This version was made for GNOME with a stable release channel on 11/08/2026 (v0.2.4-stable).

@@ -1,4 +1,6 @@
 /target/
+/vte-dist/
+/.cargo/config.toml
 **/*.rs.bk
 *.swp
 .DS_Store

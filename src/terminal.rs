@@ -19,6 +19,21 @@ use vte4::{
     CursorBlinkMode, CursorShape, Format, PtyFlags, Regex, Terminal as VteTerminal, prelude::*,
 };
 
+// FFI for the kitty graphics protocol support added by the patched VTE
+// (vte-fork/patches/kitty-graphics.patch). Not exposed by the stock vte4 crate.
+unsafe extern "C" {
+    fn vte_terminal_set_enable_inline_images(
+        terminal: *mut vte4::ffi::VteTerminal,
+        enabled: glib::ffi::gboolean,
+    );
+}
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn enable_inline_images(terminal: &VteTerminal) {
+    unsafe {
+        vte_terminal_set_enable_inline_images(terminal.as_ptr(), glib::ffi::GTRUE);
+    }
+}
+
 use crate::{
     config::{Config, CursorStyle, RgbColor},
     pty,
@@ -53,6 +68,10 @@ impl TerminalView {
         terminal.set_scroll_unit_is_pixels(true);
         terminal.set_scrollback_lines(config.scroll_lines);
         terminal.search_set_wrap_around(true);
+        // Patched VTE: kitty graphics protocol (inline images).
+        unsafe {
+            enable_inline_images(&terminal);
+        }
 
         let url_regexes = install_url_matches(&terminal);
         apply_visuals(&terminal, &config);
@@ -725,6 +744,15 @@ pub fn detect_link(word: &str, pwd: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// GTK can only be initialized once per process; the kitty tests share
+    /// the same harness, so initialize lazily on the first test that runs.
+    fn ensure_gtk_init() -> bool {
+        if gtk4::is_initialized() {
+            return true;
+        }
+        gtk4::init().is_ok()
+    }
+
     #[test]
     fn pwd_to_path_strips_file_uri() {
         assert_eq!(pwd_to_path("file://host/home/me"), "/home/me");
@@ -748,5 +776,199 @@ mod tests {
     fn regex_escape_quotes_metachars() {
         assert_eq!(regex_escape("a+b"), r"a\+b");
         assert_eq!(regex_escape("plain"), "plain");
+    }
+
+    /// The kitty graphics protocol must be enabled by default on the patched
+    /// VTE, and the APC handler must accept (not crash on) a query sequence.
+    #[test]
+    fn kitty_graphics_handler_accepts_query() {
+        // GTK needs an init; offscreen avoids needing a real display.
+        if !ensure_gtk_init() {
+            eprintln!("skipping: no display available");
+            return;
+        }
+        let terminal = VteTerminal::new();
+        unsafe {
+            enable_inline_images(&terminal);
+            // APC query: `ESC _ G i=1,q=1 ESC \`
+            let seq = b"\x1b_Gi=1,q=1\x1b\\";
+            terminal.feed(seq);
+            terminal.feed(b"\x1b_Ga=T,f=100;AAAA\x1b\\");
+            terminal.feed(b"\x1b_Ga=c\x1b\\");
+        }
+    }
+
+    /// End-to-end: the patched VTE answers the kitty query (a=q) with an
+    /// "a=OK" response written to the PTY master.
+    #[test]
+    fn kitty_graphics_answers_query_on_pty() {
+        use std::{
+            io::Read,
+            os::fd::{AsRawFd, FromRawFd},
+        };
+
+        if !ensure_gtk_init() {
+            eprintln!("skipping: no display available");
+            return;
+        }
+
+        let winsize = nix::pty::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 640,
+            ws_ypixel: 384,
+        };
+        let (master, _child) = match unsafe { nix::pty::forkpty(&winsize, None) } {
+            Ok(nix::pty::ForkptyResult::Parent { master, child }) => (master, child),
+            Ok(nix::pty::ForkptyResult::Child) => std::process::exit(0),
+            Err(e) => panic!("forkpty failed: {e}"),
+        };
+
+        // Own the master fd: VTE will write the APC reply into it.
+        let mut master = unsafe { std::fs::File::from_raw_fd(master.as_raw_fd()) };
+
+        // Wrap our master fd in a VTE Pty (vte_pty_new_foreign_sync).
+        unsafe extern "C" {
+            fn vte_pty_new_foreign_sync(
+                fd: i32,
+                cancellable: *mut std::ffi::c_void,
+                error: *mut *mut glib::ffi::GError,
+            ) -> *mut vte4::ffi::VtePty;
+        }
+        let pty: vte4::Pty = unsafe {
+            let mut error = std::ptr::null_mut();
+            let ptr =
+                vte_pty_new_foreign_sync(master.as_raw_fd(), std::ptr::null_mut(), &mut error);
+            assert!(!ptr.is_null(), "vte_pty_new_foreign_sync failed");
+            glib::translate::from_glib_full(ptr)
+        };
+
+        let terminal = VteTerminal::new();
+        terminal.set_pty(Some(&pty));
+        unsafe {
+            enable_inline_images(&terminal);
+        }
+        terminal.feed(b"\x1b_Ga=q,i=7,q=42\x1b\\");
+
+        // Pump the main context so VTE flushes m_outgoing into the PTY.
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut buf = [0u8; 512];
+        let mut got = Vec::new();
+        while std::time::Instant::now() < deadline {
+            while glib::MainContext::default().pending() {
+                glib::MainContext::default().iteration(false);
+            }
+            match master.read(&mut buf) {
+                Ok(0) | Err(_) => {}
+                Ok(n) => {
+                    got.extend_from_slice(&buf[..n]);
+                    if got.windows(4).any(|w| w == b"a=OK") {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let s = String::from_utf8_lossy(&got);
+        assert!(
+            s.contains("a=OK"),
+            "kitty query went unanswered; PTY output was: {s:?}"
+        );
+        // The patched VTE echoes the image id and hardcodes q=1 (protocol says
+        // the reply must include the query id; the patch keeps it simple).
+        assert!(s.contains("i=7"), "reply must echo the image id: {s:?}");
+        assert!(s.contains("OK=1"), "reply must advertise OK=1: {s:?}");
+    }
+
+    /// The patched VTE must accept t=f (transmit from a file path), the
+    /// medium optionFiles uses for previews. The APC handler runs without a
+    /// PTY here; the query-on-pty test above proves the wire path end to end.
+    #[test]
+    fn kitty_graphics_transmits_from_file() {
+        if !ensure_gtk_init() {
+            eprintln!("skipping: no display available");
+            return;
+        }
+
+        // A real PNG to transmit: a 1x1 pixel, fixed base64.
+        let png_path = std::env::temp_dir().join("optionterm-kitty-tf-test.png");
+        let one_px_png = base64_decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+        );
+        std::fs::write(&png_path, &one_px_png).expect("write test png");
+
+        let terminal = VteTerminal::new();
+        unsafe {
+            enable_inline_images(&terminal);
+        }
+
+        // Transmit by file path (optionFiles style: I=, p=, C=1, q=1),
+        // then display and delete. Any error is swallowed by the handler,
+        // so the test passes if the feed does not abort.
+        let path_b64 = base64_encode(png_path.to_str().unwrap().as_bytes());
+        let seq = format!(
+            "\x1b_Ga=T,f=100,t=f,I=1,p=1,c=12,r=6,C=1,q=1;{path_b64}\x1b\\\
+             \x1b_Ga=T,f=100,t=d,i=2,c=12,r=6,C=1,q=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\\
+             \x1b_Ga=d,d=N,I=1,q=1\x1b\\"
+        );
+        terminal.feed(seq.as_bytes());
+    }
+
+    fn base64_decode(s: &str) -> Vec<u8> {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::with_capacity(s.len() / 4 * 3);
+        let mut buf = [0u8; 4];
+        let mut n = 0usize;
+        for c in s.bytes() {
+            let v = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => continue,
+            };
+            buf[n] = v;
+            n += 1;
+            if n == 4 {
+                out.push((buf[0] << 2) | (buf[1] >> 4));
+                out.push((buf[1] << 4) | (buf[2] >> 2));
+                out.push((buf[2] << 6) | buf[3]);
+                n = 0;
+            }
+        }
+        if n >= 2 {
+            out.push((buf[0] << 2) | (buf[1] >> 4));
+            if n == 3 {
+                out.push((buf[1] << 4) | (buf[2] >> 2));
+            }
+        }
+        out
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let a = chunk[0];
+            let b = chunk.get(1).copied().unwrap_or(0);
+            let c = chunk.get(2).copied().unwrap_or(0);
+            out.push(TABLE[(a >> 2) as usize] as char);
+            out.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[(c & 0x3f) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
     }
 }

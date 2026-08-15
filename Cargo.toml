@@ -1,6 +1,6 @@
 [package]
 name = "optionterm"
-version = "0.2.4"
+version = "0.2.6"
 edition = "2024"
 description = "Sidebar-first GTK4 terminal with tiling splits and Adwaita preferences"
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-optionSDK = "0.1.2"
+optionSDK = { path = "../optionSDK" }
 dirs = "6"
 gtk4 = { version = "0.9", features = ["v4_14"] }
 libadwaita = { version = "0.7", features = ["v1_5"] }

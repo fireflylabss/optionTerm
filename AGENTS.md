@@ -4,6 +4,13 @@
 - Dependências de sistema: GTK 4.14+, libadwaita 1.5+, **VTE GTK4** (`vte4` /
   `libvte-2.91-gtk4`), pkg-config, pango, cairo. **Não precisa de Zig.**
 - `cargo build --release` ou `./scripts/run.sh`.
+- **Kitty graphics protocol**: o app usa um VTE patcheado em `vte-dist/` (build
+  local gerado por `scripts/build-vte.sh`, que aplica
+  `vte-fork/patches/kitty-graphics.patch` no VTE 0.84.1). Rode esse script
+  antes de buildar; sem ele o link falha (`undefined symbol:
+  vte_terminal_set_enable_inline_images`). O `.cargo/config.toml` aponta
+  `PKG_CONFIG_PATH` pro `vte-dist` e seta rpath pro runtime. O patch responde à
+  query APC (`a=q`), aceita transmit PNG (`a=T,f=100`) e display (`a=d`).
 - Smoke test: `timeout 5 ./target/release/optionterm` (GApplication é
   single-instance — mate instâncias antigas antes: `pkill optionterm`).
 - O warning `AdwTabBox reported min width -6` no startup é bug conhecido e
