@@ -23,9 +23,13 @@ jobs:
             libgtk-4-dev \
             libadwaita-1-dev \
             libvte-2.91-gtk4-dev \
+            libwebkitgtk-6.0-dev \
             libpango1.0-dev \
             libcairo2-dev \
-            pkg-config
+            pkg-config \
+            meson \
+            ninja-build \
+            libgdk-pixbuf-2.0-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,6 +41,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      - name: Build patched VTE (kitty graphics)
+        run: bash scripts/build-vte.sh
 
       - name: Build
         run: cargo build --release

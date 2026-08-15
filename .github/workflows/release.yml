@@ -34,6 +34,9 @@ jobs:
             libpango1.0-dev \
             libcairo2-dev \
             pkg-config \
+            meson \
+            ninja-build \
+            libgdk-pixbuf-2.0-dev \
             imagemagick \
             desktop-file-utils \
             file
@@ -43,6 +46,9 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Build patched VTE (kitty graphics)
+        run: bash scripts/build-vte.sh
 
       - name: Build release binary
         run: cargo build --release

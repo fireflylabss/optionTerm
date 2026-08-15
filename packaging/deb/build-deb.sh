@@ -42,6 +42,19 @@ root="$work/$PKG"
 install -Dm755 "$binary" "$root/usr/bin/optionterm"
 # The command was called option-term up to 0.1.6; keep it working.
 ln -s optionterm "$root/usr/bin/option-term"
+
+# Bundle the patched VTE (kitty graphics protocol) alongside the binary.
+# The binary's RUNPATH already searches $ORIGIN/../lib/optionterm, so it picks
+# this patched lib over the distro's stock libvte-2.91-gtk4.
+if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then
+  install -Dm755 "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" \
+    "$root/usr/lib/optionterm/libvte-2.91-gtk4.so.0"
+  ln -s libvte-2.91-gtk4.so.0 \
+    "$root/usr/lib/optionterm/libvte-2.91-gtk4.so"
+else
+  echo "warning: vte-dist not found — run scripts/build-vte.sh first" >&2
+fi
+
 install -Dm644 "$ROOT/packaging/$APP_ID.desktop" \
   "$root/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$ROOT/LICENSE" "$root/usr/share/doc/$PKG/copyright"

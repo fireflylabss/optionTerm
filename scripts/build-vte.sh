@@ -52,6 +52,10 @@ PKG_CONFIG_PATH = "$PREFIX/lib/pkgconfig"
 rustflags = [
     "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../../vte-dist/lib",
     "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../../../vte-dist/lib",
+    # Packaged layouts: .deb installs the patched lib under /usr/lib/optionterm,
+    # the AppImage bundles it in AppDir/usr/lib next to the binary.
+    "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../lib/optionterm",
+    "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../lib",
 ]
 EOF
 

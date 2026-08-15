@@ -59,6 +59,18 @@ appdir="$ROOT/target/AppDir"
 rm -rf "$appdir"
 install -Dm755 "$binary" "$appdir/usr/bin/optionterm"
 
+# Bundle the patched VTE (kitty graphics protocol). The binary's RUNPATH
+# searches $ORIGIN/../lib, so this patched lib takes precedence over any
+# libvte-2.91-gtk4 that linuxdeploy's GTK plugin would pull from the system.
+if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then
+  install -Dm755 "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" \
+    "$appdir/usr/lib/libvte-2.91-gtk4.so.0"
+  ln -sf libvte-2.91-gtk4.so.0 \
+    "$appdir/usr/lib/libvte-2.91-gtk4.so"
+else
+  echo "warning: vte-dist not found — run scripts/build-vte.sh first" >&2
+fi
+
 # The AppImage must not use the generic theme icon: give it a real one.
 desktop="$appdir/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$ROOT/packaging/$APP_ID.desktop" "$desktop"
@@ -86,5 +98,17 @@ PATH="$TOOLS:$PATH" "$TOOLS/linuxdeploy" \
   --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/$APP_ID.png" \
   --plugin gtk \
   --output appimage
+
+# linuxdeploy's GTK plugin may have pulled the *system* libvte into the
+# AppDir while bundling the GTK stack. Overwrite it with the patched build
+# (kitty graphics) so the packaged app really has inline-image support, then
+# repackage with appimagetool.
+if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then
+  install -Dm755 "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" \
+    "$appdir/usr/lib/libvte-2.91-gtk4.so.0"
+  ln -sf libvte-2.91-gtk4.so.0 \
+    "$appdir/usr/lib/libvte-2.91-gtk4.so"
+  PATH="$TOOLS:$PATH" "$TOOLS/appimagetool" "$appdir" "$OUTPUT"
+fi
 
 echo "built: $OUTPUT"
