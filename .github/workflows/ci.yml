@@ -29,6 +29,8 @@ jobs:
             pkg-config \
             meson \
             ninja-build \
+            gcc-14 \
+            g++-14 \
             libgdk-pixbuf-2.0-dev
 
       - name: Install Rust toolchain

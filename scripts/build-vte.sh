@@ -24,6 +24,13 @@ SRC="$BUILD_DIR/vte-${VTE_VERSION}"
 echo "==> applying kitty graphics patch"
 patch -p1 -d "$SRC" < "$PATCH"
 
+# VTE 0.84.1 uses std::out_ptr (C++23, needs GCC 14+/libstdc++14). Prefer
+# gcc-14/g++-14 when present (e.g. ubuntu-24.04 CI) and fall back to default.
+if command -v gcc-14 >/dev/null 2>&1 && command -v g++-14 >/dev/null 2>&1; then
+  echo "==> using gcc-14/g++-14"
+  export CC=gcc-14 CXX=g++-14
+fi
+
 echo "==> configuring meson"
 meson setup "$SRC/build" "$SRC" \
     --prefix="$PREFIX" \

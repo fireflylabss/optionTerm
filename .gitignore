@@ -7,3 +7,5 @@
 .env
 .env.*
 /dist/
+.commandcode/
+command-code-session-*.html
