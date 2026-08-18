@@ -29,6 +29,17 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.8-stable · 18/08/2026
+
+Fuller Kitty Graphics support: raw RGB/RGBA, deflate, chunked transfers and a bounded image cache. This version was made for GNOME with a stable release channel on 18/08/2026 (v0.2.8-stable).
+
+- Kitty Graphics now renders raw `f=24` (RGB) and `f=32` (RGBA) payloads, not just PNG — so `kitten icat`, `chafa` and `terminal-browser` draw unpacked pixels directly.
+- `o=z` zlib deflate payloads are decoded, bounded by the exact decompressed size for raw formats and a global cap for PNG.
+- Chunked transmissions (`m=1`) join their payloads before decoding, so a client may split its base64 anywhere.
+- Capability queries (`a=q`) now actually carry out the transmission and answer `Gi=<id>;OK` or `Gi=<id>;EINVAL:...` truthfully, instead of echoing a capability the terminal cannot honour.
+- Image memory is a bounded budget with least-recently-used eviction, so a buggy client cannot grow the image table without limit.
+- Reply quiet flags (`q=1`/`q=2`) are honoured per the spec. The parsing/decode/reply structure is informed by FoxTerminal's forked VTE (Christian Persch), credited in NOTICE.
+
 ## v0.2.7-stable · 18/08/2026
 
 Reliable Kitty Graphics capability detection for terminal-browser and related tools. This version was made for GNOME with a stable release channel on 18/08/2026 (v0.2.7-stable).
