@@ -843,7 +843,7 @@ mod tests {
                 Ok(0) | Err(_) => {}
                 Ok(n) => {
                     got.extend_from_slice(&buf[..n]);
-                    if got.windows(4).any(|w| w == b"a=OK") {
+                    if got.windows(4).any(|w| w == b"i=7;") {
                         break;
                     }
                 }
@@ -853,13 +853,11 @@ mod tests {
 
         let s = String::from_utf8_lossy(&got);
         assert!(
-            s.contains("a=OK"),
+            s.contains("i=7;OK"),
             "kitty query went unanswered; PTY output was: {s:?}"
         );
-        // The patched VTE echoes the image id and hardcodes q=1 (protocol says
-        // the reply must include the query id; the patch keeps it simple).
-        assert!(s.contains("i=7"), "reply must echo the image id: {s:?}");
-        assert!(s.contains("OK=1"), "reply must advertise OK=1: {s:?}");
+        // The patched VTE answers in the kitty spec format `Gi=<id>;OK`.
+        assert!(s.contains("Gi=7;OK"), "reply must be `Gi=7;OK`: {s:?}");
     }
 
     /// The patched VTE must accept t=f (transmit from a file path), the

@@ -545,7 +545,7 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
  #if __has_include(<sys/syslimits.h>)
  #include <sys/syslimits.h>
  #endif
-@@ -5393,6 +5396,251 @@
+@@ -5393,6 +5396,252 @@
  }
  
  void
@@ -655,12 +655,13 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +        auto const effective_id = id >= 0 ? id : resolve_id(number);
 +
 +        if (action == "q") {
-+                // Query: respond with our capabilities.
-+                // Format: a=OK,i=<image id>,q=<query id> and capability flags.
-+                // Send directly to the PTY (the terminal must answer even when
-+                // input is disabled, e.g. while the window is unfocused).
++                // Query: respond with our capabilities. Per the kitty spec the
++                // reply is `ESC _ Gi=<id>;OK ESC \` (or the error text after
++                // the `;` on failure). Send it directly to the PTY so the
++                // terminal answers even when input is disabled, e.g. while the
++                // window is unfocused.
 +                auto builder = vte::parser::u8SequenceBuilder{VTE_SEQ_APC};
-+                builder.format("G a=OK,i={},q=1,OK=1;", id >= 0 ? id : 0);
++                builder.format("Gi={};OK", id >= 0 ? id : 0);
 +                std::string reply_str;
 +                builder.to_string(reply_str, false, -1,
 +                                  vte::parser::u8SequenceBuilder::Introducer::DEFAULT,
