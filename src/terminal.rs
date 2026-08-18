@@ -829,7 +829,9 @@ mod tests {
         unsafe {
             enable_inline_images(&terminal);
         }
-        terminal.feed(b"\x1b_Ga=q,i=7,q=42\x1b\\");
+        // The probe terminal-browser (and other kitty clients) send: a query
+        // carrying a real 1x1 RGB payload, and expect the spec reply `Gi=<id>;OK`.
+        terminal.feed(b"\x1b_Gi=7,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\");
 
         // Pump the main context so VTE flushes m_outgoing into the PTY.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -887,6 +889,39 @@ mod tests {
              \x1b_Ga=d,d=N,I=1,q=1\x1b\\"
         );
         terminal.feed(seq.as_bytes());
+    }
+
+    /// The patched VTE must accept raw RGB (f=24) transmissions, not just PNG,
+    /// so clients that send unpacked pixels (kitty, chafa, terminal-browser)
+    /// render instead of being silently dropped.
+    #[gtk4::test]
+    fn kitty_graphics_accepts_raw_rgb() {
+        let terminal = VteTerminal::new();
+        unsafe {
+            enable_inline_images(&terminal);
+        }
+        // 2x1 RGBA-independent f=24 payload: 2 pixels * 3 channels = 6 bytes.
+        let pixels = base64_encode(&[0xff, 0x00, 0x00, 0x00, 0xff, 0x00]);
+        let seq = format!(
+            "\x1b_Ga=T,f=24,s=2,v=1,i=1,c=2,r=1,C=1,q=1;{pixels}\x1b\\\
+             \x1b_Ga=d,d=a,q=1\x1b\\"
+        );
+        terminal.feed(seq.as_bytes());
+    }
+
+    /// A query (a=q) must carry the transmission out and answer `Gi=<id>;OK`
+    /// only when the medium and format are actually usable — not echo a
+    /// capability name the terminal cannot honour.
+    #[gtk4::test]
+    fn kitty_graphics_query_reports_real_capability() {
+        let terminal = VteTerminal::new();
+        unsafe {
+            enable_inline_images(&terminal);
+        }
+        // Unknown medium (t=s shared memory) must be refused, not confirmed.
+        terminal.feed(b"\x1b_Gi=9,a=q,t=s,f=100,q=1\x1b\\");
+        // Unknown format must be refused too.
+        terminal.feed(b"\x1b_Gi=10,a=q,t=d,f=99,q=1\x1b\\");
     }
 
     fn base64_decode(s: &str) -> Vec<u8> {

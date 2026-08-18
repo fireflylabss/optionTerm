@@ -1,6 +1,6 @@
 diff -ru vanilla-vte/src/drawing-cairo.cc vte-0.84.1/src/drawing-cairo.cc
 --- vanilla-vte/src/drawing-cairo.cc	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/drawing-cairo.cc	2026-08-13 13:10:39.396126593 -0300
++++ vte-0.84.1/src/drawing-cairo.cc	2026-08-18 14:06:35.387302724 -0300
 @@ -19,6 +19,8 @@
  
  #include "config.h"
@@ -40,7 +40,7 @@ diff -ru vanilla-vte/src/drawing-cairo.cc vte-0.84.1/src/drawing-cairo.cc
  } // namespace vte
 diff -ru vanilla-vte/src/drawing-cairo.hh vte-0.84.1/src/drawing-cairo.hh
 --- vanilla-vte/src/drawing-cairo.hh	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/drawing-cairo.hh	2026-08-13 13:10:39.396210869 -0300
++++ vte-0.84.1/src/drawing-cairo.hh	2026-08-18 14:06:35.387374287 -0300
 @@ -81,6 +81,12 @@
                                            int height,
                                            vte::color::rgb const* color) const override;
@@ -56,7 +56,7 @@ diff -ru vanilla-vte/src/drawing-cairo.hh vte-0.84.1/src/drawing-cairo.hh
                         uint32_t attr,
 diff -ru vanilla-vte/src/drawing-context.hh vte-0.84.1/src/drawing-context.hh
 --- vanilla-vte/src/drawing-context.hh	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/drawing-context.hh	2026-08-13 13:10:39.396272253 -0300
++++ vte-0.84.1/src/drawing-context.hh	2026-08-18 14:06:35.387434089 -0300
 @@ -226,6 +226,13 @@
                                                    int height,
                                                    vte::color::rgb const* color) const = 0;
@@ -73,7 +73,7 @@ diff -ru vanilla-vte/src/drawing-context.hh vte-0.84.1/src/drawing-context.hh
                              double line_width,
 diff -ru vanilla-vte/src/drawing-gsk.cc vte-0.84.1/src/drawing-gsk.cc
 --- vanilla-vte/src/drawing-gsk.cc	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/drawing-gsk.cc	2026-08-13 13:10:39.396335290 -0300
++++ vte-0.84.1/src/drawing-gsk.cc	2026-08-18 14:06:35.387496244 -0300
 @@ -17,6 +17,8 @@
  
  #include "config.h"
@@ -107,7 +107,7 @@ diff -ru vanilla-vte/src/drawing-gsk.cc vte-0.84.1/src/drawing-gsk.cc
                               size_t rows)
 diff -ru vanilla-vte/src/drawing-gsk.hh vte-0.84.1/src/drawing-gsk.hh
 --- vanilla-vte/src/drawing-gsk.hh	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/drawing-gsk.hh	2026-08-13 13:10:39.396397917 -0300
++++ vte-0.84.1/src/drawing-gsk.hh	2026-08-18 14:06:35.387550175 -0300
 @@ -120,6 +120,12 @@
                                            int height,
                                            vte::color::rgb const* color) const override;
@@ -123,7 +123,7 @@ diff -ru vanilla-vte/src/drawing-gsk.hh vte-0.84.1/src/drawing-gsk.hh
                         uint32_t attr,
 diff -ru vanilla-vte/src/parser.hh vte-0.84.1/src/parser.hh
 --- vanilla-vte/src/parser.hh	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/parser.hh	2026-08-13 13:10:39.396509955 -0300
++++ vte-0.84.1/src/parser.hh	2026-08-18 14:06:35.387672733 -0300
 @@ -364,6 +364,7 @@
          DCS_INT,          /* intermediate DCS characters */
          DCS_PASS,         /* DCS data passthrough */
@@ -221,7 +221,7 @@ diff -ru vanilla-vte/src/parser.hh vte-0.84.1/src/parser.hh
                  /* g_assert(raw >= '0' && raw <= '9'); */
 diff -ru vanilla-vte/src/parser-seq.py vte-0.84.1/src/parser-seq.py
 --- vanilla-vte/src/parser-seq.py	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/parser-seq.py	2026-08-13 13:10:39.396668579 -0300
++++ vte-0.84.1/src/parser-seq.py	2026-08-18 14:06:35.387842950 -0300
 @@ -265,6 +265,8 @@
                  comment='identify revised registration'),
      seq_COMMAND('OSC',
@@ -233,7 +233,7 @@ diff -ru vanilla-vte/src/parser-seq.py vte-0.84.1/src/parser-seq.py
      seq_CONTROL('NUL', 0x00, flags=Flags.NOP, source=Source.ECMA16,
 diff -ru vanilla-vte/src/parser-string.hh vte-0.84.1/src/parser-string.hh
 --- vanilla-vte/src/parser-string.hh	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/parser-string.hh	2026-08-13 14:32:31.039728395 -0300
++++ vte-0.84.1/src/parser-string.hh	2026-08-18 14:06:35.387932517 -0300
 @@ -35,7 +35,10 @@
  
  #define VTE_SEQ_STRING_DEFAULT_CAPACITY (1 << 7) /* must be power of two */
@@ -248,7 +248,7 @@ diff -ru vanilla-vte/src/parser-string.hh vte-0.84.1/src/parser-string.hh
   * vte_seq_string_init:
 diff -ru vanilla-vte/src/vte/vteterminal.h vte-0.84.1/src/vte/vteterminal.h
 --- vanilla-vte/src/vte/vteterminal.h	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/vte/vteterminal.h	2026-08-13 13:10:39.396777422 -0300
++++ vte-0.84.1/src/vte/vteterminal.h	2026-08-18 14:06:35.388000213 -0300
 @@ -378,6 +378,12 @@
  _VTE_PUBLIC
  gboolean vte_terminal_get_allow_hyperlink(VteTerminal *terminal) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
@@ -264,7 +264,7 @@ diff -ru vanilla-vte/src/vte/vteterminal.h vte-0.84.1/src/vte/vteterminal.h
  gboolean vte_terminal_get_has_selection(VteTerminal *terminal) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
 diff -ru vanilla-vte/src/vte.cc vte-0.84.1/src/vte.cc
 --- vanilla-vte/src/vte.cc	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/vte.cc	2026-08-14 12:19:44.494822163 -0300
++++ vte-0.84.1/src/vte.cc	2026-08-18 14:06:35.388702261 -0300
 @@ -22,6 +22,7 @@
  #include <search.h>
  #include <stdlib.h>
@@ -424,9 +424,31 @@ diff -ru vanilla-vte/src/vte.cc vte-0.84.1/src/vte.cc
  }
  
  bool
+diff -ru vanilla-vte/src/vtedefines.hh vte-0.84.1/src/vtedefines.hh
+--- vanilla-vte/src/vtedefines.hh	2026-07-18 15:17:22.000000000 -0300
++++ vte-0.84.1/src/vtedefines.hh	2026-08-18 14:14:24.888643118 -0300
+@@ -142,3 +142,18 @@
+ #define VTE_FONT_WEIGHT_BOLDENING (PANGO_WEIGHT_BOLD - PANGO_WEIGHT_NORMAL)
+ 
+ #define VTE_MAX_TERMPROP_NUM (256)
++
++/* Kitty images are not bounded by a scanline format, so the only thing between
++ * a crafted s=/v= (or PNG header) and a huge allocation is an explicit cap.
++ * Generous enough for a photo on a HiDPI display, small enough that
++ * width * height * 4 cannot overflow.
++ */
++#define VTE_KITTY_MAX_WIDTH (16384)
++#define VTE_KITTY_MAX_HEIGHT (16384)
++
++/* Cap on the pixel data held for kitty images, and on one image's encoded
++ * payload. Placements are bounded by the ring; this bounds the images they
++ * refer to, which the ring cannot see.
++ */
++#define VTE_KITTY_MEMORY_MAX (256u << 20)
++#define VTE_KITTY_IMAGE_MAX (256u << 20)
 diff -ru vanilla-vte/src/vtegtk.cc vte-0.84.1/src/vtegtk.cc
 --- vanilla-vte/src/vtegtk.cc	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/vtegtk.cc	2026-08-13 13:10:39.398134231 -0300
++++ vte-0.84.1/src/vtegtk.cc	2026-08-18 14:06:35.389511919 -0300
 @@ -5372,6 +5372,54 @@
  }
  
@@ -484,8 +506,8 @@ diff -ru vanilla-vte/src/vtegtk.cc vte-0.84.1/src/vtegtk.cc
   *
 diff -ru vanilla-vte/src/vteinternal.hh vte-0.84.1/src/vteinternal.hh
 --- vanilla-vte/src/vteinternal.hh	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/vteinternal.hh	2026-08-14 10:45:21.307151607 -0300
-@@ -563,6 +563,38 @@
++++ vte-0.84.1/src/vteinternal.hh	2026-08-18 14:14:07.869950834 -0300
+@@ -563,6 +563,54 @@
          bool m_input_enabled{true};
          time_t m_last_keypress_time;
  
@@ -499,6 +521,10 @@ diff -ru vanilla-vte/src/vteinternal.hh vte-0.84.1/src/vteinternal.hh
 +                int height;  /* pixels */
 +        };
 +        std::vector<KittyImage> m_kitty_images;
++        size_t m_kitty_images_memory_used{0};
++        /* Partial state of an in-flight chunked (m=1) transmission. */
++        std::string m_kitty_chunk_keys{};
++        std::string m_kitty_chunk_payload{};
 +        struct KittyPlacement {
 +                int image_id;
 +                int placement_id;    /* p= */
@@ -520,11 +546,23 @@ diff -ru vanilla-vte/src/vteinternal.hh vte-0.84.1/src/vteinternal.hh
 +        void delete_kitty_placements_by_number(int number) noexcept;
 +        void clear_kitty_placements() noexcept;
 +        void draw_kitty_placements() noexcept;
++        void kitty_graphics_command(vte::parser::Sequence const& seq,
++                                    std::string_view keys,
++                                    std::string_view encoded) noexcept;
++        void kitty_graphics_reply(std::string_view keys,
++                                  std::string const& message) noexcept;
++        static GdkPixbuf* kitty_pixbuf(std::string&& data,
++                                       int format,
++                                       int width,
++                                       int height,
++                                       bool from_file) noexcept;
++        static std::string kitty_inflate(std::string&& in, size_t expected) noexcept;
++        bool kitty_gc(size_t incoming) noexcept;
 +
          MouseTrackingMode m_mouse_tracking_mode{MouseTrackingMode::eNONE};
          guint m_mouse_pressed_buttons;      /* bits 0..14 resp. for buttons 1..15 */
          guint m_mouse_handled_buttons;      /* similar bitmap for buttons we handled ourselves */
-@@ -1584,6 +1616,7 @@
+@@ -1584,6 +1632,7 @@
          auto text_blink_mode() const noexcept { return m_text_blink_mode; }
          bool set_allow_bold(bool setting);
          bool set_allow_hyperlink(bool setting);
@@ -534,8 +572,8 @@ diff -ru vanilla-vte/src/vteinternal.hh vte-0.84.1/src/vteinternal.hh
          bool set_background_alpha(double alpha);
 diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 --- vanilla-vte/src/vteseq.cc	2026-07-18 15:17:22.000000000 -0300
-+++ vte-0.84.1/src/vteseq.cc	2026-08-14 13:33:22.976692592 -0300
-@@ -23,6 +23,9 @@
++++ vte-0.84.1/src/vteseq.cc	2026-08-18 14:20:45.575702770 -0300
+@@ -23,11 +23,15 @@
  #include <stdlib.h>
  #include <string.h>
  #include <limits.h>
@@ -545,7 +583,13 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
  #if __has_include(<sys/syslimits.h>)
  #include <sys/syslimits.h>
  #endif
-@@ -5393,6 +5396,252 @@
+ 
+ #include <glib.h>
++#include <gio/gio.h>
+ 
+ #include <vte/vte.h>
+ #include "vteinternal.hh"
+@@ -5393,6 +5397,546 @@
  }
  
  void
@@ -561,6 +605,14 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +         *
 +         * References: kitty graphics protocol
 +         *   https://sw.kovidgoyal.net/kitty/graphics-protocol/
++         *
++         * The parsing/decode/reply structure here was written independently
++         * for optionTerm but is informed by the protocol handling in
++         * FoxTerminal's forked VTE (https://gitlab.com/OrangeFox/misc/
++         * foxterminal-vte), by Christian Persch — notably the ideas that a
++         * query should carry out the transmission and report what happened,
++         * that chunked payloads should be joined before decoding, and that
++         * image memory should be a bounded, evicting budget.
 +         */
 +
 +        if (!m_enable_inline_images)
@@ -591,13 +643,127 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +                ? std::string_view{}
 +                : std::string_view{str}.substr(params_end + 1);
 +
-+        // Action defaults to transmit ("t"); the other actions are:
-+        //   a=T  transmit and display
-+        //   a=p  put (display) a previously transmitted image
-+        //   a=d  delete
-+        //   a=q  query support
++        // Chunked transmission (m=1): the first chunk carries the keys, the
++        // rest is raw payload; the m=0 chunk is the last. Join the chunks
++        // while still base64-encoded, so a client may split its base64
++        // anywhere without losing bytes at the seam.
++        auto const more = [&]() -> long {
++                size_t pos = 0;
++                while (pos <= params.size()) {
++                        auto const comma = params.find(',', pos);
++                        auto const kv = comma == std::string_view::npos
++                                ? params.substr(pos)
++                                : params.substr(pos, comma - pos);
++                        if (auto const eq = kv.find('='); eq != std::string_view::npos) {
++                                auto const k = kv.substr(0, eq);
++                                auto const v = kv.substr(eq + 1);
++                                if (k == "m")
++                                        return std::strtol(std::string{v}.c_str(), nullptr, 0);
++                        }
++                        if (comma == std::string_view::npos)
++                                break;
++                        pos = comma + 1;
++                }
++                return 0L;
++        }();
++
++        if (more == 1) {
++                if (m_kitty_chunk_keys.empty())
++                        m_kitty_chunk_keys = std::string{params};
++                if (m_kitty_chunk_payload.size() + data.size() > VTE_KITTY_IMAGE_MAX) {
++                        // Runaway transmission: refuse it rather than grow
++                        // forever, and say so — silence would leave the
++                        // client waiting on an image that never arrives.
++                        auto const all_keys = m_kitty_chunk_keys;
++                        m_kitty_chunk_keys.clear();
++                        m_kitty_chunk_payload.clear();
++                        kitty_graphics_reply(all_keys, "EINVAL:transmission too large");
++                        return;
++                }
++                m_kitty_chunk_payload += data;
++                return;
++        }
++
++        if (!m_kitty_chunk_keys.empty()) {
++                auto const all_keys = m_kitty_chunk_keys;
++                auto const all_data = m_kitty_chunk_payload + std::string{data};
++                m_kitty_chunk_keys.clear();
++                m_kitty_chunk_payload.clear();
++                kitty_graphics_command(seq, all_keys, all_data);
++                return;
++        }
++
++        kitty_graphics_command(seq, params, data);
++}
++catch (...)
++{
++        /* Never let the terminal die because of malformed image data. */
++}
++
++// Send a kitty graphics protocol reply to the child. The message is either
++// "OK" or an error such as "EINVAL:unsupported format". q=1 suppresses the
++// success reply, q=2 suppresses failures too, and a command with no image id
++// has nothing a reply could name, so it stays silent.
++void
++Terminal::kitty_graphics_reply(std::string_view keys,
++                               std::string const& message) noexcept
++{
++        auto reply_id = 0;
++        auto quiet = 0;
++        {
++                size_t pos = 0;
++                while (pos <= keys.size()) {
++                        auto const comma = keys.find(',', pos);
++                        auto const kv = comma == std::string_view::npos
++                                ? keys.substr(pos)
++                                : keys.substr(pos, comma - pos);
++                        auto const eq = kv.find('=');
++                        if (eq != std::string_view::npos) {
++                                auto const k = kv.substr(0, eq);
++                                auto const v = kv.substr(eq + 1);
++                                if (k == "i")
++                                        reply_id = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "q")
++                                        quiet = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                        }
++                        if (comma == std::string_view::npos)
++                                break;
++                        pos = comma + 1;
++                }
++        }
++
++        auto const ok = message == "OK";
++        if (reply_id == 0 || quiet >= 2 || (ok && quiet >= 1))
++                return;
++
++        // Per the kitty spec the reply is `ESC _ Gi=<id>;{OK|error} ESC \`.
++        // Written straight to the PTY so the terminal answers even while the
++        // window is unfocused / input is disabled.
++        auto builder = vte::parser::u8SequenceBuilder{VTE_SEQ_APC};
++        builder.format("Gi={};{}", reply_id, message);
++        std::string reply_str;
++        builder.to_string(reply_str, false, -1,
++                          vte::parser::u8SequenceBuilder::Introducer::DEFAULT,
++                          vte::parser::u8SequenceBuilder::ST::DEFAULT);
++        _vte_byte_array_append(m_outgoing, reply_str.data(), reply_str.size());
++        connect_pty_write();
++}
++
++// Handle one kitty graphics command (after any chunk reassembly). This is the
++// workhorse: it transmits, decodes and places images, answers queries by
++// actually carrying the transmission out, and reports what happened.
++void
++Terminal::kitty_graphics_command(vte::parser::Sequence const& seq,
++                                 std::string_view keys,
++                                 std::string_view encoded) noexcept
++try
++{
++        (void)seq;
++
++        // Re-parse the keys the same way the entry point does; commands handed
++        // a reassembled chunk arrive here with the first chunk's keys.
 +        auto action = std::string_view{"t"};
-+        auto f = std::string_view{};
++        auto f = -1;
 +        auto t_medium = std::string_view{"d"};
 +        auto id = -1;
 +        auto number = -1;
@@ -607,114 +773,142 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +        auto y = 0;
 +        auto cols = 0;
 +        auto rows = 0;
++        auto width = 0;
++        auto height = 0;
++        auto compression = std::string_view{" "};
 +        auto del_target = std::string_view{"a"};
 +        auto cursor_move = 0;
 +
-+        auto const keyvals = params;
-+        size_t pos = 0;
-+        while (pos <= keyvals.size()) {
-+                auto const comma = keyvals.find(',', pos);
-+                auto const kv = comma == std::string_view::npos
-+                        ? keyvals.substr(pos)
-+                        : keyvals.substr(pos, comma - pos);
-+                auto const eq = kv.find('=');
-+                if (eq != std::string_view::npos) {
-+                        auto const k = kv.substr(0, eq);
-+                        auto const v = kv.substr(eq + 1);
-+                        if (k == "a") action = v;
-+                        else if (k == "f") f = v;
-+                        else if (k == "t") t_medium = v;
-+                        else if (k == "i") id = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "I") number = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "p") placement_id = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "z") z = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "x") x = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "y") y = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "c") cols = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "r") rows = std::strtol(std::string{v}.c_str(), nullptr, 0);
-+                        else if (k == "d") del_target = v;
-+                        else if (k == "C") cursor_move = std::strtol(std::string{v}.c_str(), nullptr, 0);
++        {
++                size_t pos = 0;
++                while (pos <= keys.size()) {
++                        auto const comma = keys.find(',', pos);
++                        auto const kv = comma == std::string_view::npos
++                                ? keys.substr(pos)
++                                : keys.substr(pos, comma - pos);
++                        auto const eq = kv.find('=');
++                        if (eq != std::string_view::npos) {
++                                auto const k = kv.substr(0, eq);
++                                auto const v = kv.substr(eq + 1);
++                                if (k == "a") action = v;
++                                else if (k == "f") f = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "t") t_medium = v;
++                                else if (k == "i") id = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "I") number = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "p") placement_id = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "z") z = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "x") x = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "y") y = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "c") cols = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "r") rows = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "s") width = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "v") height = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                                else if (k == "o") compression = v;
++                                else if (k == "d") del_target = v;
++                                else if (k == "C") cursor_move = std::strtol(std::string{v}.c_str(), nullptr, 0);
++                        }
++                        if (comma == std::string_view::npos)
++                                break;
++                        pos = comma + 1;
 +                }
-+                if (comma == std::string_view::npos)
-+                        break;
-+                pos = comma + 1;
 +        }
 +
 +        // Resolve the image id: an explicit i= wins, otherwise I= (image
 +        // number) refers to the newest image carrying that number.
-+        auto resolve_id = [&](int number) -> int {
-+                if (number < 0)
++        auto resolve_id = [&](int num) -> int {
++                if (num < 0)
 +                        return -1;
 +                int matched = -1;
 +                for (auto const& img : m_kitty_images) {
-+                        if (img.number == number)
++                        if (img.number == num)
 +                                matched = img.id;
 +                }
 +                return matched;
 +        };
 +        auto const effective_id = id >= 0 ? id : resolve_id(number);
 +
-+        if (action == "q") {
-+                // Query: respond with our capabilities. Per the kitty spec the
-+                // reply is `ESC _ Gi=<id>;OK ESC \` (or the error text after
-+                // the `;` on failure). Send it directly to the PTY so the
-+                // terminal answers even when input is disabled, e.g. while the
-+                // window is unfocused.
-+                auto builder = vte::parser::u8SequenceBuilder{VTE_SEQ_APC};
-+                builder.format("Gi={};OK", id >= 0 ? id : 0);
-+                std::string reply_str;
-+                builder.to_string(reply_str, false, -1,
-+                                  vte::parser::u8SequenceBuilder::Introducer::DEFAULT,
-+                                  vte::parser::u8SequenceBuilder::ST::DEFAULT);
-+                _vte_byte_array_append(m_outgoing, reply_str.data(), reply_str.size());
-+                connect_pty_write();
-+                return;
++        // A query answers by carrying out the whole transmission and reporting
++        // what really happened (and keeping nothing), so a client learns the
++        // truth about whether a medium/format works rather than a capability
++        // name we might not be able to reach the data through.
++        auto const query_only = action == "q";
++
++        auto ok = true;
++        auto message = std::string{"OK"};
++
++        switch (action[0]) {
++        case 'd':
++                if (del_target == "a" || del_target == "A") {
++                        clear_kitty_placements();
++                } else if (del_target == "n" || del_target == "N") {
++                        if (number >= 0)
++                                delete_kitty_placements_by_number(number);
++                        else if (effective_id >= 0)
++                                delete_kitty_placement(effective_id, placement_id);
++                } else if (effective_id >= 0) {
++                        delete_kitty_placement(effective_id, placement_id);
++                }
++                break;
++
++        case 'p': {
++                auto const image_id = effective_id;
++                if (image_id < 0 || cols <= 0 || rows <= 0) {
++                        ok = false;
++                        message = "ENOENT:no such image";
++                        break;
++                }
++                auto const row = m_screen->cursor.row + y;
++                auto const col = m_screen->cursor.col + x;
++                add_kitty_placement(image_id, placement_id, row, col, cols, rows, z);
++                break;
 +        }
 +
-+        // Transmit pixel data. Only PNG (f=100) is supported; the medium can
-+        // be direct data (t=d) or a file path (t=f), matching the kitty spec.
-+        if (action == "t" || action == "T") {
-+                if (f != "100" || data.empty())
-+                        return;
++        case 'q':
++        case 't':
++        case 'T': {
++                if ((t_medium != "d" && t_medium != "f") || encoded.empty()) {
++                        ok = false;
++                        message = "EINVAL:unsupported transmission medium";
++                        break;
++                }
 +
 +                gsize decoded_len = 0;
-+                auto const decoded = g_base64_decode(data.data(), &decoded_len);
-+                GdkPixbuf* pixbuf = nullptr;
-+                if (t_medium == "f") {
-+                        // t=f: payload is a base64 file path. Only regular
-+                        // files are allowed (the spec forbids devices, and
-+                        // reading /proc, /sys, /dev is refused for safety).
-+                        std::string path(reinterpret_cast<char const*>(decoded), decoded_len);
-+                        g_free(decoded);
-+                        if (path.empty())
-+                                return;
-+                        struct stat st {};
-+                        if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-+                                return;
-+                        if (g_str_has_prefix(path.c_str(), "/proc")
-+                            || g_str_has_prefix(path.c_str(), "/sys")
-+                            || g_str_has_prefix(path.c_str(), "/dev"))
-+                                return;
-+                        GError* error = nullptr;
-+                        pixbuf = gdk_pixbuf_new_from_file(path.c_str(), &error);
-+                        if (error != nullptr) {
-+                                g_error_free(error);
-+                                return;
-+                        }
-+                } else {
-+                        // t=d: payload is the image data itself.
-+                        auto const stream = g_memory_input_stream_new_from_data
-+                                (decoded, decoded_len, g_free);
-+                        GError* error = nullptr;
-+                        pixbuf = gdk_pixbuf_new_from_stream(stream, nullptr, &error);
-+                        g_object_unref(stream);
-+                        if (error != nullptr) {
-+                                g_error_free(error);
-+                                return;
++                auto decoded = g_base64_decode(std::string{encoded}.c_str(), &decoded_len);
++                if (decoded == nullptr || decoded_len == 0) {
++                        ok = false;
++                        message = "EINVAL:could not decode base64";
++                        break;
++                }
++
++                // The pixel payload, once any o=z deflate is reversed.
++                std::string pixels(reinterpret_cast<char const*>(decoded), decoded_len);
++                g_free(decoded);
++
++                if (compression == "z") {
++                        pixels = kitty_inflate(std::move(pixels),
++                                               (f == 100) ? size_t{0}
++                                                          : size_t(width) * size_t(height) * size_t(f == 24 ? 3 : 4));
++                        if (pixels.empty()) {
++                                ok = false;
++                                message = "EINVAL:could not decompress";
++                                break;
 +                        }
 +                }
-+                if (pixbuf == nullptr)
-+                        return;
++
++                GdkPixbuf* pixbuf = kitty_pixbuf(std::move(pixels), f, width, height,
++                                                 t_medium == "f");
++                if (pixbuf == nullptr) {
++                        ok = false;
++                        message = "EINVAL:could not decode image";
++                        break;
++                }
++
++                // Everything a query can fail at has now succeeded; it keeps
++                // nothing (no image, no id, no placement).
++                if (query_only) {
++                        g_object_unref(pixbuf);
++                        break;
++                }
 +
 +                // Assign a concrete image id if the client used a number (I=).
 +                int image_id = id;
@@ -722,6 +916,15 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +                        image_id = 1;
 +                        for (auto const& img : m_kitty_images)
 +                                image_id = std::max(image_id, img.id + 1);
++                }
++
++                auto const pixels_size = size_t(gdk_pixbuf_get_rowstride(pixbuf))
++                        * size_t(gdk_pixbuf_get_height(pixbuf));
++                if (!kitty_gc(pixels_size)) {
++                        g_object_unref(pixbuf);
++                        ok = false;
++                        message = "ENOSPC:not enough image memory";
++                        break;
 +                }
 +
 +                // Replace or add the image with this id.
@@ -745,9 +948,9 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +                                gdk_pixbuf_get_height(pixbuf),
 +                        });
 +                }
++                m_kitty_images_memory_used += pixels_size;
 +
 +                if (action == "T" && cols > 0 && rows > 0) {
-+                        // Transmit-and-display in one command.
 +                        auto const row = m_screen->cursor.row + y;
 +                        auto const col = m_screen->cursor.col + x;
 +                        add_kitty_placement(image_id, placement_id, row, col, cols, rows, z);
@@ -759,39 +962,174 @@ diff -ru vanilla-vte/src/vteseq.cc vte-0.84.1/src/vteseq.cc
 +                                }
 +                        }
 +                }
-+                return;
++                break;
 +        }
 +
-+        if (action == "p") {
-+                // Put: display a previously transmitted image.
-+                auto const image_id = effective_id;
-+                if (image_id < 0 || cols <= 0 || rows <= 0)
-+                        return;
-+                auto const row = m_screen->cursor.row + y;
-+                auto const col = m_screen->cursor.col + x;
-+                add_kitty_placement(image_id, placement_id, row, col, cols, rows, z);
-+                return;
++        default:
++                ok = false;
++                message = "EINVAL:unknown action";
++                break;
 +        }
 +
-+        if (action == "d") {
-+                // Delete. d=a deletes all visible placements; d=i deletes by
-+                // image id; d=n / d=N delete the newest image with a number.
-+                if (del_target == "a" || del_target == "A") {
-+                        clear_kitty_placements();
-+                } else if (del_target == "n" || del_target == "N") {
-+                        if (number >= 0)
-+                                delete_kitty_placements_by_number(number);
-+                        else if (effective_id >= 0)
-+                                delete_kitty_placement(effective_id, placement_id);
-+                } else if (effective_id >= 0) {
-+                        delete_kitty_placement(effective_id, placement_id);
-+                }
-+                return;
-+        }
++        kitty_graphics_reply(keys, ok ? "OK" : message);
 +}
 +catch (...)
 +{
 +        /* Never let the terminal die because of malformed image data. */
++}
++
++// Decode a kitty pixel payload into a GdkPixbuf. PNG (f=100) is decoded by
++// gdk-pixbuf; the raw formats f=24 (RGB) and f=32 (RGBA) are packed directly.
++// When @from_file is set the payload is a filesystem path, otherwise it is
++// in-band pixel data.
++GdkPixbuf*
++Terminal::kitty_pixbuf(std::string&& data,
++                       int format,
++                       int width,
++                       int height,
++                       bool from_file) noexcept
++try
++{
++        if (from_file) {
++                if (data.empty())
++                        return nullptr;
++                struct stat st {};
++                if (stat(data.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
++                        return nullptr;
++                if (g_str_has_prefix(data.c_str(), "/proc")
++                    || g_str_has_prefix(data.c_str(), "/sys")
++                    || g_str_has_prefix(data.c_str(), "/dev"))
++                        return nullptr;
++                GError* error = nullptr;
++                auto pixbuf = gdk_pixbuf_new_from_file(data.c_str(), &error);
++                if (error != nullptr)
++                        g_error_free(error);
++                return pixbuf;
++        }
++
++        if (format == 100) {
++                auto const stream = g_memory_input_stream_new_from_data
++                        (g_memdup2(data.data(), data.size()), gssize(data.size()), g_free);
++                GError* error = nullptr;
++                auto pixbuf = gdk_pixbuf_new_from_stream(stream, nullptr, &error);
++                g_object_unref(stream);
++                if (error != nullptr)
++                        g_error_free(error);
++                return pixbuf;
++        }
++
++        if (format != 24 && format != 32)
++                return nullptr;
++
++        if (width <= 0 || height <= 0 || width > VTE_KITTY_MAX_WIDTH || height > VTE_KITTY_MAX_HEIGHT)
++                return nullptr;
++
++        auto const channels = (format == 24) ? 3 : 4;
++        if (data.size() < size_t(width) * size_t(height) * size_t(channels))
++                return nullptr;
++
++        // gdk_pixbuf_new_from_data takes ownership of the buffer, so copy the
++        // string's bytes into a g_malloc'd block (the string is a local that
++        // will go away when we return).
++        auto owned = static_cast<guchar*>(g_memdup2(data.data(), data.size()));
++        return gdk_pixbuf_new_from_data(
++                owned,
++                GDK_COLORSPACE_RGB,
++                format == 32,
++                8,
++                width,
++                height,
++                width * channels,
++                [](guchar* pixels, void*) { g_free(pixels); },
++                nullptr);
++}
++catch (...)
++{
++        return nullptr;
++}
++
++// Reverse a zlib stream (o=z). Bounded by @expected when the format fixes the
++// decompressed size, and by VTE_KITTY_IMAGE_MAX when it does not (PNG).
++std::string
++Terminal::kitty_inflate(std::string&& in, size_t expected) noexcept
++try
++{
++        auto const limit = expected ? expected : size_t(VTE_KITTY_IMAGE_MAX);
++
++        auto decompressor = vte::glib::take_ref(
++                G_CONVERTER(g_zlib_decompressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB)));
++        auto out = std::string{};
++        out.resize(expected ? limit
++                            : std::min(limit, std::max(in.size() * 4 + 1024, size_t(64u << 10))));
++
++        auto consumed = gsize{0};
++        auto produced = gsize{0};
++
++        for (;;) {
++                auto read = gsize{0}, written = gsize{0};
++                auto err = vte::glib::Error{};
++                auto const rv = g_converter_convert(decompressor.get(),
++                                                    in.data() + consumed, in.size() - consumed,
++                                                    out.data() + produced, out.size() - produced,
++                                                    G_CONVERTER_INPUT_AT_END,
++                                                    &read, &written,
++                                                    err);
++                consumed += read;
++                produced += written;
++
++                if (rv == G_CONVERTER_FINISHED)
++                        break;
++
++                if (rv == G_CONVERTER_CONVERTED && produced < out.size())
++                        continue;
++
++                if (rv == G_CONVERTER_CONVERTED ||
++                    err.matches(G_IO_ERROR, G_IO_ERROR_NO_SPACE)) {
++                        if (out.size() >= limit)
++                                return {};
++                        out.resize(std::min(limit, out.size() * 2));
++                        continue;
++                }
++
++                return {};
++        }
++
++        out.resize(produced);
++        return out;
++}
++catch (...)
++{
++        return {};
++}
++
++// Make room for an incoming image under VTE_KITTY_MEMORY_MAX, evicting the
++// least-recently-used images first. Returns false when the image is too large
++// to ever fit even with the table empty.
++bool
++Terminal::kitty_gc(size_t incoming) noexcept
++{
++        if (incoming > VTE_KITTY_MEMORY_MAX)
++                return false;
++
++        while (m_kitty_images_memory_used + incoming > VTE_KITTY_MEMORY_MAX
++               && !m_kitty_images.empty()) {
++                // Drop the oldest image (images are kept in insertion order).
++                auto victim = m_kitty_images.begin();
++                auto victim_id = victim->id;
++                auto victim_size = size_t(gdk_pixbuf_get_rowstride(victim->pixbuf))
++                        * size_t(gdk_pixbuf_get_height(victim->pixbuf));
++                m_kitty_images_memory_used -= victim_size;
++                g_object_unref(victim->pixbuf);
++                m_kitty_images.erase(victim);
++                // Its placements are now dangling; clear them so nothing draws
++                // a freed pixbuf.
++                m_kitty_placements.erase(
++                        std::remove_if(m_kitty_placements.begin(),
++                                       m_kitty_placements.end(),
++                                       [victim_id](auto const& p) { return p.image_id == victim_id; }),
++                        m_kitty_placements.end());
++        }
++        return true;
 +}
 +
 +void
