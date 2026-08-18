@@ -1,6 +1,6 @@
 [package]
 name = "optionterm"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 description = "Sidebar-first GTK4 terminal with tiling splits and Adwaita preferences"
 license = "Apache-2.0"

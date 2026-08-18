@@ -29,6 +29,13 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.7-stable · 18/08/2026
+
+Reliable Kitty Graphics capability detection for terminal-browser and related tools. This version was made for GNOME with a stable release channel on 18/08/2026 (v0.2.7-stable).
+
+- Kitty Graphics capability queries (`a=q`) now reply in the exact `Gi=<id>;OK` form required by clients, so `terminal-browser` can recognise optionTerm as an image-capable terminal.
+- The AUR source checksum was refreshed to match the published `v0.2.6` archive, making local package rebuilds reproducible again.
+
 ## v0.2.6-stable · 14/08/2026
 
 Kitty graphics protocol support through a patched VTE, with file-based image transfer. This version was made for GNOME with a stable release channel on 14/08/2026 (v0.2.6-stable).
