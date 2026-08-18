@@ -744,15 +744,6 @@ pub fn detect_link(word: &str, pwd: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// GTK can only be initialized once per process; the kitty tests share
-    /// the same harness, so initialize lazily on the first test that runs.
-    fn ensure_gtk_init() -> bool {
-        if gtk4::is_initialized() {
-            return true;
-        }
-        gtk4::init().is_ok()
-    }
-
     #[test]
     fn pwd_to_path_strips_file_uri() {
         assert_eq!(pwd_to_path("file://host/home/me"), "/home/me");
@@ -780,13 +771,8 @@ mod tests {
 
     /// The kitty graphics protocol must be enabled by default on the patched
     /// VTE, and the APC handler must accept (not crash on) a query sequence.
-    #[test]
+    #[gtk4::test]
     fn kitty_graphics_handler_accepts_query() {
-        // GTK needs an init; offscreen avoids needing a real display.
-        if !ensure_gtk_init() {
-            eprintln!("skipping: no display available");
-            return;
-        }
         let terminal = VteTerminal::new();
         unsafe {
             enable_inline_images(&terminal);
@@ -800,17 +786,12 @@ mod tests {
 
     /// End-to-end: the patched VTE answers the kitty query (a=q) with an
     /// "a=OK" response written to the PTY master.
-    #[test]
+    #[gtk4::test]
     fn kitty_graphics_answers_query_on_pty() {
         use std::{
             io::Read,
             os::fd::{AsRawFd, FromRawFd},
         };
-
-        if !ensure_gtk_init() {
-            eprintln!("skipping: no display available");
-            return;
-        }
 
         let winsize = nix::pty::Winsize {
             ws_row: 24,
@@ -884,13 +865,8 @@ mod tests {
     /// The patched VTE must accept t=f (transmit from a file path), the
     /// medium optionFiles uses for previews. The APC handler runs without a
     /// PTY here; the query-on-pty test above proves the wire path end to end.
-    #[test]
+    #[gtk4::test]
     fn kitty_graphics_transmits_from_file() {
-        if !ensure_gtk_init() {
-            eprintln!("skipping: no display available");
-            return;
-        }
-
         // A real PNG to transmit: a 1x1 pixel, fixed base64.
         let png_path = std::env::temp_dir().join("optionterm-kitty-tf-test.png");
         let one_px_png = base64_decode(
