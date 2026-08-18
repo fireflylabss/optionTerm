@@ -65,6 +65,13 @@ package() {
   install -Dm755 "target/release/optionterm" "$pkgdir/usr/bin/optionterm"
   # The command was called option-term up to 0.1.6; keep it working.
   ln -s optionterm "$pkgdir/usr/bin/option-term"
+  # Bundle the patched VTE (kitty graphics protocol). The binary's RUNPATH
+  # searches $ORIGIN/../lib/optionterm, so this patched lib takes precedence
+  # over the distro's stock libvte-2.91-gtk4.
+  install -Dm755 "vte-dist/lib/libvte-2.91-gtk4.so.0" \
+    "$pkgdir/usr/lib/optionterm/libvte-2.91-gtk4.so.0"
+  ln -s libvte-2.91-gtk4.so.0 \
+    "$pkgdir/usr/lib/optionterm/libvte-2.91-gtk4.so"
   install -Dm644 "packaging/io.option.terminal.desktop" \
     "$pkgdir/usr/share/applications/io.option.terminal.desktop"
   install -Dm644 'LICENSE' "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

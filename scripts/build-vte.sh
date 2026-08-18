@@ -51,19 +51,9 @@ cat > "$ROOT/.cargo/config.toml" <<EOF
 # instead of the system vte4. Run scripts/build-vte.sh first to produce
 # vte-dist/. The absolute path matches that script's PREFIX.
 PKG_CONFIG_PATH = "$PREFIX/lib/pkgconfig"
-
-[build]
-# Make the binary find the patched libvte in runtime (no LD_LIBRARY_PATH needed).
-# The release binary lives in target/release/, test binaries in target/release/deps/,
-# so cover both with \$ORIGIN hops back to the project root.
-rustflags = [
-    "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../../vte-dist/lib",
-    "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../../../vte-dist/lib",
-    # Packaged layouts: .deb installs the patched lib under /usr/lib/optionterm,
-    # the AppImage bundles it in AppDir/usr/lib next to the binary.
-    "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../lib/optionterm",
-    "-C", "link-arg=-Wl,-rpath,\$ORIGIN/../lib",
-]
+# The rpath entries live in build.rs (cargo:rustc-link-arg) so they survive
+# makepkg/paru, which set RUSTFLAGS and would otherwise clobber a
+# [build] rustflags key here.
 EOF
 
 echo "==> done. Patched VTE installed at ${PREFIX}"

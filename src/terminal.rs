@@ -851,7 +851,7 @@ mod tests {
         terminal.feed(b"\x1b_Ga=q,i=7,q=42\x1b\\");
 
         // Pump the main context so VTE flushes m_outgoing into the PTY.
-        let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut buf = [0u8; 512];
         let mut got = Vec::new();
         while std::time::Instant::now() < deadline {
@@ -916,8 +916,6 @@ mod tests {
     }
 
     fn base64_decode(s: &str) -> Vec<u8> {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = Vec::with_capacity(s.len() / 4 * 3);
         let mut buf = [0u8; 4];
         let mut n = 0usize;
