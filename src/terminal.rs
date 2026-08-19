@@ -772,10 +772,7 @@ mod tests {
     /// "a=OK" response written to the PTY master.
     #[gtk4::test]
     fn kitty_graphics_answers_query_on_pty() {
-        use std::{
-            io::Read,
-            os::fd::{AsRawFd, FromRawFd},
-        };
+        use std::{io::Read, os::fd::IntoRawFd};
 
         let winsize = nix::pty::Winsize {
             ws_row: 24,
@@ -783,14 +780,17 @@ mod tests {
             ws_xpixel: 640,
             ws_ypixel: 384,
         };
-        let (master, _child) = match unsafe { nix::pty::forkpty(&winsize, None) } {
-            Ok(nix::pty::ForkptyResult::Parent { master, child }) => (master, child),
-            Ok(nix::pty::ForkptyResult::Child) => std::process::exit(0),
-            Err(e) => panic!("forkpty failed: {e}"),
-        };
-
-        // Own the master fd: VTE will write the APC reply into it.
-        let mut master = unsafe { std::fs::File::from_raw_fd(master.as_raw_fd()) };
+        let nix::pty::OpenptyResult { master, slave } =
+            nix::pty::openpty(&winsize, None).expect("openpty failed");
+        let mut termios = nix::sys::termios::tcgetattr(&slave).expect("tcgetattr failed");
+        nix::sys::termios::cfmakeraw(&mut termios);
+        nix::sys::termios::tcsetattr(&slave, nix::sys::termios::SetArg::TCSANOW, &termios)
+            .expect("tcsetattr failed");
+        let flags = nix::fcntl::OFlag::from_bits_retain(
+            nix::fcntl::fcntl(&slave, nix::fcntl::F_GETFL).expect("F_GETFL failed"),
+        ) | nix::fcntl::OFlag::O_NONBLOCK;
+        nix::fcntl::fcntl(&slave, nix::fcntl::F_SETFL(flags)).expect("F_SETFL failed");
+        let mut slave = std::fs::File::from(slave);
 
         // Wrap our master fd in a VTE Pty (vte_pty_new_foreign_sync).
         unsafe extern "C" {
@@ -800,10 +800,10 @@ mod tests {
                 error: *mut *mut glib::ffi::GError,
             ) -> *mut vte4::ffi::VtePty;
         }
+        let master_fd = master.into_raw_fd();
         let pty: vte4::Pty = unsafe {
             let mut error = std::ptr::null_mut();
-            let ptr =
-                vte_pty_new_foreign_sync(master.as_raw_fd(), std::ptr::null_mut(), &mut error);
+            let ptr = vte_pty_new_foreign_sync(master_fd, std::ptr::null_mut(), &mut error);
             assert!(!ptr.is_null(), "vte_pty_new_foreign_sync failed");
             glib::translate::from_glib_full(ptr)
         };
@@ -823,7 +823,7 @@ mod tests {
             while glib::MainContext::default().pending() {
                 glib::MainContext::default().iteration(false);
             }
-            match master.read(&mut buf) {
+            match slave.read(&mut buf) {
                 Ok(0) | Err(_) => {}
                 Ok(n) => {
                     got.extend_from_slice(&buf[..n]);
