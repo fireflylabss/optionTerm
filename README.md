@@ -26,6 +26,8 @@ and Adwaita preferences.
 - **CLI launch** — `--working-directory` / `-d`, `-e` / `--` to run a command;
   second instances open a tab in the primary window.
 - **Translucent background** — `background_opacity`, plus automatic config reload when `config.toml` changes.
+- **Kitty graphics** — inline PNG/RGB/RGBA images, including the compressed,
+  chunked full-pane frames emitted by `terminal-browser`.
 - **Tiling splits** — split panes in any direction, directional focus, cycle focus, equalize, resize, and toggle zoom.
 - **Command palette** — `Ctrl+Shift+P` to search every action and its shortcut,
   plus named `[[command]]` presets from config.
@@ -36,25 +38,27 @@ and Adwaita preferences.
 
 - Rust **1.90+**
 - GTK **4.14+**, libadwaita **1.5+**
-- VTE **0.76+** (GTK4 package: `vte4` / `libvte-2.91-gtk4`)
+- FoxTerminal VTE fork **0.84.1** (built by `scripts/build-vte.sh`)
 - pkg-config, pango, cairo
+- Git, Meson and Ninja (to build the pinned Kitty-capable VTE fork)
 
 ### Arch / CachyOS
 
 ```bash
-sudo pacman -S gtk4 libadwaita vte4 pango cairo pkgconf
+sudo pacman -S gtk4 libadwaita vte4 pango cairo pkgconf git meson ninja
 ```
 
 ### Debian / Ubuntu
 
 ```bash
 sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
-  libpango1.0-dev libcairo2-dev pkg-config
+  libpango1.0-dev libcairo2-dev pkg-config git meson ninja-build
 ```
 
 ## Build
 
 ```bash
+./scripts/build-vte.sh
 cargo build --release
 ./target/release/optionterm
 ```
@@ -121,7 +125,8 @@ optionterm -- vim README.md
 - **.deb** — `./packaging/deb/build-deb.sh` after a release build
 - **AppImage** — `./packaging/appimage/build-appimage.sh` (prefer Ubuntu 24.04 hosts)
 
-`NOTICE` documents the LGPL VTE system dependency.
+`NOTICE` documents the bundled LGPL VTE fork and credits its Kitty graphics
+implementation to FoxTerminal creator yacha.
 
 ## License
 

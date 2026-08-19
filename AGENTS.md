@@ -4,13 +4,13 @@
 - Dependências de sistema: GTK 4.14+, libadwaita 1.5+, **VTE GTK4** (`vte4` /
   `libvte-2.91-gtk4`), pkg-config, pango, cairo. **Não precisa de Zig.**
 - `cargo build --release` ou `./scripts/run.sh`.
-- **Kitty graphics protocol**: o app usa um VTE patcheado em `vte-dist/` (build
-  local gerado por `scripts/build-vte.sh`, que aplica
-  `vte-fork/patches/kitty-graphics.patch` no VTE 0.84.1). Rode esse script
-  antes de buildar; sem ele o link falha (`undefined symbol:
-  vte_terminal_set_enable_inline_images`). O `.cargo/config.toml` aponta
-  `PKG_CONFIG_PATH` pro `vte-dist` e seta rpath pro runtime. O patch responde à
-  query APC (`a=q`), aceita transmit PNG (`a=T,f=100`) e display (`a=d`).
+- **Kitty graphics protocol**: o app usa o fork VTE 0.84.1 do FoxTerminal,
+  fixado no commit `7ed5a96ccc0305b03695ac18af15f96b92805126` e compilado em
+  `vte-dist/` por `scripts/build-vte.sh` com `-Dsixel=true`. Rode esse script
+  antes de buildar. O `.cargo/config.toml` aponta `PKG_CONFIG_PATH` pro
+  `vte-dist` e o `build.rs` seta rpath pro runtime. A implementação suporta o
+  fluxo do `terminal-browser` (query real, RGB/RGBA, zlib, chunks, placement
+  sem `c=/r=`, repaint e transportes `t=d/f/t/s`).
 - Smoke test: `timeout 5 ./target/release/optionterm` (GApplication é
   single-instance — mate instâncias antigas antes: `pkill optionterm`).
 - O warning `AdwTabBox reported min width -6` no startup é bug conhecido e
@@ -36,8 +36,8 @@
   - `release.yml` — .deb + AppImage no GitHub Release
   - `publish-aur.yml` — bump `PKGBUILD`/`.SRCINFO` + push AUR (`AUR_SSH_PRIVATE_KEY`)
 - Fallback local: `./packaging/aur/publish.sh [vX.Y.Z]` (ver `packaging/aur/README.md`).
-- Dependências de runtime incluem `vte4`; makedepends: `cargo`, `pkgconf`
-  (sem Zig/git para clonar fontes).
+- Dependências de runtime incluem `vte4`; makedepends: `cargo`, `pkgconf`,
+  `git`, `meson` e `ninja` (sem Zig).
 
 ## Arquitetura
 - `src/keys.rs` — `keys.toml` (overrides de atalho) + conversão da grafia

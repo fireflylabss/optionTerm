@@ -51,12 +51,12 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> LaunchRequest {
             i += 1;
             continue;
         }
-        if arg == "--working-directory" || arg == "-d" || arg == "--workdir" {
-            if let Some(next) = args.get(i + 1) {
-                cwd = Some(PathBuf::from(next));
-                i += 2;
-                continue;
-            }
+        if (arg == "--working-directory" || arg == "-d" || arg == "--workdir")
+            && let Some(next) = args.get(i + 1)
+        {
+            cwd = Some(PathBuf::from(next));
+            i += 2;
+            continue;
         }
         if arg == "-h" || arg == "--help" {
             // Handled by the caller printing help; ignore here.

@@ -49,7 +49,7 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build patched VTE (kitty graphics)
+      - name: Build FoxTerminal VTE fork (Kitty graphics)
         run: bash scripts/build-vte.sh
 
       - name: Build release binary

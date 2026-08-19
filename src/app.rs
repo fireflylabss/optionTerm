@@ -36,6 +36,7 @@ const SELF_WRITE_GRACE: std::time::Duration = std::time::Duration::from_millis(1
 pub type Pages = Rc<RefCell<Vec<(adw::TabPage, Vec<Rc<TerminalView>>)>>>;
 type Toast = Rc<dyn Fn(&str)>;
 type Focused = Rc<RefCell<Option<Weak<TerminalView>>>>;
+type LaunchHandler = Rc<dyn Fn(LaunchRequest)>;
 type MakeViewFn = Rc<
     dyn Fn(
         Rc<RefCell<Option<adw::TabPage>>>,
@@ -48,7 +49,7 @@ type MakeViewFn = Rc<
 /// open a tab in the primary process.
 struct SharedLaunch {
     pending: RefCell<Vec<LaunchRequest>>,
-    open_in_window: RefCell<Option<Rc<dyn Fn(LaunchRequest)>>>,
+    open_in_window: RefCell<Option<LaunchHandler>>,
 }
 
 pub fn run() -> anyhow::Result<()> {

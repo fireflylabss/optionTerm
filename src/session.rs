@@ -85,21 +85,12 @@ impl PaneLayout {
 }
 
 /// One restored tab.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TabState {
     /// Custom title, if the user renamed the tab.
     pub title: Option<String>,
     /// Nested split tree (preferred).
     pub layout: PaneLayout,
-}
-
-impl Default for TabState {
-    fn default() -> Self {
-        Self {
-            title: None,
-            layout: PaneLayout::default(),
-        }
-    }
 }
 
 impl TabState {

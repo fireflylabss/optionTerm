@@ -44,7 +44,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Build patched VTE (kitty graphics)
+      - name: Build FoxTerminal VTE fork (Kitty graphics)
         run: bash scripts/build-vte.sh
 
       - name: Build

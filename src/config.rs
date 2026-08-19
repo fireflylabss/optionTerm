@@ -276,8 +276,10 @@ impl Config {
             return Ok(cfg);
         }
 
-        let mut cfg = Self::default();
-        cfg.source = path.clone();
+        let cfg = Self {
+            source: path.clone(),
+            ..Self::default()
+        };
         if let Err(err) = cfg.write_to(&path) {
             tracing::warn!(
                 "could not write default config to {}: {err:#}",

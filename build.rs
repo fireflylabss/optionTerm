@@ -1,4 +1,5 @@
-// Emit runtime library search paths (rpath) for the patched VTE build.
+// Emit runtime library search paths (rpath) for the pinned FoxTerminal VTE
+// fork, which provides Kitty graphics support.
 //
 // The rpath cannot live in .cargo/config.toml's `[build] rustflags`: makepkg
 // (and any other tool that sets RUSTFLAGS in the environment) overrides that

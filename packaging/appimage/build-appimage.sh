@@ -59,8 +59,8 @@ appdir="$ROOT/target/AppDir"
 rm -rf "$appdir"
 install -Dm755 "$binary" "$appdir/usr/bin/optionterm"
 
-# Bundle the patched VTE (kitty graphics protocol). The binary's RUNPATH
-# searches $ORIGIN/../lib, so this patched lib takes precedence over any
+# Bundle the pinned FoxTerminal VTE fork. The binary's RUNPATH searches
+# $ORIGIN/../lib, so this Kitty-capable lib takes precedence over any
 # libvte-2.91-gtk4 that linuxdeploy's GTK plugin would pull from the system.
 if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then
   install -Dm755 "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" \
@@ -100,7 +100,7 @@ PATH="$TOOLS:$PATH" "$TOOLS/linuxdeploy" \
   --output appimage
 
 # linuxdeploy's GTK plugin may have pulled the *system* libvte into the
-# AppDir while bundling the GTK stack. Overwrite it with the patched build
+# AppDir while bundling the GTK stack. Overwrite it with the FoxTerminal build
 # (kitty graphics) so the packaged app really has inline-image support, then
 # repackage with appimagetool.
 if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then

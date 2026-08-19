@@ -19,25 +19,14 @@ use vte4::{
     CursorBlinkMode, CursorShape, Format, PtyFlags, Regex, Terminal as VteTerminal, prelude::*,
 };
 
-// FFI for the kitty graphics protocol support added by the patched VTE
-// (vte-fork/patches/kitty-graphics.patch). Not exposed by the stock vte4 crate.
-unsafe extern "C" {
-    fn vte_terminal_set_enable_inline_images(
-        terminal: *mut vte4::ffi::VteTerminal,
-        enabled: glib::ffi::gboolean,
-    );
-}
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn enable_inline_images(terminal: &VteTerminal) {
-    unsafe {
-        vte_terminal_set_enable_inline_images(terminal.as_ptr(), glib::ffi::GTRUE);
-    }
-}
-
 use crate::{
     config::{Config, CursorStyle, RgbColor},
     pty,
 };
+
+type StringCallback = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
+type VoidCallback = Rc<RefCell<Option<Box<dyn Fn()>>>>;
+type ResizeCallback = Rc<RefCell<Option<Box<dyn Fn(u16, u16)>>>>;
 
 /// Pane root: Overlay so split collapse/bounds in `app.rs` keep working.
 pub struct TerminalView {
@@ -49,11 +38,11 @@ pub struct TerminalView {
     /// Optional one-shot command argv (instead of the login shell).
     command: Option<Vec<String>>,
     title: Rc<RefCell<String>>,
-    on_title: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
-    on_exit: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-    on_focus: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-    on_resize: Rc<RefCell<Option<Box<dyn Fn(u16, u16)>>>>,
-    on_link: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    on_title: StringCallback,
+    on_exit: VoidCallback,
+    on_focus: VoidCallback,
+    on_resize: ResizeCallback,
+    on_link: StringCallback,
     scroll_btn: gtk4::Button,
 }
 
@@ -68,10 +57,9 @@ impl TerminalView {
         terminal.set_scroll_unit_is_pixels(true);
         terminal.set_scrollback_lines(config.scroll_lines);
         terminal.search_set_wrap_around(true);
-        // Patched VTE: kitty graphics protocol (inline images).
-        unsafe {
-            enable_inline_images(&terminal);
-        }
+        // The pinned FoxTerminal VTE fork gates SIXEL and Kitty graphics behind
+        // VTE's standard inline-image toggle.
+        terminal.set_enable_sixel(true);
 
         let url_regexes = install_url_matches(&terminal);
         apply_visuals(&terminal, &config);
@@ -119,11 +107,11 @@ impl TerminalView {
         let child_pid = Rc::new(Cell::new(-1));
         let cwd = Rc::new(RefCell::new(cwd));
         let title = Rc::new(RefCell::new(String::from("Terminal")));
-        let on_title: Rc<RefCell<Option<Box<dyn Fn(String)>>>> = Rc::new(RefCell::new(None));
-        let on_exit: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-        let on_focus: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-        let on_resize: Rc<RefCell<Option<Box<dyn Fn(u16, u16)>>>> = Rc::new(RefCell::new(None));
-        let on_link: Rc<RefCell<Option<Box<dyn Fn(String)>>>> = Rc::new(RefCell::new(None));
+        let on_title: StringCallback = Rc::new(RefCell::new(None));
+        let on_exit: VoidCallback = Rc::new(RefCell::new(None));
+        let on_focus: VoidCallback = Rc::new(RefCell::new(None));
+        let on_resize: ResizeCallback = Rc::new(RefCell::new(None));
+        let on_link: StringCallback = Rc::new(RefCell::new(None));
         let last_cols = Rc::new(Cell::new(0u16));
         let last_rows = Rc::new(Cell::new(0u16));
 
@@ -727,10 +715,8 @@ pub fn detect_link(word: &str, pwd: Option<&str>) -> Option<String> {
     }
     let candidate = if w.starts_with('/') {
         PathBuf::from(w)
-    } else if let Some(pwd) = pwd {
-        PathBuf::from(pwd).join(w)
     } else {
-        return None;
+        PathBuf::from(pwd?).join(w)
     };
     candidate.exists().then(|| {
         let path = candidate.clone();
@@ -774,17 +760,15 @@ mod tests {
     #[gtk4::test]
     fn kitty_graphics_handler_accepts_query() {
         let terminal = VteTerminal::new();
-        unsafe {
-            enable_inline_images(&terminal);
-            // APC query: `ESC _ G i=1,q=1 ESC \`
-            let seq = b"\x1b_Gi=1,q=1\x1b\\";
-            terminal.feed(seq);
-            terminal.feed(b"\x1b_Ga=T,f=100;AAAA\x1b\\");
-            terminal.feed(b"\x1b_Ga=c\x1b\\");
-        }
+        terminal.set_enable_sixel(true);
+        // APC query: `ESC _ G i=1,q=1 ESC \`
+        let seq = b"\x1b_Gi=1,q=1\x1b\\";
+        terminal.feed(seq);
+        terminal.feed(b"\x1b_Ga=T,f=100;AAAA\x1b\\");
+        terminal.feed(b"\x1b_Ga=c\x1b\\");
     }
 
-    /// End-to-end: the patched VTE answers the kitty query (a=q) with an
+    /// End-to-end: the FoxTerminal VTE fork answers the kitty query (a=q) with an
     /// "a=OK" response written to the PTY master.
     #[gtk4::test]
     fn kitty_graphics_answers_query_on_pty() {
@@ -826,9 +810,7 @@ mod tests {
 
         let terminal = VteTerminal::new();
         terminal.set_pty(Some(&pty));
-        unsafe {
-            enable_inline_images(&terminal);
-        }
+        terminal.set_enable_sixel(true);
         // The probe terminal-browser (and other kitty clients) send: a query
         // carrying a real 1x1 RGB payload, and expect the spec reply `Gi=<id>;OK`.
         terminal.feed(b"\x1b_Gi=7,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\");
@@ -875,9 +857,7 @@ mod tests {
         std::fs::write(&png_path, &one_px_png).expect("write test png");
 
         let terminal = VteTerminal::new();
-        unsafe {
-            enable_inline_images(&terminal);
-        }
+        terminal.set_enable_sixel(true);
 
         // Transmit by file path (optionFiles style: I=, p=, C=1, q=1),
         // then display and delete. Any error is swallowed by the handler,
@@ -897,9 +877,7 @@ mod tests {
     #[gtk4::test]
     fn kitty_graphics_accepts_raw_rgb() {
         let terminal = VteTerminal::new();
-        unsafe {
-            enable_inline_images(&terminal);
-        }
+        terminal.set_enable_sixel(true);
         // 2x1 RGBA-independent f=24 payload: 2 pixels * 3 channels = 6 bytes.
         let pixels = base64_encode(&[0xff, 0x00, 0x00, 0x00, 0xff, 0x00]);
         let seq = format!(
@@ -915,11 +893,10 @@ mod tests {
     #[gtk4::test]
     fn kitty_graphics_query_reports_real_capability() {
         let terminal = VteTerminal::new();
-        unsafe {
-            enable_inline_images(&terminal);
-        }
-        // Unknown medium (t=s shared memory) must be refused, not confirmed.
-        terminal.feed(b"\x1b_Gi=9,a=q,t=s,f=100,q=1\x1b\\");
+        terminal.set_enable_sixel(true);
+        // Shared memory is supported when its named object exists; a missing
+        // object must be refused instead of receiving a false-positive OK.
+        terminal.feed(b"\x1b_Gi=9,a=q,t=s,f=32,s=1,v=1,q=1;L25vdC1oZXJl\x1b\\");
         // Unknown format must be refused too.
         terminal.feed(b"\x1b_Gi=10,a=q,t=d,f=99,q=1\x1b\\");
     }
