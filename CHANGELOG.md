@@ -29,6 +29,16 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.9-stable · 18/08/2026
+
+Reliable full-pane Kitty Graphics rendering for terminal-browser. This version was made for GNOME with a stable release channel on 18/08/2026 (v0.2.9-stable).
+
+- Replaced the limited local VTE patch with the complete FoxTerminal VTE 0.84.1 fork, pinned to commit `7ed5a96ccc0305b03695ac18af15f96b92805126` for reproducible builds.
+- `terminal-browser` frames now use the fork's natural-size placement and repaint behavior, so pages remain visible when clients omit explicit cell dimensions (`c=` / `r=`).
+- Kitty Graphics keeps raw RGB/RGBA, zlib, chunked payloads and query support while adding the fork's complete direct, file, temporary-file and shared-memory transport paths.
+- Arch, Debian and AppImage packaging now bundle the same Kitty-capable VTE used by local builds instead of falling back to the distro library at runtime.
+- CI is clean under warnings-as-errors again, including current Clippy releases.
+
 ## v0.2.8-stable · 18/08/2026
 
 Fuller Kitty Graphics support: raw RGB/RGBA, deflate, chunked transfers and a bounded image cache. This version was made for GNOME with a stable release channel on 18/08/2026 (v0.2.8-stable).
@@ -38,7 +48,7 @@ Fuller Kitty Graphics support: raw RGB/RGBA, deflate, chunked transfers and a bo
 - Chunked transmissions (`m=1`) join their payloads before decoding, so a client may split its base64 anywhere.
 - Capability queries (`a=q`) now actually carry out the transmission and answer `Gi=<id>;OK` or `Gi=<id>;EINVAL:...` truthfully, instead of echoing a capability the terminal cannot honour.
 - Image memory is a bounded budget with least-recently-used eviction, so a buggy client cannot grow the image table without limit.
-- Reply quiet flags (`q=1`/`q=2`) are honoured per the spec. The parsing/decode/reply structure is informed by FoxTerminal's forked VTE (Christian Persch), credited in NOTICE.
+- Reply quiet flags (`q=1`/`q=2`) are honoured per the spec. The parsing/decode/reply structure is informed by FoxTerminal's forked VTE, credited in NOTICE.
 
 ## v0.2.7-stable · 18/08/2026
 
