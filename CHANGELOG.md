@@ -29,6 +29,20 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.10-beta · 24/08/2026
+
+IDE-style helpers, a full-bleed terminal and a recoverable crash report. This version was made for GNOME with a beta release channel on 24/08/2026 (v0.2.10-beta).
+
+- The tab sidebar now shows a **file tree** rooted at the focused pane's directory (kept in sync as you cd / switch tabs). Folders expand and collapse; double-clicking a row opens a terminal in that directory. The `+` menu calls it **File Explorer**.
+- **Save Codex Thread** (`Ctrl+Shift+D`, also in the menu and command palette) exports the most recent Codex conversation to a readable Markdown transcript, saved into a directory you pick (defaulting to the focused pane's cwd).
+- Agent tabs (`codex`, `claude`, `opencode`, `cursor`, `devin`, `grok`) open in their own tab with the tool's **real logo** as the tab icon. On dark themes a derived pure-white copy of each logo is used so it stays legible.
+- The `+` menu is reorganized: New Tab / Browser / File Explorer, a **Split** submenu with all directions, and an **Agents** submenu. The standalone split button is gone.
+- The tab sidebar is restyled as compact card rows with the active tab as a **vivid orange card**, icons riding the theme, and the selected row kept legible.
+- A **crash handler** appends the version, panic message and a capped backtrace to `~/.option/terminal/crash.log`, so a crash can be reported instead of vanishing.
+- Terminal panes are **full-bleed**: zero padding by default, and the pane surface is painted with the terminal background so any configured margin never reads as a themed border.
+- Default Terminal moved under **Advanced** in Preferences (the old standalone page was removed).
+- Various other UI polish
+
 ## v0.2.9-stable · 18/08/2026
 
 Reliable full-pane Kitty Graphics rendering for terminal-browser. This version was made for GNOME with a stable release channel on 18/08/2026 (v0.2.9-stable).

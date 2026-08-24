@@ -44,6 +44,14 @@ pub struct TerminalView {
     on_resize: ResizeCallback,
     on_link: StringCallback,
     scroll_btn: gtk4::Button,
+    /// Whether the child process has been spawned yet (deferred until the
+    /// terminal is mapped and has a real size, so full-screen TUIs render).
+    spawned: Rc<Cell<bool>>,
+    /// Styles the pane surface behind the glyph grid with the terminal
+    /// background, so configured padding never reads as a themed border.
+    bg_provider: gtk4::CssProvider,
+    /// Scoping name used by `bg_provider`'s CSS for this overlay.
+    overlay_name: String,
 }
 
 impl TerminalView {
@@ -62,7 +70,7 @@ impl TerminalView {
         terminal.set_enable_sixel(true);
 
         let url_regexes = install_url_matches(&terminal);
-        apply_visuals(&terminal, &config);
+        apply_visuals(&terminal, &config, None, None);
 
         let scroll = ScrolledWindow::builder()
             .child(&terminal)
@@ -102,6 +110,17 @@ impl TerminalView {
         overlay.set_vexpand(true);
         overlay.set_child(Some(&scroll));
         overlay.add_overlay(&scroll_btn);
+
+        // Recolour the pane surface behind the grid with the terminal
+        // background. VTE only paints the glyph area; with padding, the
+        // margin around it would otherwise show the theme's surface colour as
+        // an unwanted border. Scoped to this widget by object name.
+        let bg_provider = gtk4::CssProvider::new();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PANE_ID: AtomicUsize = AtomicUsize::new(0);
+        let overlay_name = format!("terminal-bg-{}", PANE_ID.fetch_add(1, Ordering::Relaxed));
+        overlay.set_widget_name(&overlay_name);
+        apply_surface_bg(&bg_provider, &overlay_name, &config);
 
         let config = Rc::new(RefCell::new(config));
         let child_pid = Rc::new(Cell::new(-1));
@@ -294,8 +313,28 @@ impl TerminalView {
             on_resize,
             on_link,
             scroll_btn,
+            spawned: Rc::new(Cell::new(false)),
+            bg_provider,
+            overlay_name,
         };
-        view.spawn_process();
+        // Defer spawning until the terminal is mapped and has a real size.
+        // Spawning a full-screen TUI (codex/claude/grok) before the pane has a
+        // grid leaves it drawing into a 0x0 window — a black tab.
+        {
+            let spawned = view.spawned.clone();
+            let terminal = view.terminal.clone();
+            let command = view.command.clone();
+            let cwd = view.cwd.clone();
+            let child_pid = view.child_pid.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(20), move || {
+                if spawned.get() || !terminal.is_mapped() || terminal.row_count() == 0 {
+                    return glib::ControlFlow::Continue;
+                }
+                spawned.set(true);
+                spawn_child(&terminal, &command, &cwd, &child_pid);
+                glib::ControlFlow::Break
+            });
+        }
         Ok(view)
     }
 
@@ -333,13 +372,23 @@ impl TerminalView {
 
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
         f(&mut self.config.borrow_mut());
-        apply_visuals(&self.terminal, &self.config.borrow());
+        apply_visuals(
+            &self.terminal,
+            &self.config.borrow(),
+            Some(&self.bg_provider),
+            Some(&self.overlay_name),
+        );
         self.sync_scroll_chrome();
     }
 
     pub fn apply_config(&self, config: &Config) {
         *self.config.borrow_mut() = config.clone();
-        apply_visuals(&self.terminal, config);
+        apply_visuals(
+            &self.terminal,
+            config,
+            Some(&self.bg_provider),
+            Some(&self.overlay_name),
+        );
         self.sync_scroll_chrome();
     }
 
@@ -463,68 +512,85 @@ impl TerminalView {
             *self.cwd.borrow_mut() = Some(PathBuf::from(pwd));
         }
         self.terminal.reset(true, true);
-        self.spawn_process();
-    }
-
-    fn spawn_process(&self) {
-        let shell = match std::env::var_os("SHELL") {
-            Some(s) if !s.is_empty() => PathBuf::from(s),
-            _ => match nix::unistd::User::from_uid(nix::unistd::getuid()) {
-                Ok(Some(user)) => user.shell,
-                _ => PathBuf::from("/bin/sh"),
-            },
-        };
-        let shell_s = shell.to_string_lossy().into_owned();
-
-        // Own the argv strings for the duration of spawn_async.
-        let argv_owned: Vec<String> = if let Some(cmd) = &self.command {
-            cmd.clone()
-        } else {
-            vec![shell_s]
-        };
-        let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
-
-        let env_term = "TERM=xterm-256color".to_string();
-        let env_color = "COLORTERM=truecolor".to_string();
-        let env_prog = "TERM_PROGRAM=optionTerm".to_string();
-        let env_ver = format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION"));
-        let envv = [
-            env_term.as_str(),
-            env_color.as_str(),
-            env_prog.as_str(),
-            env_ver.as_str(),
-        ];
-
-        let cwd_owned = self
-            .cwd
-            .borrow()
-            .as_ref()
-            .filter(|p| p.is_dir())
-            .map(|p| p.to_string_lossy().into_owned());
-        let cwd = cwd_owned.as_deref();
-
-        let child_pid = self.child_pid.clone();
-        self.terminal.spawn_async(
-            PtyFlags::DEFAULT,
-            cwd,
-            &argv_refs,
-            &envv,
-            glib::SpawnFlags::DEFAULT,
-            || {},
-            -1,
-            None::<&gio::Cancellable>,
-            move |result| match result {
-                Ok(pid) => child_pid.set(pid.0),
-                Err(err) => {
-                    tracing::error!("failed to spawn process: {err}");
-                    child_pid.set(-1);
-                }
-            },
-        );
+        self.spawned.set(true);
+        spawn_child(&self.terminal, &self.command, &self.cwd, &self.child_pid);
     }
 }
 
-fn apply_visuals(terminal: &VteTerminal, config: &Config) {
+/// Spawn the child process in `terminal`, using `command` (a one-shot argv) or
+/// the login shell, in the given `cwd`. `child_pid` is written with the pid on
+/// success, -1 on failure. This is deferred until the terminal is mapped and
+/// sized so full-screen TUIs render into a real grid.
+fn spawn_child(
+    terminal: &VteTerminal,
+    command: &Option<Vec<String>>,
+    cwd: &Rc<RefCell<Option<PathBuf>>>,
+    child_pid: &Rc<Cell<i32>>,
+) {
+    let shell = match std::env::var_os("SHELL") {
+        Some(s) if !s.is_empty() => PathBuf::from(s),
+        _ => match nix::unistd::User::from_uid(nix::unistd::getuid()) {
+            Ok(Some(user)) => user.shell,
+            _ => PathBuf::from("/bin/sh"),
+        },
+    };
+    let shell_s = shell.to_string_lossy().into_owned();
+
+    // Own the argv strings for the duration of spawn_async.
+    let argv_owned: Vec<String> = if let Some(cmd) = command {
+        cmd.clone()
+    } else {
+        vec![shell_s]
+    };
+    let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
+
+    let env_term = "TERM=xterm-256color".to_string();
+    let env_color = "COLORTERM=truecolor".to_string();
+    let env_prog = "TERM_PROGRAM=optionTerm".to_string();
+    let env_ver = format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION"));
+    let envv = [
+        env_term.as_str(),
+        env_color.as_str(),
+        env_prog.as_str(),
+        env_ver.as_str(),
+    ];
+
+    let cwd_owned = cwd
+        .borrow()
+        .as_ref()
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned());
+    let cwd = cwd_owned.as_deref();
+
+    let child_pid = child_pid.clone();
+    terminal.spawn_async(
+        PtyFlags::DEFAULT,
+        cwd,
+        &argv_refs,
+        &envv,
+        // SEARCH_PATH lets a bare command name be resolved via $PATH, which is
+        // what agents like `codex`/`claude`/`grok` need — without it GLib tries
+        // to execve the name as a path and fails for bins in ~/.local/bin etc.
+        glib::SpawnFlags::SEARCH_PATH,
+        || {},
+        -1,
+        None::<&gio::Cancellable>,
+        move |result| match result {
+            Ok(pid) => child_pid.set(pid.0),
+            Err(err) => {
+                tracing::error!("failed to spawn process: {err}");
+                child_pid.set(-1);
+            }
+        },
+    );
+}
+
+fn apply_visuals(
+    terminal: &VteTerminal,
+    config: &Config,
+    bg_provider: Option<&gtk4::CssProvider>,
+    overlay_name: Option<&str>,
+) {
     apply_font(terminal, config);
     apply_colors(terminal, config);
     apply_cursor(terminal, config);
@@ -539,6 +605,38 @@ fn apply_visuals(terminal: &VteTerminal, config: &Config) {
     terminal.set_margin_end(pad_x as i32);
     terminal.set_margin_top(pad_y as i32);
     terminal.set_margin_bottom(pad_y as i32);
+
+    if let (Some(provider), Some(name)) = (bg_provider, overlay_name) {
+        apply_surface_bg(provider, name, config);
+    }
+}
+
+/// Paint the widget surface behind the VTE grid with the terminal background,
+/// so the pane never shows a themed border in its padding area. The selector is
+/// scoped to `#<name>` (the Overlay's widget name) and every container between
+/// it and the grid, so the whole pane reads as one terminal surface. The
+/// provider is added to the display; reloading its CSS updates it in place.
+fn apply_surface_bg(provider: &gtk4::CssProvider, name: &str, config: &Config) {
+    let bg = &config.background;
+    let alpha = config.background_opacity.clamp(0.0, 1.0);
+    let css = format!(
+        "#{name}, #{name} scrolledwindow, #{name} viewport {{ \
+            background-color: rgba({r}, {g}, {b}, {alpha}); \
+        }}",
+        name = name,
+        r = bg.r,
+        g = bg.g,
+        b = bg.b,
+        alpha = alpha
+    );
+    provider.load_from_string(&css);
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 fn apply_font(terminal: &VteTerminal, config: &Config) {

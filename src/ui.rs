@@ -52,6 +52,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Default Font Size", "win.zoom-reset", "Ctrl+0"),
     ("Find in Scrollback", "win.find", "Ctrl+Shift+F"),
     ("Open Browser", "win.open-browser", "Ctrl+Shift+B"),
+    ("File Explorer", "win.file-tree", "F9"),
+    ("Save Codex Thread", "win.save-codex-thread", "Ctrl+Shift+D"),
     ("Rename Tab", "win.rename-tab", "F2"),
     ("Reload Configuration", "win.reload-config", ""),
     ("Preferences", "win.preferences", "Ctrl+,"),
@@ -60,7 +62,40 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Quit", "win.quit", "Ctrl+Shift+Q"),
 ];
 
-fn splits_menu() -> gio::Menu {
+/// Menu behind the new-tab `+` button: grouped by what it opens.
+pub fn tabs_menu() -> gio::Menu {
+    use crate::agents::{self, AgentKind};
+    let menu = gio::Menu::new();
+
+    // New surfaces.
+    let tabs = gio::Menu::new();
+    tabs.append(Some("New Tab"), Some("win.new-tab"));
+    tabs.append(Some("Open Browser…"), Some("win.open-browser"));
+    tabs.append(Some("File Explorer"), Some("win.file-tree"));
+    menu.append_section(None, &tabs);
+
+    // Splitting the focused pane (also reachable via the split button).
+    menu.append_submenu(Some("Split"), &splits_menu());
+
+    // One entry per installed agent; opens a dedicated agent tab.
+    let agents = gio::Menu::new();
+    for kind in AgentKind::ALL {
+        if agents::is_installed(kind) {
+            agents.append(
+                Some(kind.label()),
+                Some(&format!("win.agent-{}", kind.as_str())),
+            );
+        }
+    }
+    if agents.n_items() > 0 {
+        menu.append_submenu(Some("Agents"), &agents);
+    }
+    menu
+}
+
+/// Menu behind the splits button: split directions (the button's main click
+/// re-runs the last-chosen direction, defaulting to Split Right).
+pub fn splits_menu() -> gio::Menu {
     let split = gio::Menu::new();
     split.append(Some("Split Right"), Some("win.split-right"));
     split.append(Some("Split Down"), Some("win.split-down"));
@@ -69,16 +104,6 @@ fn splits_menu() -> gio::Menu {
     split.append(Some("Toggle Split Zoom"), Some("win.toggle-split-zoom"));
     split.append(Some("Equalize Splits"), Some("win.equalize-splits"));
     split
-}
-
-/// Menu behind the `+` split button: split directions plus another way to
-/// open the browser tab. Clicking the button itself still opens a terminal tab.
-pub fn tiling_menu() -> gio::Menu {
-    let menu = splits_menu();
-    let browser = gio::Menu::new();
-    browser.append(Some("Open Browser…"), Some("win.open-browser"));
-    menu.append_section(None, &browser);
-    menu
 }
 
 /// Right-click on a tab: rename, split, close.
@@ -119,6 +144,7 @@ fn main_menu() -> gio::Menu {
     let tools = gio::Menu::new();
     tools.append(Some("Find…"), Some("win.find"));
     tools.append(Some("Open Browser…"), Some("win.open-browser"));
+    tools.append(Some("File Explorer"), Some("win.file-tree"));
     tools.append(Some("Command Palette"), Some("win.command-palette"));
     menu.append_section(None, &tools);
 
@@ -1190,13 +1216,9 @@ pub fn show_preferences(
     notify_group.add(&done_row);
     sound_page.add(&notify_group);
 
-    // --- Default terminal ---
-    let default_page = adw::PreferencesPage::builder()
-        .title("Default Terminal")
-        .icon_name("utilities-terminal-symbolic")
-        .build();
+    // --- Default terminal (lives in Advanced) ---
     let default_group = adw::PreferencesGroup::builder()
-        .title("System Integration")
+        .title("Default Terminal")
         .description(
             "There is no single setting for this. optionTerm writes the portable \
              xdg-terminals.list, plus your desktop's own key when it has one.",
@@ -1245,7 +1267,7 @@ pub fn show_preferences(
     }
     default_row.add_suffix(&default_btn);
     default_group.add(&default_row);
-    default_page.add(&default_group);
+    advanced_page.add(&default_group);
 
     // --- Shortcuts ---
     let shortcuts_page = adw::PreferencesPage::builder()
@@ -1350,7 +1372,6 @@ pub fn show_preferences(
     dialog.add(&behavior_page);
     dialog.add(&sound_page);
     dialog.add(&shortcuts_page);
-    dialog.add(&default_page);
     dialog.add(&advanced_page);
     dialog.present(Some(window));
 }

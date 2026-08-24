@@ -14,7 +14,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::{
-    browser,
+    agents, browser, codex,
     config::{
         Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
         Theme,
@@ -22,9 +22,10 @@ use crate::{
     launch::LaunchRequest,
     session::{PaneLayout, Session as SessionState, SplitOrientation, TabState},
     terminal::TerminalView,
+    tree::FileTree,
     ui::{
         PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
-        show_preferences, show_shortcuts, tab_menu, tiling_menu,
+        show_preferences, show_shortcuts, tab_menu, tabs_menu,
     },
 };
 
@@ -37,6 +38,21 @@ pub type Pages = Rc<RefCell<Vec<(adw::TabPage, Vec<Rc<TerminalView>>)>>>;
 type Toast = Rc<dyn Fn(&str)>;
 type Focused = Rc<RefCell<Option<Weak<TerminalView>>>>;
 type LaunchHandler = Rc<dyn Fn(LaunchRequest)>;
+/// Splits the focused pane in a direction (`orientation`, `before`).
+type SplitFn = Rc<dyn Fn(gtk4::Orientation, bool)>;
+/// Records the direction, then runs a `SplitFn`.
+type SplitDone = Rc<dyn Fn(SplitFn, gtk4::Orientation, bool)>;
+/// The file tree panel attached to one tab: the tree plus the `Paned` that
+/// hosts it beside the terminal.
+#[derive(Clone)]
+struct FileTreeSlot {
+    tree: Rc<FileTree>,
+    paned: gtk4::Paned,
+    /// Last pane cwd the tree was synced to; skips re-rooting when the user
+    /// has navigated the tree elsewhere and just clicks the terminal again.
+    last_pwd: Rc<RefCell<Option<PathBuf>>>,
+}
+type FileTrees = Rc<RefCell<std::collections::HashMap<adw::TabPage, FileTreeSlot>>>;
 type MakeViewFn = Rc<
     dyn Fn(
         Rc<RefCell<Option<adw::TabPage>>>,
@@ -149,21 +165,58 @@ fn apply_window_opacity(window: &adw::ApplicationWindow, opacity: f64) {
 fn install_css(display: &gdk::Display) {
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(
-        "window.transparent-bg,
-         window.transparent-bg > * ,
-         window.transparent-bg .terminal { background-color: transparent; }
+        r#"
+window.transparent-bg,
+window.transparent-bg > * ,
+window.transparent-bg .terminal { background-color: transparent; }
 
-         .terminal-surface,
-         .terminal-surface > scrolledwindow,
-         .terminal-surface > scrolledwindow > viewport {
-           border: none;
-           border-radius: 0px;
-           box-shadow: none;
-           margin: 0px;
-           padding: 0px;
-         }
+.terminal-surface,
+.terminal-surface > scrolledwindow,
+.terminal-surface > scrolledwindow > viewport {
+  border: none;
+  border-radius: 0px;
+  box-shadow: none;
+  margin: 0px;
+  padding: 0px;
+}
 
-         .quick-settings { padding: 8px 14px 4px 14px; }",
+.quick-settings { padding: 8px 14px 4px 14px; }
+
+/* Sidebar: flat dark surface with card-style tab rows (like the reference).
+   Rows are rounded chips; the active one is a vivid orange card. */
+.navigation-sidebar,
+.navigation-sidebar-scroll {
+  background-color: #1a1a1a;
+}
+.navigation-sidebar {
+  padding: 6px;
+}
+.navigation-sidebar > row {
+  min-height: 34px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  margin: 2px 0px;
+  background-color: transparent;
+  transition: background-color 120ms ease;
+}
+.navigation-sidebar > row:hover { background-color: #262626; }
+.navigation-sidebar > row > box { margin: 0px; }
+/* Agent logos and the close button render as a small white glyph. */
+.navigation-sidebar > row > box > image {
+  -gtk-icon-size: 14px;
+  filter: grayscale(1) brightness(0) invert(1);
+}
+/* Active tab: vivid orange card, like an IDE active tab. */
+.navigation-sidebar > row:selected {
+  background-color: #f07826;
+  color: #ffffff;
+}
+.navigation-sidebar > row:selected:hover { background-color: #f07826; }
+.navigation-sidebar > row:selected > box > image {
+  filter: grayscale(1) brightness(0) invert(1);
+}
+.navigation-sidebar > row:selected label { color: #ffffff; }
+"#,
     );
     gtk4::style_context_add_provider_for_display(
         display,
@@ -344,6 +397,8 @@ fn build_window(
     if let Some(display) = gdk::Display::default() {
         install_css(&display);
     }
+    // Make the real agent logos resolvable as tab icons.
+    agents::register_icons();
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -408,16 +463,17 @@ fn build_window(
     apply_tab_shape();
     header.set_title_widget(Some(&tab_bar));
 
-    // `+` with the 4-direction tiling dropdown, same as the sidebar variant,
-    // so splits are reachable with the tab bar on top too.
+    // `+` opens tabs/docs (New Tab, Browser, File Tree, Command Palette),
+    // same as the sidebar variant.
     let new_tab_btn = adw::SplitButton::builder()
         .icon_name("tab-new-symbolic")
         .tooltip_text("New Tab (Ctrl+Shift+T)")
-        .menu_model(&tiling_menu())
+        .menu_model(&tabs_menu())
         .build();
     new_tab_btn.set_action_name(Some("win.new-tab"));
     header.pack_start(&new_tab_btn);
 
+    // Splitting lives behind the `+` menu; there is no separate split button.
     let palette_btn = gtk4::Button::from_icon_name("system-search-symbolic");
     palette_btn.set_tooltip_text(Some("Command Palette (Ctrl+Shift+P)"));
     palette_btn.add_css_class("flat");
@@ -461,13 +517,15 @@ fn build_window(
     let sidebar_scroll = gtk4::ScrolledWindow::new();
     sidebar_scroll.set_vexpand(true);
     sidebar_scroll.set_child(Some(&sidebar_list));
+    sidebar_scroll.set_has_frame(false);
+    sidebar_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    sidebar_scroll.add_css_class("navigation-sidebar-scroll");
 
-    // Raised split button,
-    // with the 4-direction tiling dropdown.
+    // `+` with the tabs/docs dropdown, same as the header variant.
     let sidebar_new_btn = adw::SplitButton::builder()
         .icon_name("tab-new-symbolic")
         .tooltip_text("New Tab (Ctrl+Shift+T)")
-        .menu_model(&tiling_menu())
+        .menu_model(&tabs_menu())
         .build();
     sidebar_new_btn.set_action_name(Some("win.new-tab"));
 
@@ -510,7 +568,7 @@ fn build_window(
 
     // A real HeaderBar inside the sidebar: window controls get the exact
     // system styling (theme CSS targets `headerbar windowcontrols`) and the
-    // bar is natively draggable. [+ ▾] layout: [● ● ●] [+ ▾] … [🔍] [☰]
+    // bar is natively draggable. [+ ▾] [⇄▾] … [● ● ●] … [🔍] [☰]
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.add_css_class("flat");
     sidebar_header.set_show_start_title_buttons(true);
@@ -573,6 +631,15 @@ fn build_window(
                     .title(page.title())
                     .activatable(true)
                     .build();
+
+                // Agent tabs carry a real logo icon (set on the TabPage); mirror
+                // it in the sidebar row so the sidebar is as recognizable as the
+                // tab bar.
+                if let Some(icon) = page.icon() {
+                    let image = gtk4::Image::from_gicon(&icon);
+                    image.set_icon_size(gtk4::IconSize::Normal);
+                    row.add_prefix(&image);
+                }
 
                 let close = gtk4::Button::from_icon_name("window-close-symbolic");
                 close.add_css_class("flat");
@@ -795,6 +862,9 @@ fn build_window(
     let pages: Pages = Rc::new(RefCell::new(Vec::new()));
     let focused: Focused = Rc::new(RefCell::new(None));
 
+    // Per-tab file-tree panels (shown/collapsed via `win.file-tree`).
+    let file_trees: FileTrees = Rc::new(RefCell::new(std::collections::HashMap::new()));
+
     // --- Split zoom  (toggle split zoom) ---
     // Zooming hides every sibling pane so the focused split fills the tab.
     let zoom_hidden: Rc<RefCell<Vec<glib::WeakRef<gtk4::Widget>>>> =
@@ -820,6 +890,7 @@ fn build_window(
         let pages = pages.clone();
         let window = window.clone();
         let focused = focused.clone();
+        let file_trees = file_trees.clone();
         Rc::new(
             move |page_slot: Rc<RefCell<Option<adw::TabPage>>>,
                   cwd: Option<PathBuf>,
@@ -849,8 +920,28 @@ fn build_window(
                 {
                     let view_weak = Rc::downgrade(&view);
                     let focused = focused.clone();
+                    let page_slot = page_slot.clone();
+                    let file_trees = file_trees.clone();
                     view.set_on_focus(move || {
                         *focused.borrow_mut() = Some(view_weak.clone());
+                        // Sync this tab's file tree only when the pane moved to
+                        // a different directory (cd or tab switch), so the user
+                        // can navigate the tree without it snapping back.
+                        let Some(view) = view_weak.upgrade() else {
+                            return;
+                        };
+                        let Some(page) = page_slot.borrow().clone() else {
+                            return;
+                        };
+                        let Some(pwd) = view.pwd().map(PathBuf::from) else {
+                            return;
+                        };
+                        if let Some(slot) = file_trees.borrow().get(&page)
+                            && slot.last_pwd.borrow().as_ref() != Some(&pwd)
+                        {
+                            slot.tree.set_root(pwd.clone());
+                            *slot.last_pwd.borrow_mut() = Some(pwd);
+                        }
                     });
                 }
 
@@ -938,15 +1029,30 @@ fn build_window(
         let pages = pages.clone();
         let make_view = make_view.clone();
         let config = config.clone();
+        let file_trees = file_trees.clone();
         Rc::new(
             move |launch: LaunchRequest| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
                 let view = make_view(page_slot.clone(), launch.cwd, launch.command)?;
 
+                // Every tab hosts a collapsible file-tree panel to the right,
+                // toggled with `win.file-tree` (like an IDE explorer).
+                let file_tree = Rc::new(FileTree::new());
+                let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
+                paned.set_hexpand(true);
+                paned.set_vexpand(true);
+                paned.set_wide_handle(true);
+                paned.set_start_child(Some(view.widget()));
+                paned.set_end_child(Some(&file_tree.panel()));
+                // Hidden until `win.file-tree` reveals it.
+                if let Some(child) = paned.end_child() {
+                    child.set_visible(false);
+                }
+
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 root.set_hexpand(true);
                 root.set_vexpand(true);
-                root.append(view.widget());
+                root.append(&paned);
 
                 let page = match config.borrow().new_tab_position {
                     NewTabPosition::End => tab_view.append(&root),
@@ -969,6 +1075,14 @@ fn build_window(
                 *page_slot.borrow_mut() = Some(page.clone());
 
                 pages.borrow_mut().push((page.clone(), vec![view.clone()]));
+                file_trees.borrow_mut().insert(
+                    page.clone(),
+                    FileTreeSlot {
+                        tree: file_tree,
+                        paned,
+                        last_pwd: Rc::new(RefCell::new(None)),
+                    },
+                );
                 tab_view.set_selected_page(&page);
                 view.focus();
                 Ok(page)
@@ -994,15 +1108,28 @@ fn build_window(
         let pages = pages.clone();
         let make_view = make_view.clone();
         let config = config.clone();
+        let file_trees = file_trees.clone();
         Rc::new(
             move |title: Option<String>, layout: &PaneLayout| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
                 let (child, views) = build_layout_widget(layout, &make_view, &page_slot)?;
 
+                // Same per-tab file-tree panel as a fresh tab.
+                let file_tree = Rc::new(FileTree::new());
+                let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
+                paned.set_hexpand(true);
+                paned.set_vexpand(true);
+                paned.set_wide_handle(true);
+                paned.set_start_child(Some(&child));
+                paned.set_end_child(Some(&file_tree.panel()));
+                if let Some(end) = paned.end_child() {
+                    end.set_visible(false);
+                }
+
                 let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 root.set_hexpand(true);
                 root.set_vexpand(true);
-                root.append(&child);
+                root.append(&paned);
 
                 let page = match config.borrow().new_tab_position {
                     NewTabPosition::End => tab_view.append(&root),
@@ -1028,6 +1155,14 @@ fn build_window(
                 *page_slot.borrow_mut() = Some(page.clone());
 
                 pages.borrow_mut().push((page.clone(), views.clone()));
+                file_trees.borrow_mut().insert(
+                    page.clone(),
+                    FileTreeSlot {
+                        tree: file_tree,
+                        paned,
+                        last_pwd: Rc::new(RefCell::new(None)),
+                    },
+                );
                 tab_view.set_selected_page(&page);
                 if let Some(view) = views.first() {
                     view.focus();
@@ -1079,7 +1214,7 @@ fn build_window(
 
     // Split the focused pane. `before` puts the new terminal on the
     // left/top side; splits nest arbitrarily (Paned inside Paned).
-    let split = {
+    let split: SplitFn = {
         let tab_view = tab_view.clone();
         let pages = pages.clone();
         let make_view = make_view.clone();
@@ -1369,6 +1504,7 @@ fn build_window(
     {
         let tab_view = tab_view.clone();
         let pages = pages.clone();
+        let file_trees = file_trees.clone();
         let window_c = window.clone();
         window.add_action(&add_simple(
             "close-tab",
@@ -1376,6 +1512,7 @@ fn build_window(
                 if let Some(page) = tab_view.selected_page() {
                     tab_view.close_page(&page);
                     pages.borrow_mut().retain(|(p, _)| p != &page);
+                    file_trees.borrow_mut().remove(&page);
                     if tab_view.n_pages() == 0 {
                         window_c.close();
                     }
@@ -1399,32 +1536,60 @@ fn build_window(
         ));
     }
 
+    // Remember the last split direction so the splits button's main click
+    // repeats it (default: Split Right).
+    let last_split: Rc<RefCell<(bool, gtk4::Orientation)>> =
+        Rc::new(RefCell::new((false, gtk4::Orientation::Horizontal)));
+    // Record the direction, then run the split.
+    let split_done: SplitDone = {
+        let last_split = last_split.clone();
+        Rc::new(move |split, orientation, before| {
+            *last_split.borrow_mut() = (before, orientation);
+            split(orientation, before);
+        })
+    };
+
     {
         let split = split.clone();
+        let split_done = split_done.clone();
         window.add_action(&add_simple(
             "split-right",
-            Box::new(move || split(gtk4::Orientation::Horizontal, false)),
+            Box::new(move || split_done(split.clone(), gtk4::Orientation::Horizontal, false)),
         ));
     }
     {
         let split = split.clone();
+        let split_done = split_done.clone();
         window.add_action(&add_simple(
             "split-down",
-            Box::new(move || split(gtk4::Orientation::Vertical, false)),
+            Box::new(move || split_done(split.clone(), gtk4::Orientation::Vertical, false)),
         ));
     }
     {
         let split = split.clone();
+        let split_done = split_done.clone();
         window.add_action(&add_simple(
             "split-left",
-            Box::new(move || split(gtk4::Orientation::Horizontal, true)),
+            Box::new(move || split_done(split.clone(), gtk4::Orientation::Horizontal, true)),
         ));
     }
     {
         let split = split.clone();
+        let split_done = split_done.clone();
         window.add_action(&add_simple(
             "split-up",
-            Box::new(move || split(gtk4::Orientation::Vertical, true)),
+            Box::new(move || split_done(split.clone(), gtk4::Orientation::Vertical, true)),
+        ));
+    }
+    {
+        let split = split.clone();
+        let split_done = split_done.clone();
+        window.add_action(&add_simple(
+            "split-last",
+            Box::new(move || {
+                let (before, orientation) = *last_split.borrow();
+                split_done(split.clone(), orientation, before);
+            }),
         ));
     }
 
@@ -1764,6 +1929,161 @@ fn build_window(
         ));
     }
 
+    // Toggle the file-tree panel of the selected tab (IDE-style explorer).
+    {
+        let tab_view = tab_view.clone();
+        let file_trees = file_trees.clone();
+        let current_view = current_view.clone();
+        window.add_action(&add_simple(
+            "file-tree",
+            Box::new(move || {
+                let Some(page) = tab_view.selected_page() else {
+                    return;
+                };
+                let Some(slot) = file_trees.borrow().get(&page).cloned() else {
+                    return;
+                };
+                let panel = slot.paned.end_child();
+                let Some(panel) = panel else {
+                    return;
+                };
+                if !panel.is_visible() {
+                    // Re-root to the focused pane before revealing the panel.
+                    if let Some(view) = current_view()
+                        && let Some(pwd) = view.pwd().map(PathBuf::from)
+                    {
+                        slot.tree.set_root(pwd.clone());
+                        *slot.last_pwd.borrow_mut() = Some(pwd);
+                    }
+                    let total = slot.paned.width().max(400);
+                    slot.paned.set_position((total as f64 * 0.72) as i32);
+                    panel.set_visible(true);
+                } else {
+                    panel.set_visible(false);
+                }
+            }),
+        ));
+    }
+
+    // One dedicated tab per installed agent: run the CLI in the current pane's
+    // directory, inserted to the right of the active tab, with its real logo
+    // as the tab icon.
+    {
+        let add_tab = add_tab.clone();
+        let inherit_cwd = inherit_cwd.clone();
+        let toast = toast.clone();
+        let tab_view = tab_view.clone();
+        let rebuild_sidebar = rebuild_sidebar.clone();
+        for kind in agents::AgentKind::ALL {
+            if !agents::is_installed(kind) {
+                continue;
+            }
+            window.add_action(&add_simple(&format!("agent-{}", kind.as_str()), {
+                let add_tab = add_tab.clone();
+                let inherit_cwd = inherit_cwd.clone();
+                let toast = toast.clone();
+                let tab_view = tab_view.clone();
+                let rebuild_sidebar = rebuild_sidebar.clone();
+                Box::new(move || {
+                    // Always give the agent a real working directory — these
+                    // CLIs tend to bail out (or open the wrong repo) without
+                    // one, and `inherit_cwd` can be None on a fresh window.
+                    let cwd = inherit_cwd().or_else(dirs::home_dir);
+                    let cur = tab_view.selected_page();
+                    // Copy the dir for the tab title before it is moved into
+                    // the launch request.
+                    let title_dir = cwd.clone();
+                    match add_tab(LaunchRequest {
+                        cwd,
+                        command: Some(agents::new_command(kind)),
+                    }) {
+                        Ok(page) => {
+                            // Insert to the right of the tab we opened from.
+                            if let Some(cur) = cur {
+                                let at = tab_view.page_position(&cur) + 1;
+                                tab_view.reorder_page(&page, at);
+                            }
+                            // Real logo as the tab icon, resolved through the
+                            // icon theme (registers the logos dir). Use the
+                            // derived white glyph on dark themes so it stays
+                            // legible; the original logo on light themes.
+                            let dark = adw::StyleManager::default().is_dark();
+                            let icon = gio::ThemedIcon::new(kind.theme_icon_name(dark));
+                            page.set_icon(Some(&icon));
+                            // Rebuild the sidebar so it mirrors the icon too
+                            // (page_attached fired before set_icon).
+                            rebuild_sidebar();
+                            // Keep our "<Agent> (<dir>)" title (don't let the
+                            // agent's OSC window-title overwrite it).
+                            set_tab_renamed(&page, true);
+                            // "<Agent> (<dir>)" — e.g. "Codex (~/projects/app)".
+                            let dir = title_dir
+                                .as_deref()
+                                .and_then(|p| p.to_str())
+                                .map(abbreviate_home)
+                                .unwrap_or_else(|| "~".to_string());
+                            page.set_title(&format!("{} ({})", kind.label(), dir));
+                        }
+                        Err(err) => {
+                            tracing::error!("agent tab failed: {err:#}");
+                            toast(&format!("Failed to open {}", kind.label()));
+                        }
+                    }
+                })
+            }));
+        }
+    }
+
+    // Save the most recent Codex thread as a Markdown transcript to a chosen
+    // directory (defaulting to the focused pane's working directory).
+    {
+        let window_c = window.clone();
+        let toast = toast.clone();
+        let current_view = current_view.clone();
+        window.add_action(&add_simple(
+            "save-codex-thread",
+            Box::new(move || {
+                let Some(thread) = codex::list_threads().into_iter().next() else {
+                    toast("No Codex thread found");
+                    return;
+                };
+                let folder = current_view()
+                    .and_then(|v| v.pwd())
+                    .map(PathBuf::from)
+                    .filter(|d| d.is_dir());
+                let dialog = gtk4::FileDialog::builder()
+                    .initial_name(format!("{}.md", codex::slugify(&thread.title)))
+                    .build();
+                if let Some(folder) = folder {
+                    dialog.set_initial_folder(Some(&gio::File::for_path(&folder)));
+                }
+
+                let thread_file = thread.file.clone();
+                let toast = toast.clone();
+                dialog.save(Some(&window_c), None::<&gio::Cancellable>, move |res| {
+                    let Ok(file) = res else { return }; // cancelled
+                    let Some(path) = file.path() else {
+                        toast("No local path for the chosen file");
+                        return;
+                    };
+                    match codex::render_markdown(&thread_file) {
+                        Ok(md) => match std::fs::write(&path, md) {
+                            Ok(()) => toast("Codex thread saved"),
+                            Err(err) => {
+                                tracing::error!("saving codex thread: {err}");
+                                toast("Failed to save thread");
+                            }
+                        },
+                        Err(err) => {
+                            tracing::error!("rendering codex thread: {err:#}");
+                            toast("Failed to render thread");
+                        }
+                    }
+                });
+            }),
+        ));
+    }
+
     {
         let tab_view = tab_view.clone();
         let window_c = window.clone();
@@ -1956,6 +2276,8 @@ fn build_window(
     app.set_accels_for_action("win.command-palette", &["<Control><Shift>p"]);
     app.set_accels_for_action("win.find", &["<Control><Shift>f"]);
     app.set_accels_for_action("win.open-browser", &["<Control><Shift>b"]);
+    app.set_accels_for_action("win.file-tree", &["F9"]);
+    app.set_accels_for_action("win.save-codex-thread", &["<Control><Shift>d"]);
     app.set_accels_for_action("win.rename-tab", &["F2"]);
     app.set_accels_for_action(
         "win.zoom-in",
@@ -2029,6 +2351,7 @@ fn build_window(
     // Confirm close; drop our page refs.
     {
         let pages = pages.clone();
+        let file_trees = file_trees.clone();
         let window = window.clone();
         let config = config.clone();
         tab_view.connect_close_page(move |tv, page| {
@@ -2047,12 +2370,14 @@ fn build_window(
                 let tv = tv.clone();
                 let page = page.clone();
                 let pages = pages.clone();
+                let file_trees = file_trees.clone();
                 let parent = window.clone();
                 let window = window.clone();
                 dialog.choose(&parent, gio::Cancellable::NONE, move |response| {
                     let closing = response == "close";
                     if closing {
                         pages.borrow_mut().retain(|(p, _)| p != &page);
+                        file_trees.borrow_mut().remove(&page);
                     }
                     tv.close_page_finish(&page, closing);
                     if closing && tv.n_pages() == 0 {
@@ -2063,6 +2388,7 @@ fn build_window(
             }
 
             pages.borrow_mut().retain(|(p, _)| p != page);
+            file_trees.borrow_mut().remove(page);
             // Must call close_page_finish for AdwTabView.
             tv.close_page_finish(page, true);
             if tv.n_pages() == 0 {
@@ -2503,4 +2829,18 @@ fn cycle_tab(tab_view: &adw::TabView, dir: i32) {
     let next = (cur + dir).rem_euclid(n);
     let page = tab_view.nth_page(next);
     tab_view.set_selected_page(&page);
+}
+
+/// Render a path for display, abbreviating the home dir to `~`.
+fn abbreviate_home(path: &str) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Some(rest) = path.strip_prefix(&home.to_string_lossy().into_owned())
+    {
+        return if rest.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~{}", rest)
+        };
+    }
+    path.to_string()
 }
