@@ -668,13 +668,13 @@ pub fn show_codex_picker(
         .content_width(520)
         .content_height(480)
         .build();
-    let picker = codex_picker(&dialog, window.downgrade(), threads, export, open);
-    dialog.set_child(Some(&picker.root));
+    let (root, entry, _list) = codex_picker(&dialog, window.downgrade(), threads, export, open);
+    dialog.set_child(Some(&root));
 
     // Escape has to be handled twice over (see show_command_palette).
     {
         let dialog = dialog.clone();
-        picker.entry.connect_stop_search(move |_| {
+        entry.connect_stop_search(move |_| {
             dialog.close();
         });
     }
@@ -695,26 +695,21 @@ pub fn show_codex_picker(
     dialog.set_can_close(true);
 
     dialog.present(Some(window));
-    picker.entry.grab_focus();
+    entry.grab_focus();
 }
 
-struct CodexPicker {
-    root: gtk4::Box,
-    entry: gtk4::SearchEntry,
-    list: gtk4::ListBox,
-}
-
-/// Build the picker contents. Split from [`show_codex_picker`] so tests can
-/// exercise the rows and filtering without presenting a dialog over a live
-/// window. `window` is weak: it is only needed when the user clicks a row's
-/// "Open" button, to parent the transcript chooser.
+/// Build the picker contents: the root box, the search entry and the thread
+/// list. Split from [`show_codex_picker`] so tests can exercise the rows and
+/// filtering without presenting a dialog over a live window. `window` is
+/// weak: it is only needed when the user clicks a row's "Open" button, to
+/// parent the transcript chooser.
 fn codex_picker(
     dialog: &adw::Dialog,
     window: glib::WeakRef<adw::ApplicationWindow>,
     threads: Vec<crate::codex::CodexThread>,
     export: Rc<dyn Fn(crate::codex::CodexThread)>,
     open: Rc<dyn Fn(PathBuf)>,
-) -> CodexPicker {
+) -> (gtk4::Box, gtk4::SearchEntry, gtk4::ListBox) {
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     root.set_margin_top(6);
     root.set_margin_bottom(6);
@@ -873,7 +868,7 @@ fn codex_picker(
     scroll.set_child(Some(&list));
     root.append(&scroll);
 
-    CodexPicker { root, entry, list }
+    (root, entry, list)
 }
 
 /// The Codex agent logo when the icon theme has it, else a generic document
@@ -2117,49 +2112,49 @@ mod tests {
             fake_codex_thread("t2", "Write docs", Some("/tmp/docs")),
         ];
         let dialog = adw::Dialog::new();
-        let picker = codex_picker(
+        let (_, entry, list) = codex_picker(
             &dialog,
             glib::WeakRef::new(),
             threads,
             Rc::new(|_| {}),
             Rc::new(|_| {}),
         );
-        let visible = |i: u32| picker.list.row_at_index(i).is_some_and(|r| r.visible());
+        let visible = |i: u32| list.row_at_index(i).is_some_and(|r| r.visible());
         assert!(visible(0) && visible(1));
 
-        picker.entry.set_text("fix parser");
+        entry.set_text("fix parser");
         crate::test_support::spin_until(|| !visible(1));
         assert!(visible(0));
         assert!(!visible(1));
 
-        picker.entry.set_text("docs");
+        entry.set_text("docs");
         crate::test_support::spin_until(|| !visible(0));
         assert!(!visible(0));
         assert!(visible(1));
 
         // Every query word must match, as in the command palette.
-        picker.entry.set_text("fix docs");
+        entry.set_text("fix docs");
         crate::test_support::spin_until(|| !visible(1));
         assert!(!visible(0) && !visible(1));
 
-        picker.entry.set_text("");
+        entry.set_text("");
         crate::test_support::spin_until(|| visible(0) && visible(1));
     }
 
     #[gtk4::test]
     fn codex_picker_empty_list_shows_placeholder() {
         let dialog = adw::Dialog::new();
-        let picker = codex_picker(
+        let (_, _, list) = codex_picker(
             &dialog,
             glib::WeakRef::new(),
             Vec::new(),
             Rc::new(|_| {}),
             Rc::new(|_| {}),
         );
-        let row = picker.list.row_at_index(0).unwrap();
+        let row = list.row_at_index(0).unwrap();
         let row = row.downcast::<adw::ActionRow>().unwrap();
         assert_eq!(row.title(), "No Codex threads found");
         assert!(!row.is_activatable());
-        assert!(picker.list.row_at_index(1).is_none());
+        assert!(list.row_at_index(1).is_none());
     }
 }
