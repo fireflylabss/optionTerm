@@ -22,7 +22,7 @@ use crate::{
     launch::LaunchRequest,
     session::{PaneLayout, Session as SessionState, SplitOrientation, TabKind, TabState},
     terminal::TerminalView,
-    tree::FileTree,
+    tree::{FileTree, TreeActions},
     ui::{
         PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
         show_preferences, show_shortcuts, tab_menu, tabs_menu,
@@ -39,6 +39,8 @@ type Toast = Rc<dyn Fn(&str)>;
 type CallbackSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type Focused = Rc<RefCell<Option<Weak<TerminalView>>>>;
 type LaunchHandler = Rc<dyn Fn(LaunchRequest)>;
+/// Opens a launch request as a new tab (`add_tab`).
+type AddTabFn = Rc<dyn Fn(LaunchRequest) -> anyhow::Result<adw::TabPage>>;
 /// Splits the focused pane in a direction (`orientation`, `before`).
 type SplitFn = Rc<dyn Fn(gtk4::Orientation, bool)>;
 /// Records the direction, then runs a `SplitFn`.
@@ -1010,12 +1012,39 @@ fn build_window(
         )
     };
 
+    // Context-menu actions shared by every per-tab file tree. `add_tab` is
+    // defined right below; the slot lets the menu call back into it without
+    // a circular construction.
+    let open_tab_slot: Rc<RefCell<Option<AddTabFn>>> = Rc::new(RefCell::new(None));
+    let tree_actions = TreeActions {
+        open_in_terminal: {
+            let open_tab_slot = open_tab_slot.clone();
+            Rc::new(move |dir: PathBuf| {
+                let add_tab = open_tab_slot.borrow().clone();
+                let Some(add_tab) = add_tab else { return };
+                if let Err(err) = add_tab(LaunchRequest {
+                    cwd: Some(dir),
+                    command: None,
+                }) {
+                    tracing::error!("open-in-terminal failed: {err:#}");
+                }
+            })
+        },
+        copy_path: Rc::new(|path: &Path| {
+            if let Some(display) = gdk::Display::default() {
+                display.clipboard().set_text(&path.display().to_string());
+            }
+        }),
+        ..TreeActions::default()
+    };
+
     let add_tab = {
         let tab_view = tab_view.clone();
         let pages = pages.clone();
         let make_view = make_view.clone();
         let config = config.clone();
         let file_trees = file_trees.clone();
+        let tree_actions = tree_actions.clone();
         Rc::new(
             move |launch: LaunchRequest| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
@@ -1023,7 +1052,7 @@ fn build_window(
 
                 // Every tab hosts a collapsible file-tree panel to the right,
                 // toggled with `win.file-tree` (like an IDE explorer).
-                let file_tree = Rc::new(FileTree::new());
+                let file_tree = Rc::new(FileTree::new_with_actions(tree_actions.clone()));
                 let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
                 paned.set_hexpand(true);
                 paned.set_vexpand(true);
@@ -1075,6 +1104,8 @@ fn build_window(
             },
         )
     };
+    // Now that `add_tab` exists, hand it to the file-tree context menus.
+    *open_tab_slot.borrow_mut() = Some(add_tab.clone());
 
     let add_browser_tab = {
         let tab_view = tab_view.clone();
@@ -1095,13 +1126,14 @@ fn build_window(
         let pages = pages.clone();
         let make_view = make_view.clone();
         let file_trees = file_trees.clone();
+        let tree_actions = tree_actions.clone();
         Rc::new(
             move |title: Option<String>, layout: &PaneLayout| -> anyhow::Result<adw::TabPage> {
                 let page_slot: Rc<RefCell<Option<adw::TabPage>>> = Rc::new(RefCell::new(None));
                 let (child, views) = build_layout_widget(layout, &make_view, &page_slot)?;
 
                 // Same per-tab file-tree panel as a fresh tab.
-                let file_tree = Rc::new(FileTree::new());
+                let file_tree = Rc::new(FileTree::new_with_actions(tree_actions.clone()));
                 let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
                 paned.set_hexpand(true);
                 paned.set_vexpand(true);

@@ -85,6 +85,7 @@ pub struct FileTree {
 }
 
 impl FileTree {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_loader(Arc::new(load_tree), TreeActions::default())
     }
