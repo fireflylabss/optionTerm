@@ -53,6 +53,27 @@ struct TreeRequest {
 type TreeLoader =
     Arc<dyn Fn(TreeRequest) -> Result<TreeSnapshot, std::io::ErrorKind> + Send + Sync>;
 
+/// Context-menu actions offered on a file-tree row.
+#[derive(Clone)]
+pub struct TreeActions {
+    /// Open a file with the system's default application.
+    pub open: Rc<dyn Fn(PathBuf)>,
+    /// Open a new terminal tab rooted at a directory.
+    pub open_in_terminal: Rc<dyn Fn(PathBuf)>,
+    /// Copy an absolute path to the clipboard.
+    pub copy_path: Rc<dyn Fn(&Path)>,
+}
+
+impl Default for TreeActions {
+    fn default() -> Self {
+        Self {
+            open: Rc::new(|path| open_with_default(&path)),
+            open_in_terminal: Rc::new(|_| {}),
+            copy_path: Rc::new(|_| {}),
+        }
+    }
+}
+
 pub struct FileTree {
     pub widget: gtk4::ScrolledWindow,
     header: gtk4::Label,
@@ -65,10 +86,15 @@ pub struct FileTree {
 
 impl FileTree {
     pub fn new() -> Self {
-        Self::with_loader(Arc::new(load_tree))
+        Self::with_loader(Arc::new(load_tree), TreeActions::default())
     }
 
-    fn with_loader(loader: TreeLoader) -> Self {
+    /// A file tree whose context menu runs the given actions.
+    pub fn new_with_actions(actions: TreeActions) -> Self {
+        Self::with_loader(Arc::new(load_tree), actions)
+    }
+
+    fn with_loader(loader: TreeLoader, actions: TreeActions) -> Self {
         let header = gtk4::Label::new(Some("Files"));
         header.add_css_class("heading");
         header.add_css_class("caption");
@@ -111,15 +137,12 @@ impl FileTree {
             }
         });
 
-        bind_tree_activation(
-            &list,
-            navigate.clone(),
-            Rc::new(|path| open_with_default(&path)),
-        );
+        bind_tree_activation(&list, navigate.clone(), actions.open.clone());
         {
             let list = list.downgrade();
             let root = root.clone();
             let expanded = expanded.clone();
+            let actions = actions.clone();
 
             let holder = Rc::downgrade(&rebuild);
             let cache = cache.clone();
@@ -162,6 +185,7 @@ impl FileTree {
                 let loading = loading.clone();
                 let last_root = last_root.clone();
                 let header = header.clone();
+                let actions = actions.clone();
                 if let Some(list) = list.upgrade()
                     && list.first_child().is_none()
                 {
@@ -205,6 +229,7 @@ impl FileTree {
                                 &expanded,
                                 &holder,
                                 &snapshot,
+                                &actions,
                             );
                             if snapshot.limited {
                                 append_status(&list, "More entries not shown", 0);
@@ -453,6 +478,84 @@ fn icon_name_for(path: &Path, is_dir: bool) -> &'static str {
     }
 }
 
+/// Right-click context menu of a file-tree row: Open, Open in Terminal,
+/// Copy Path, backed by per-row `tree.*` actions.
+fn tree_context_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    let open_group = gio::Menu::new();
+    open_group.append(Some("Open"), Some("tree.open"));
+    open_group.append(Some("Open in Terminal"), Some("tree.open-in-terminal"));
+    menu.append_section(None, &open_group);
+    let edit_group = gio::Menu::new();
+    edit_group.append(Some("Copy Path"), Some("tree.copy-path"));
+    menu.append_section(None, &edit_group);
+    menu
+}
+
+/// Give one tree row its context menu: a secondary-click `GestureClick`
+/// popping a `PopoverMenu`, and a `tree.*` action group bound to the row's
+/// path so menu entries operate on this row only.
+fn attach_row_context_menu(row: &gtk4::ListBoxRow, path: &Path, is_dir: bool, actions: &TreeActions) {
+    let popover = gtk4::PopoverMenu::from_model(Some(&tree_context_menu()));
+    popover.set_parent(row);
+    popover.set_has_arrow(false);
+    popover.set_halign(gtk4::Align::Start);
+
+    {
+        let popover = popover.clone();
+        row.connect_destroy(move |_| popover.unparent());
+    }
+
+    let group = gio::SimpleActionGroup::new();
+
+    let open = gio::SimpleAction::new("open", None);
+    {
+        let actions = actions.clone();
+        let path = path.to_path_buf();
+        open.connect_activate(move |_, _| (actions.open)(path.clone()));
+    }
+
+    let open_in_terminal = gio::SimpleAction::new("open-in-terminal", None);
+    {
+        let actions = actions.clone();
+        let path = path.to_path_buf();
+        open_in_terminal.connect_activate(move |_, _| {
+            // A file's terminal is its containing folder.
+            let dir = if is_dir {
+                path.clone()
+            } else {
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.clone())
+            };
+            (actions.open_in_terminal)(dir);
+        });
+    }
+
+    let copy_path = gio::SimpleAction::new("copy-path", None);
+    {
+        let actions = actions.clone();
+        let path = path.to_path_buf();
+        copy_path.connect_activate(move |_, _| (actions.copy_path)(&path));
+    }
+
+    group.add_action(&open);
+    group.add_action(&open_in_terminal);
+    group.add_action(&copy_path);
+    row.insert_action_group("tree", Some(&group));
+
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(gtk4::gdk::BUTTON_SECONDARY);
+    {
+        let popover = popover.clone();
+        gesture.connect_pressed(move |_, _, x, y| {
+            popover.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.popup();
+        });
+    }
+    row.add_controller(gesture);
+}
+
 fn append_dir_rows(
     list: &gtk4::ListBox,
     dir: &Path,
@@ -460,6 +563,7 @@ fn append_dir_rows(
     expanded: &Expanded,
     rebuild: &RebuildHolder,
     snapshot: &TreeSnapshot,
+    actions: &TreeActions,
 ) {
     let entries = match snapshot.directories.get(dir) {
         Some(Ok(entries)) => entries,
@@ -560,9 +664,20 @@ fn append_dir_rows(
 
         // Double-click / Enter behaves the same.
 
+        // Right-click: Open / Open in Terminal / Copy Path for this row.
+        attach_row_context_menu(&list_row, &path, is_dir, actions);
+
         list.append(&list_row);
         if already_expanded {
-            append_dir_rows(list, &path, depth + 1, expanded, rebuild, snapshot);
+            append_dir_rows(
+                list,
+                &path,
+                depth + 1,
+                expanded,
+                rebuild,
+                snapshot,
+                actions,
+            );
         }
     }
 }
@@ -643,16 +758,19 @@ mod tests {
         let release = std::sync::Mutex::new(Some(rx));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = calls.clone();
-        let tree = FileTree::with_loader(Arc::new(move |request| {
-            count.fetch_add(1, Ordering::Relaxed);
-            if let Some(rx) = release.lock().unwrap().take() {
-                assert!(
-                    rx.recv_timeout(Duration::from_secs(2)).is_ok(),
-                    "UI was blocked by the file tree"
-                );
-            }
-            load_tree(request)
-        }));
+        let tree = FileTree::with_loader(
+            Arc::new(move |request| {
+                count.fetch_add(1, Ordering::Relaxed);
+                if let Some(rx) = release.lock().unwrap().take() {
+                    assert!(
+                        rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+                        "UI was blocked by the file tree"
+                    );
+                }
+                load_tree(request)
+            }),
+            TreeActions::default(),
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         tree.set_root(first);
         tree.set_root(last.clone());
@@ -676,19 +794,22 @@ mod tests {
         let release = std::sync::Mutex::new(Some(rx));
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done = finished.clone();
-        let tree = FileTree::with_loader(Arc::new(move |request| {
-            release
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap();
-            let result = load_tree(request);
-            assert!(matches!(result, Err(std::io::ErrorKind::Interrupted)));
-            done.store(true, Ordering::Relaxed);
-            result
-        }));
+        let tree = FileTree::with_loader(
+            Arc::new(move |request| {
+                release
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                let result = load_tree(request);
+                assert!(matches!(result, Err(std::io::ErrorKind::Interrupted)));
+                done.store(true, Ordering::Relaxed);
+                result
+            }),
+            TreeActions::default(),
+        );
         tree.set_root(dir.path().to_path_buf());
         let widget = tree.widget.downgrade();
         drop(tree);
@@ -745,7 +866,15 @@ mod tests {
             None,
         ))
         .unwrap();
-        append_dir_rows(&list, dir.path(), 0, &expanded, &rebuild, &snapshot);
+        append_dir_rows(
+            &list,
+            dir.path(),
+            0,
+            &expanded,
+            &rebuild,
+            &snapshot,
+            &TreeActions::default(),
+        );
         let titles: Vec<String> = (0..2)
             .map(|i| {
                 list.row_at_index(i)
