@@ -774,10 +774,7 @@ fn codex_picker(
                     };
                     let chooser = gtk4::FileDialog::builder()
                         .title("Open saved transcript")
-                        .initial_name(format!(
-                            "{}.md",
-                            crate::codex::slugify(&thread.title)
-                        ))
+                        .initial_name(format!("{}.md", crate::codex::slugify(&thread.title)))
                         .build();
                     // Per-click clones: the response callback is FnOnce,
                     // the button itself can be clicked again.
@@ -2112,14 +2109,20 @@ mod tests {
             fake_codex_thread("t2", "Write docs", Some("/tmp/docs")),
         ];
         let dialog = adw::Dialog::new();
-        let (_, entry, list) = codex_picker(
+        let (root, entry, list) = codex_picker(
             &dialog,
             glib::WeakRef::new(),
             threads,
             Rc::new(|_| {}),
             Rc::new(|_| {}),
         );
-        let visible = |i: u32| list.row_at_index(i).is_some_and(|r| r.visible());
+        // Mount the picker in a real window: the ListBox filter hides rows by
+        // unmapping them, which only happens once the list is onscreen.
+        let win = gtk4::Window::new();
+        win.set_child(Some(&root));
+        win.present();
+        crate::test_support::spin_until(|| list.row_at_index(1).is_some_and(|r| r.is_mapped()));
+        let visible = |i: i32| list.row_at_index(i).is_some_and(|r| r.is_mapped());
         assert!(visible(0) && visible(1));
 
         entry.set_text("fix parser");

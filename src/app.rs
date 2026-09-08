@@ -2088,7 +2088,6 @@ fn build_window(
                     let export = {
                         let window = window.clone();
                         let toast = toast.clone();
-                        let folder = folder;
                         Rc::new(move |thread: codex::CodexThread| {
                             let dialog = gtk4::FileDialog::builder()
                                 .title(format!("Export Codex: {}", thread.title))
