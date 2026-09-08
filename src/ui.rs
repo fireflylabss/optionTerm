@@ -480,12 +480,40 @@ impl SearchBar {
     }
 }
 
-pub fn show_command_palette(
+/// One actionable row of the command palette.
+#[derive(Clone)]
+enum PaletteAction {
+    Win(&'static str),
+    Launch(crate::launch::LaunchRequest),
+    /// Whatever the user typed, tokenized on the last keystroke.
+    Typed(Vec<String>),
+}
+
+/// Should the synthetic "Run: <query>" row be shown? It duplicates a
+/// `[[command]]` preset exactly when the query spells that preset's name,
+/// and then the preset row wins. Whitespace-only queries have nothing to
+/// run; unparseable ones (unbalanced quotes) still show, so Enter is a
+/// no-op instead of falling through to a preset.
+fn typed_row_visible(query: &str, entries: &[(String, String, PaletteAction)]) -> bool {
+    if query.trim().is_empty() {
+        return false;
+    }
+    let typed = format!("Run: {query}").to_lowercase();
+    !entries
+        .iter()
+        .any(|(label, _, _)| label.to_lowercase() == typed)
+}
+
+/// Build the palette dialog and the widgets that drive it, as
+/// `(dialog, entry, list)`. Split from `show_command_palette` so tests can
+/// exercise the palette without presenting the dialog.
+fn build_command_palette(
     window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
     bindings: &Bindings,
     open_launch: Rc<dyn Fn(crate::launch::LaunchRequest)>,
-) {
+    current_dir: Rc<dyn Fn() -> Option<PathBuf>>,
+) -> (adw::Dialog, gtk4::SearchEntry, gtk4::ListBox) {
     let dialog = adw::Dialog::builder()
         .title("Command Palette")
         .content_width(460)
@@ -506,12 +534,6 @@ pub fn show_command_palette(
     list.set_selection_mode(gtk4::SelectionMode::Single);
     list.add_css_class("boxed-list");
 
-    #[derive(Clone)]
-    enum PaletteAction {
-        Win(&'static str),
-        Launch(crate::launch::LaunchRequest),
-    }
-
     let mut entries: Vec<(String, String, PaletteAction)> = bindings
         .effective()
         .into_iter()
@@ -528,6 +550,22 @@ pub fn show_command_palette(
         ));
     }
     let entries = Rc::new(entries);
+
+    // Synthetic "Run: <typed query>" row, pinned to model index 0 so Enter
+    // picks it first. Its label tracks the entry text; activating it runs
+    // the tokenized query.
+    let typed_row = gtk4::ListBoxRow::new();
+    let typed_hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    typed_hbox.set_margin_top(8);
+    typed_hbox.set_margin_bottom(8);
+    typed_hbox.set_margin_start(12);
+    typed_hbox.set_margin_end(12);
+    let typed_label = gtk4::Label::new(None);
+    typed_label.set_halign(gtk4::Align::Start);
+    typed_label.set_hexpand(true);
+    typed_hbox.append(&typed_label);
+    typed_row.set_child(Some(&typed_hbox));
+    list.append(&typed_row);
 
     for (label, accel, _) in entries.iter() {
         let row = gtk4::ListBoxRow::new();
@@ -550,20 +588,27 @@ pub fn show_command_palette(
         list.append(&row);
     }
 
+    // Raw, case-preserving query: the typed row runs exactly what the user
+    // typed, while the filter lowercases its own copy for matching.
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let typed_action: Rc<RefCell<Option<PaletteAction>>> = Rc::new(RefCell::new(None));
     {
         let query = query.clone();
         let entries = entries.clone();
         list.set_filter_func(move |row| {
             let q = query.borrow();
+            if row.index() == 0 {
+                return typed_row_visible(&q, &entries);
+            }
             if q.is_empty() {
                 return true;
             }
+            let lower = q.to_lowercase();
             entries
-                .get(row.index() as usize)
+                .get(row.index() as usize - 1)
                 .map(|(label, _, _)| {
                     let needle = label.to_lowercase();
-                    q.split_whitespace().all(|w| needle.contains(w))
+                    lower.split_whitespace().all(|w| needle.contains(w))
                 })
                 .unwrap_or(false)
         });
@@ -571,8 +616,14 @@ pub fn show_command_palette(
     {
         let query = query.clone();
         let list = list.clone();
+        let typed_label = typed_label.clone();
+        let typed_action = typed_action.clone();
         entry.connect_search_changed(move |e| {
-            *query.borrow_mut() = e.text().to_lowercase();
+            let text = e.text().to_string();
+            typed_label.set_text(&format!("Run: {text}"));
+            *typed_action.borrow_mut() =
+                crate::launch::tokenize_shell(&text).map(PaletteAction::Typed);
+            *query.borrow_mut() = text;
             list.invalidate_filter();
         });
     }
@@ -582,8 +633,25 @@ pub fn show_command_palette(
         let dialog = dialog.clone();
         let entries = entries.clone();
         let open_launch = open_launch.clone();
+        let typed_action = typed_action.clone();
+        let current_dir = current_dir.clone();
         Rc::new(move |row: &gtk4::ListBoxRow| {
-            let Some((_, _, action)) = entries.get(row.index() as usize) else {
+            if row.index() == 0 {
+                // An unparseable query (e.g. unbalanced quotes) leaves the
+                // dialog open so the user can fix it.
+                let Some(PaletteAction::Typed(argv)) = typed_action.borrow().as_ref().cloned()
+                else {
+                    return;
+                };
+                dialog.close();
+                let req = crate::launch::LaunchRequest {
+                    cwd: current_dir(),
+                    command: Some(argv),
+                };
+                open_launch(req);
+                return;
+            }
+            let Some((_, _, action)) = entries.get(row.index() as usize - 1) else {
                 return;
             };
             dialog.close();
@@ -592,6 +660,7 @@ pub fn show_command_palette(
                     gtk4::prelude::WidgetExt::activate_action(&window, action, None).ok();
                 }
                 PaletteAction::Launch(req) => open_launch(req.clone()),
+                PaletteAction::Typed(_) => unreachable!("typed actions live on the first row"),
             }
         })
     };
@@ -647,6 +716,18 @@ pub fn show_command_palette(
     // Clicking outside dismisses it.
     dialog.set_can_close(true);
 
+    (dialog, entry, list)
+}
+
+pub fn show_command_palette(
+    window: &adw::ApplicationWindow,
+    config: &Rc<RefCell<Config>>,
+    bindings: &Bindings,
+    open_launch: Rc<dyn Fn(crate::launch::LaunchRequest)>,
+    current_dir: Rc<dyn Fn() -> Option<PathBuf>>,
+) {
+    let (dialog, entry, _list) =
+        build_command_palette(window, config, bindings, open_launch, current_dir);
     dialog.present(Some(window));
     entry.grab_focus();
 }
@@ -2159,5 +2240,103 @@ mod tests {
         assert_eq!(row.title(), "No Codex threads found");
         assert!(!row.is_activatable());
         assert!(list.row_at_index(1).is_none());
+    }
+
+    #[test]
+    fn typed_row_visibility_rules() {
+        let row = |label: &str| {
+            (
+                label.to_string(),
+                String::new(),
+                PaletteAction::Win("win.noop"),
+            )
+        };
+        let entries = vec![row("Run: build"), row("Zoom In")];
+        assert!(!typed_row_visible("", &entries));
+        assert!(!typed_row_visible("   ", &entries));
+        assert!(typed_row_visible("cargo build", &entries));
+        assert!(!typed_row_visible("build", &entries), "preset name wins");
+        assert!(!typed_row_visible("Build", &entries), "case-insensitive");
+        assert!(typed_row_visible("build clean", &entries));
+    }
+
+    #[gtk4::test]
+    fn palette_runs_typed_commands_and_presets() {
+        let app = gtk4::Application::builder()
+            .application_id("io.option.terminal.palette-test")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let window = adw::ApplicationWindow::new(&app);
+        let config = Rc::new(RefCell::new(Config {
+            commands: vec![crate::config::CommandPreset {
+                name: "build".into(),
+                argv: vec!["cargo".into(), "build".into()],
+                cwd: None,
+            }],
+            ..Config::default()
+        }));
+        let launched = Rc::new(RefCell::new(Vec::<crate::launch::LaunchRequest>::new()));
+        let open_launch = {
+            let launched = launched.clone();
+            Rc::new(move |req: crate::launch::LaunchRequest| {
+                launched.borrow_mut().push(req);
+            })
+        };
+        let current_dir = Rc::new(|| Some(PathBuf::from("/focused/pane")));
+        let (_dialog, entry, list) = build_command_palette(
+            &window,
+            &config,
+            &Bindings::default(),
+            open_launch,
+            current_dir,
+        );
+
+        // Simulate typing: the delayed search-changed signal feeds the
+        // synthetic row. Handlers run in connect order, so once our probe
+        // fires the palette's own handler has already run.
+        let fired = Rc::new(std::cell::Cell::new(false));
+        entry.connect_search_changed({
+            let fired = fired.clone();
+            move |_| fired.set(true)
+        });
+        entry.set_text("echo 'hello world'");
+        crate::test_support::spin_until(|| fired.get());
+
+        // Enter drives row-activated on the first row; do the same here.
+        let typed_row = list.row_at_index(0).unwrap();
+        list.emit_by_name::<()>("row-activated", &[&typed_row]);
+        assert_eq!(
+            launched.borrow().as_slice(),
+            [crate::launch::LaunchRequest {
+                cwd: Some(PathBuf::from("/focused/pane")),
+                command: Some(vec!["echo".into(), "hello world".into()]),
+            }]
+        );
+
+        // The synthetic row shifted preset rows by one; they must still map
+        // to their own actions (model index 1 + all binding rows).
+        launched.borrow_mut().clear();
+        let preset_row = list.row_at_index(1 + COMMANDS.len() as i32).unwrap();
+        list.emit_by_name::<()>("row-activated", &[&preset_row]);
+        assert_eq!(
+            launched.borrow().as_slice(),
+            [crate::launch::LaunchRequest {
+                cwd: None,
+                command: Some(vec!["cargo".into(), "build".into()]),
+            }]
+        );
+
+        // An unparseable query keeps the dialog open and launches nothing.
+        launched.borrow_mut().clear();
+        let fired = Rc::new(std::cell::Cell::new(false));
+        entry.connect_search_changed({
+            let fired = fired.clone();
+            move |_| fired.set(true)
+        });
+        entry.set_text("echo 'unclosed");
+        crate::test_support::spin_until(|| fired.get());
+        list.emit_by_name::<()>("row-activated", &[&typed_row]);
+        assert!(launched.borrow().is_empty());
     }
 }

@@ -85,6 +85,58 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> LaunchRequest {
     LaunchRequest { cwd, command }
 }
 
+/// Split a typed command into an argv, respecting single and double quotes.
+///
+/// Deliberately not a shell: no `$VAR`, `~`, globs or pipes — just
+/// whitespace splitting plus `"…"` / `'…'` segments (which may contain
+/// spaces) and `\"` / `\'` as escaped quotes inside the matching quote
+/// style. Backslashes are literal everywhere else. Returns `None` for
+/// empty input or unbalanced quotes.
+pub fn tokenize_shell(query: &str) -> Option<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    let mut chars = query.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' && chars.peek() == Some(&q) {
+                    current.push(q);
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            None => {
+                if c.is_whitespace() {
+                    if in_token {
+                        tokens.push(std::mem::take(&mut current));
+                        in_token = false;
+                    }
+                } else if c == '\'' || c == '"' {
+                    quote = Some(c);
+                    in_token = true;
+                } else {
+                    current.push(c);
+                    in_token = true;
+                }
+            }
+        }
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    if in_token {
+        tokens.push(current);
+    }
+    (!tokens.is_empty()).then_some(tokens)
+}
+
 pub const HELP: &str = "Usage: optionterm [OPTIONS] [DIRECTORY]\n\nOptions:\n  -d, --working-directory DIR   Start in DIR\n  -e, --command CMD [ARGS…]     Run CMD instead of the shell\n  -- CMD [ARGS…]                Same as -e\n  -h, --help                    Show this help\n  --version                     Show version\n  --self-test                   Verify GTK, Kitty and WebKit (needs a display)\n";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -233,5 +285,55 @@ mod tests {
         let req = parse_args(&["optionterm", "--working-directory=/home/u"]);
         assert_eq!(req.cwd, Some(PathBuf::from("/home/u")));
         assert!(req.command.is_none());
+    }
+
+    #[test]
+    fn tokenize_shell_splits_words_and_quotes() {
+        assert_eq!(
+            tokenize_shell("cargo build"),
+            Some(vec!["cargo".into(), "build".into()])
+        );
+        assert_eq!(
+            tokenize_shell("  echo 'hello world'  "),
+            Some(vec!["echo".into(), "hello world".into()])
+        );
+        assert_eq!(
+            tokenize_shell("echo \"two words\""),
+            Some(vec!["echo".into(), "two words".into()])
+        );
+    }
+
+    #[test]
+    fn tokenize_shell_escapes_and_mid_token_quotes() {
+        assert_eq!(
+            tokenize_shell("echo \"say \\\"hi\\\"\""),
+            Some(vec!["echo".into(), "say \"hi\"".into()])
+        );
+        assert_eq!(
+            tokenize_shell("'it\\'s' 'fine'"),
+            Some(vec!["it's".into(), "fine".into()])
+        );
+        assert_eq!(
+            tokenize_shell("--flag=\"a b\""),
+            Some(vec!["--flag=a b".into()])
+        );
+        assert_eq!(
+            tokenize_shell("echo '' x"),
+            Some(vec!["echo".into(), String::new(), "x".into()])
+        );
+    }
+
+    #[test]
+    fn tokenize_shell_rejects_empty_and_unbalanced() {
+        assert_eq!(tokenize_shell(""), None);
+        assert_eq!(tokenize_shell("   "), None);
+        assert_eq!(tokenize_shell("'"), None);
+        assert_eq!(tokenize_shell("echo 'hello"), None);
+        assert_eq!(tokenize_shell("echo \"hello"), None);
+        // A single quote inside double quotes is literal, so this is balanced.
+        assert_eq!(
+            tokenize_shell("echo \"unclosed 'mixed\""),
+            Some(vec!["echo".into(), "unclosed 'mixed".into()])
+        );
     }
 }
