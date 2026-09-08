@@ -651,6 +651,239 @@ pub fn show_command_palette(
     entry.grab_focus();
 }
 
+/// A Codex thread row: title, search subtitle and preview targets.
+type CodexThreadRows = Vec<(String, String)>;
+
+/// Searchable picker over the saved Codex conversations: activating a row
+/// exports that thread as Markdown; the per-row "Open" button round-trips an
+/// already saved transcript.
+pub fn show_codex_picker(
+    window: &adw::ApplicationWindow,
+    threads: Vec<crate::codex::CodexThread>,
+    export: Rc<dyn Fn(crate::codex::CodexThread)>,
+    open: Rc<dyn Fn(PathBuf)>,
+) {
+    let dialog = adw::Dialog::builder()
+        .title("Codex Threads")
+        .content_width(520)
+        .content_height(480)
+        .build();
+    let (root, entry, _list) = codex_picker(&dialog, window.downgrade(), threads, export, open);
+    dialog.set_child(Some(&root));
+
+    // Escape has to be handled twice over (see show_command_palette).
+    {
+        let dialog = dialog.clone();
+        entry.connect_stop_search(move |_| {
+            dialog.close();
+        });
+    }
+    {
+        let dialog_for_keys = dialog.clone();
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                dialog_for_keys.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        dialog.add_controller(keys);
+    }
+    // Clicking outside dismisses it.
+    dialog.set_can_close(true);
+
+    dialog.present(Some(window));
+    entry.grab_focus();
+}
+
+/// Build the picker contents: the root box, the search entry and the thread
+/// list. Split from [`show_codex_picker`] so tests can exercise the rows and
+/// filtering without presenting a dialog over a live window. `window` is
+/// weak: it is only needed when the user clicks a row's "Open" button, to
+/// parent the transcript chooser.
+fn codex_picker(
+    dialog: &adw::Dialog,
+    window: glib::WeakRef<adw::ApplicationWindow>,
+    threads: Vec<crate::codex::CodexThread>,
+    export: Rc<dyn Fn(crate::codex::CodexThread)>,
+    open: Rc<dyn Fn(PathBuf)>,
+) -> (gtk4::Box, gtk4::SearchEntry, gtk4::ListBox) {
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    root.set_margin_top(6);
+    root.set_margin_bottom(6);
+    root.set_margin_start(6);
+    root.set_margin_end(6);
+
+    let entry = gtk4::SearchEntry::new();
+    entry.set_placeholder_text(Some("Search Codex threads…"));
+    root.append(&entry);
+
+    let list = gtk4::ListBox::new();
+    list.set_selection_mode(gtk4::SelectionMode::Single);
+    list.add_css_class("boxed-list");
+
+    let threads = Rc::new(threads);
+    let rows: CodexThreadRows = if threads.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("No Codex threads found")
+            .activatable(false)
+            .build();
+        list.append(&row);
+        Vec::new()
+    } else {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        let icon_name = codex_thread_icon_name();
+        let rows: CodexThreadRows = threads
+            .iter()
+            .map(|thread| {
+                let subtitle = if thread.time > 0 {
+                    crate::codex::format_relative_time(thread.time, now)
+                } else {
+                    thread.id.clone()
+                };
+                (thread.display_title(), subtitle)
+            })
+            .collect();
+        for (thread, (title, subtitle)) in threads.iter().zip(&rows) {
+            let row = adw::ActionRow::builder()
+                .title(title.clone())
+                .subtitle(subtitle.clone())
+                .activatable(true)
+                .build();
+            row.add_prefix(&gtk4::Image::from_icon_name(icon_name));
+
+            // Round trip: open an already saved Markdown for this thread.
+            let open_button = gtk4::Button::builder()
+                .label("Open")
+                .valign(gtk4::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            {
+                let dialog = dialog.clone();
+                let window = window.clone();
+                let open = open.clone();
+                let thread = thread.clone();
+                open_button.connect_clicked(move |_| {
+                    let Some(window) = window.upgrade() else {
+                        return;
+                    };
+                    let chooser = gtk4::FileDialog::builder()
+                        .title("Open saved transcript")
+                        .initial_name(format!("{}.md", crate::codex::slugify(&thread.title)))
+                        .build();
+                    // Per-click clones: the response callback is FnOnce,
+                    // the button itself can be clicked again.
+                    let dialog = dialog.clone();
+                    let open = open.clone();
+                    chooser.open(Some(&window), None::<&gio::Cancellable>, move |res| {
+                        let Ok(file) = res else {
+                            return; // cancelled
+                        };
+                        let Some(path) = file.path() else {
+                            return;
+                        };
+                        dialog.close();
+                        open(path);
+                    });
+                });
+            }
+            row.add_suffix(&open_button);
+            list.append(&row);
+        }
+        rows
+    };
+
+    // Filtering follows the command palette: a row is visible when every
+    // whitespace-separated query word appears in its title or subtitle.
+    let labels = Rc::new(
+        rows.iter()
+            .map(|(title, subtitle)| format!("{title} {subtitle}").to_lowercase())
+            .collect::<Vec<_>>(),
+    );
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    {
+        let query = query.clone();
+        let labels = labels.clone();
+        list.set_filter_func(move |row| {
+            let q = query.borrow();
+            if q.is_empty() {
+                return true;
+            }
+            labels
+                .get(row.index() as usize)
+                .map(|haystack| q.split_whitespace().all(|w| haystack.contains(w)))
+                .unwrap_or(false)
+        });
+    }
+    {
+        let query = query.clone();
+        let list = list.clone();
+        entry.connect_search_changed(move |e| {
+            *query.borrow_mut() = e.text().to_lowercase();
+            list.invalidate_filter();
+        });
+    }
+
+    let activate = {
+        let dialog = dialog.clone();
+        let threads = threads.clone();
+        let export = export.clone();
+        Rc::new(move |row: &gtk4::ListBoxRow| {
+            let Some(thread) = threads.get(row.index() as usize) else {
+                return;
+            };
+            dialog.close();
+            export(thread.clone());
+        })
+    };
+    {
+        let activate = activate.clone();
+        list.connect_row_activated(move |_, row| activate(row));
+    }
+    {
+        let activate = activate.clone();
+        let list = list.clone();
+        entry.connect_activate(move |_| {
+            let mut idx = 0;
+            while let Some(row) = list.row_at_index(idx) {
+                if row.is_mapped() {
+                    activate(&row);
+                    return;
+                }
+                idx += 1;
+            }
+        });
+    }
+
+    let scroll = gtk4::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
+    root.append(&scroll);
+
+    (root, entry, list)
+}
+
+/// The Codex agent logo when the icon theme has it, else a generic document
+/// glyph.
+fn codex_thread_icon_name() -> &'static str {
+    let Some(display) = gdk::Display::default() else {
+        return "text-x-generic-symbolic";
+    };
+    let theme = gtk4::IconTheme::for_display(&display);
+    let dark = adw::StyleManager::default().is_dark();
+    let preferred = crate::agents::AgentKind::Codex.theme_icon_name(dark);
+    if theme.has_icon(preferred) {
+        preferred
+    } else {
+        "text-x-generic-symbolic"
+    }
+}
+
 type ConfigUpdater = Rc<dyn Fn(&Config)>;
 pub type ConfigObservers = Rc<RefCell<Vec<(glib::WeakRef<adw::PreferencesDialog>, ConfigUpdater)>>>;
 
@@ -1855,5 +2088,76 @@ mod tests {
                 .as_deref()
                 == Some("Codex")
         });
+    }
+
+    fn fake_codex_thread(id: &str, title: &str, cwd: Option<&str>) -> crate::codex::CodexThread {
+        crate::codex::CodexThread {
+            id: id.to_string(),
+            title: title.to_string(),
+            file: PathBuf::from(format!("/rollout-{id}.jsonl")),
+            cwd: cwd.map(PathBuf::from),
+            // time = 0 makes the subtitle the id, so filtering is
+            // deterministic regardless of when the test runs.
+            time: 0,
+        }
+    }
+
+    #[gtk4::test]
+    fn codex_picker_filters_rows_by_all_query_words() {
+        let threads = vec![
+            fake_codex_thread("t1", "Fix the parser", None),
+            fake_codex_thread("t2", "Write docs", Some("/tmp/docs")),
+        ];
+        let dialog = adw::Dialog::new();
+        let (root, entry, list) = codex_picker(
+            &dialog,
+            glib::WeakRef::new(),
+            threads,
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+        );
+        // Mount the picker in a real window: the ListBox filter hides rows by
+        // unmapping them, which only happens once the list is onscreen.
+        let win = gtk4::Window::new();
+        win.set_child(Some(&root));
+        win.present();
+        crate::test_support::spin_until(|| list.row_at_index(1).is_some_and(|r| r.is_mapped()));
+        let visible = |i: i32| list.row_at_index(i).is_some_and(|r| r.is_mapped());
+        assert!(visible(0) && visible(1));
+
+        entry.set_text("fix parser");
+        crate::test_support::spin_until(|| !visible(1));
+        assert!(visible(0));
+        assert!(!visible(1));
+
+        entry.set_text("docs");
+        crate::test_support::spin_until(|| !visible(0));
+        assert!(!visible(0));
+        assert!(visible(1));
+
+        // Every query word must match, as in the command palette.
+        entry.set_text("fix docs");
+        crate::test_support::spin_until(|| !visible(1));
+        assert!(!visible(0) && !visible(1));
+
+        entry.set_text("");
+        crate::test_support::spin_until(|| visible(0) && visible(1));
+    }
+
+    #[gtk4::test]
+    fn codex_picker_empty_list_shows_placeholder() {
+        let dialog = adw::Dialog::new();
+        let (_, _, list) = codex_picker(
+            &dialog,
+            glib::WeakRef::new(),
+            Vec::new(),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+        );
+        let row = list.row_at_index(0).unwrap();
+        let row = row.downcast::<adw::ActionRow>().unwrap();
+        assert_eq!(row.title(), "No Codex threads found");
+        assert!(!row.is_activatable());
+        assert!(list.row_at_index(1).is_none());
     }
 }

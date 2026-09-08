@@ -24,8 +24,8 @@ use crate::{
     terminal::TerminalView,
     tree::FileTree,
     ui::{
-        PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_command_palette,
-        show_preferences, show_shortcuts, tab_menu, tabs_menu,
+        PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_codex_picker,
+        show_command_palette, show_preferences, show_shortcuts, tab_menu, tabs_menu,
     },
 };
 
@@ -2084,8 +2084,9 @@ fn build_window(
         }
     }
 
-    // Save the most recent Codex thread as a Markdown transcript to a chosen
-    // directory (defaulting to the focused pane's working directory).
+    // Pick a saved Codex thread to export as Markdown, or round-trip an
+    // already saved transcript back into view. The save dialog defaults to
+    // the focused pane's working directory.
     {
         let window_c = window.downgrade();
         let toast = toast.clone();
@@ -2102,7 +2103,10 @@ fn build_window(
                 let toast = toast.clone();
                 let busy = busy.clone();
                 let job = gio::spawn_blocking(move || {
-                    (codex::list_threads().next(), folder.filter(|d| d.is_dir()))
+                    (
+                        codex::list_threads().collect::<Vec<_>>(),
+                        folder.filter(|d| d.is_dir()),
+                    )
                 });
                 glib::spawn_future_local(async move {
                     let result = job.await;
@@ -2110,49 +2114,100 @@ fn build_window(
                         busy.set(false);
                         return;
                     };
-                    let (thread, folder) = match result {
-                        Ok((Some(thread), folder)) => (thread, folder),
-                        other => {
+                    let (threads, folder) = match result {
+                        Ok((threads, folder)) => (threads, folder),
+                        Err(_) => {
                             busy.set(false);
-                            toast(if other.is_err() {
-                                "Could not load Codex conversations"
-                            } else {
-                                "No Codex thread found"
-                            });
+                            toast("Could not load Codex conversations");
                             return;
                         }
                     };
-                    let dialog = gtk4::FileDialog::builder()
-                        .title(format!("Export Codex: {}", thread.title))
-                        .initial_name(format!("{}.md", codex::slugify(&thread.title)))
-                        .build();
-                    if let Some(folder) = folder {
-                        dialog.set_initial_folder(Some(&gio::File::for_path(&folder)));
+                    if threads.is_empty() {
+                        busy.set(false);
+                        toast("No Codex threads found");
+                        return;
                     }
-                    let thread_file = thread.file;
-                    dialog.save(Some(&window), None::<&gio::Cancellable>, move |res| {
-                        let Ok(file) = res else {
-                            busy.set(false);
-                            return;
-                        }; // cancelled
-                        let Some(path) = file.path() else {
-                            busy.set(false);
-                            toast("No local path for the chosen file");
-                            return;
-                        };
-                        let job =
-                            gio::spawn_blocking(move || codex::save_markdown(&thread_file, &path));
-                        glib::spawn_future_local(async move {
-                            let result = job.await;
-                            busy.set(false);
-                            if window_c.upgrade().is_some_and(|w| w.is_visible()) {
-                                match result {
-                                    Ok(Ok(())) => toast("Codex thread saved"),
-                                    _ => toast("Failed to save thread"),
-                                }
+                    // The busy flag only guards the thread scan: once the
+                    // picker is up it stays for as long as the user needs,
+                    // and while it (or its save dialog) is presented the
+                    // window actions cannot be re-triggered anyway.
+                    busy.set(false);
+
+                    // Export the chosen thread through the existing save flow.
+                    let export = {
+                        let window = window.clone();
+                        let toast = toast.clone();
+                        Rc::new(move |thread: codex::CodexThread| {
+                            let dialog = gtk4::FileDialog::builder()
+                                .title(format!("Export Codex: {}", thread.title))
+                                .initial_name(format!("{}.md", codex::slugify(&thread.title)))
+                                .build();
+                            if let Some(folder) = &folder {
+                                dialog.set_initial_folder(Some(&gio::File::for_path(folder)));
                             }
-                        });
-                    });
+                            let thread_file = thread.file;
+                            let window_c = window.downgrade();
+                            let toast = toast.clone();
+                            dialog.save(Some(&window), None::<&gio::Cancellable>, move |res| {
+                                let Ok(file) = res else {
+                                    return; // cancelled
+                                };
+                                let Some(path) = file.path() else {
+                                    toast("No local path for the chosen file");
+                                    return;
+                                };
+                                let job = gio::spawn_blocking(move || {
+                                    codex::save_markdown(&thread_file, &path)
+                                });
+                                glib::spawn_future_local(async move {
+                                    let result = job.await;
+                                    if window_c.upgrade().is_some_and(|w| w.is_visible()) {
+                                        match result {
+                                            Ok(Ok(())) => toast("Codex thread saved"),
+                                            _ => toast("Failed to save thread"),
+                                        }
+                                    }
+                                });
+                            });
+                        })
+                    };
+
+                    // Round trip: open an already saved transcript with the
+                    // default application, after checking (off the main loop)
+                    // that the pick really is a readable, capped Markdown
+                    // file.
+                    let open = {
+                        let toast = toast.clone();
+                        Rc::new(move |path: PathBuf| {
+                            let job = {
+                                let check = path.clone();
+                                gio::spawn_blocking(move || {
+                                    codex::read_markdown(&check).map(|_| ())
+                                })
+                            };
+                            let toast = toast.clone();
+                            glib::spawn_future_local(async move {
+                                match job.await {
+                                    Ok(Ok(())) => {
+                                        let uri = gio::File::for_path(&path).uri();
+                                        gio::AppInfo::launch_default_for_uri_async(
+                                            &uri,
+                                            None::<&gio::AppLaunchContext>,
+                                            None::<&gio::Cancellable>,
+                                            move |res| {
+                                                if res.is_err() {
+                                                    toast("Could not open the saved transcript");
+                                                }
+                                            },
+                                        );
+                                    }
+                                    _ => toast("Could not read the chosen Markdown file"),
+                                }
+                            });
+                        })
+                    };
+
+                    show_codex_picker(&window, threads, export, open);
                 });
             }),
         ));

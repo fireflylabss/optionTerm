@@ -31,6 +31,17 @@ pub struct CodexThread {
     pub time: i64,
 }
 
+impl CodexThread {
+    /// Picker row title: the thread title plus a short ` — <cwd>` suffix when
+    /// the working directory is known.
+    pub fn display_title(&self) -> String {
+        match self.cwd.as_deref().filter(|c| !c.as_os_str().is_empty()) {
+            Some(cwd) => format!("{} — {}", self.title, cwd.display()),
+            None => self.title.clone(),
+        }
+    }
+}
+
 /// The Codex data directory (`~/.codex` or `$CODEX_HOME`), if present.
 pub fn codex_home() -> Option<PathBuf> {
     let home = std::env::var_os("CODEX_HOME")
@@ -235,6 +246,17 @@ pub fn save_markdown(source: &Path, target: &Path) -> Result<()> {
     crate::storage::atomic_write(target, markdown.as_bytes())
 }
 
+/// Read a previously saved Markdown transcript, refusing files above a
+/// 4 MiB cap so a mistaken pick cannot stall the caller on a huge file.
+pub fn read_markdown(path: &Path) -> Result<String> {
+    const MAX_BYTES: u64 = 4 * 1024 * 1024;
+    let len = std::fs::metadata(path)
+        .context("statting Markdown transcript")?
+        .len();
+    anyhow::ensure!(len <= MAX_BYTES, "Markdown transcript exceeds 4 MiB");
+    std::fs::read_to_string(path).context("reading Markdown transcript")
+}
+
 /// A filesystem- and Markdown-safe filename for a thread title.
 pub fn slugify(title: &str) -> String {
     let mut slug = String::new();
@@ -283,6 +305,44 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let doy = (153 * mp + 2) / 5 + d as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// Inverse of [`days_from_civil`] (Howard Hinnant's algorithm): the calendar
+/// date from days since 1970-01-01.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// A short human-readable age for an epoch-seconds timestamp, used for
+/// picker subtitles: "just now", "5 min ago", "3 h ago", "2 d ago", or the
+/// `YYYY-MM-DD` date for anything older than a week. Timestamps from the
+/// future (clock skew) read as "just now".
+pub fn format_relative_time(epoch: i64, now: i64) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let delta = now - epoch;
+    if delta < MINUTE {
+        "just now".to_string()
+    } else if delta < HOUR {
+        format!("{} min ago", delta / MINUTE)
+    } else if delta < DAY {
+        format!("{} h ago", delta / HOUR)
+    } else if delta < 7 * DAY {
+        format!("{} d ago", delta / DAY)
+    } else {
+        let (y, m, d) = civil_from_days(epoch.div_euclid(DAY));
+        format!("{y:04}-{m:02}-{d:02}")
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +426,64 @@ mod tests {
         );
         assert_eq!(slugify("  hello -- world  "), "hello-world");
         assert_eq!(slugify("!!!"), "codex-thread");
+    }
+
+    #[test]
+    fn read_markdown_round_trips_saved_transcripts() {
+        let dir = crate::test_support::TestDir::new("codex-read-md");
+        let file = dir.path().join("saved.md");
+        let body = "# Codex transcript\n\n## Você\n\noi\n";
+        std::fs::write(&file, body).unwrap();
+        assert_eq!(read_markdown(&file).unwrap(), body);
+        assert!(read_markdown(&dir.path().join("missing.md")).is_err());
+        // Oversized picks are rejected via metadata, before reading.
+        let big = dir.path().join("big.md");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(4 * 1024 * 1024 + 1).unwrap();
+        drop(f);
+        assert!(read_markdown(&big).is_err());
+    }
+
+    #[test]
+    fn display_title_appends_cwd_only_when_known() {
+        let thread = CodexThread {
+            id: "abc123".to_string(),
+            title: "Fix the bug".to_string(),
+            file: PathBuf::from("/rollout.jsonl"),
+            cwd: None,
+            time: 0,
+        };
+        assert_eq!(thread.display_title(), "Fix the bug");
+        let thread = CodexThread {
+            cwd: Some(PathBuf::from("/tmp/proj")),
+            ..thread
+        };
+        assert_eq!(thread.display_title(), "Fix the bug — /tmp/proj");
+        let thread = CodexThread {
+            cwd: Some(PathBuf::new()),
+            ..thread
+        };
+        assert_eq!(thread.display_title(), "Fix the bug");
+    }
+
+    #[test]
+    fn formats_relative_timestamps() {
+        // 2026-05-22T01:45:24Z in epoch seconds.
+        let now = 1_779_414_324;
+        assert_eq!(format_relative_time(now, now), "just now");
+        assert_eq!(format_relative_time(now - 30, now), "just now");
+        assert_eq!(format_relative_time(now + 60, now), "just now");
+        assert_eq!(format_relative_time(now - 5 * 60, now), "5 min ago");
+        assert_eq!(format_relative_time(now - 3 * 3_600, now), "3 h ago");
+        assert_eq!(format_relative_time(now - 2 * 86_400, now), "2 d ago");
+        assert_eq!(format_relative_time(1_700_000_000, now), "2023-11-14");
+    }
+
+    #[test]
+    fn civil_days_round_trip() {
+        for &(y, m, d) in &[(1970, 1, 1), (2000, 2, 29), (2026, 5, 22), (2100, 3, 1)] {
+            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d));
+        }
     }
 
     #[test]
