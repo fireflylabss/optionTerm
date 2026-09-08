@@ -78,7 +78,7 @@
 - `cargo clippy --fix` desformata: rode `cargo fmt` depois.
 
 ## TODO
-- [ ] Respeitar `text-scaling-factor` do GNOME Settings (hoje usa DPI/`gtk-font-name`).
+- [x] Respeitar `text-scaling-factor` do GNOME Settings (hoje usa DPI/`gtk-font-name`).
 - [x] Respeitar `gtk-enable-animations`, `gtk-font-name` no chrome e
       `gtk-decoration-layout` dinâmico.
 - [x] `gtk-tabs-location` / `tabs = "bottom"`.
