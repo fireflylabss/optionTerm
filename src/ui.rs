@@ -75,6 +75,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("Find in Scrollback", "win.find", "Ctrl+Shift+F"),
     ("Open Browser", "win.open-browser", "Ctrl+Shift+B"),
     ("File Explorer", "win.file-tree", "F9"),
+    ("Save Session As…", "win.save-session-as", "Ctrl+Shift+S"),
+    ("Load Session…", "win.load-session", "Ctrl+O"),
+    ("Manage Sessions…", "win.manage-sessions", ""),
     ("Save Codex Thread", "win.save-codex-thread", "Ctrl+Shift+D"),
     ("Rename Tab", "win.rename-tab", "F2"),
     ("Reload Configuration", "win.reload-config", ""),
@@ -157,6 +160,12 @@ fn main_menu() -> gio::Menu {
     tools.append(Some("File Explorer"), Some("win.file-tree"));
     tools.append(Some("Command Palette"), Some("win.command-palette"));
     menu.append_section(None, &tools);
+
+    // Named workspaces: whole-window state, so they get their own section.
+    let sessions = gio::Menu::new();
+    sessions.append(Some("Save Session As…"), Some("win.save-session-as"));
+    sessions.append(Some("Load Session…"), Some("win.load-session"));
+    menu.append_section(None, &sessions);
 
     let term = gio::Menu::new();
     term.append(Some("Restart Terminal"), Some("win.restart-tab"));
