@@ -12,10 +12,10 @@ row when done.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001 | Respect GNOME text-scaling-factor in the terminal font | P1 | S | — | DONE |
-| 002 | Let users choose which Codex thread to export | P2 | M | — | TODO |
-| 003 | Add a context menu to the file tree | P1 | S | — | TODO |
-| 004 | Make the command palette run arbitrary typed commands | P2 | S | — | TODO |
-| 005 | Add named session profiles (workspaces) | P3 | L | — | TODO |
+| 002 | Let users choose which Codex thread to export | P2 | M | — | DONE |
+| 003 | Add a context menu to the file tree | P1 | S | — | DONE |
+| 004 | Make the command palette run arbitrary typed commands | P2 | S | — | DONE |
+| 005 | Add named session profiles (workspaces) | P3 | L | — | DONE |
 
 Status values: `TODO` | `IN PROGRESS` | `DONE` | `BLOCKED` (with one-line reason) | `REJECTED` (with one-line rationale).
 

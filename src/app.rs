@@ -25,7 +25,8 @@ use crate::{
     tree::{FileTree, TreeActions},
     ui::{
         PrefsHooks, SearchBar, attach_context_menu, main_popover, show_about, show_codex_picker,
-        show_command_palette, show_preferences, show_shortcuts, tab_menu, tabs_menu,
+        show_command_palette, show_preferences, show_session_profile_picker, show_shortcuts,
+        tab_menu, tabs_menu,
     },
 };
 
@@ -45,6 +46,9 @@ type AddTabFn = Rc<dyn Fn(LaunchRequest) -> anyhow::Result<adw::TabPage>>;
 type SplitFn = Rc<dyn Fn(gtk4::Orientation, bool)>;
 /// Records the direction, then runs a `SplitFn`.
 type SplitDone = Rc<dyn Fn(SplitFn, gtk4::Orientation, bool)>;
+/// Captures the workspace and writes it to the default (`None`) or a named
+/// profile; returns the number of tabs saved.
+type SessionSaver = Rc<dyn Fn(Option<&str>) -> anyhow::Result<usize>>;
 /// The file tree panel attached to one tab: the tree plus the `Paned` that
 /// hosts it beside the terminal.
 #[derive(Clone)]
@@ -1221,6 +1225,44 @@ fn build_window(
                 Ok(page)
             },
         )
+    };
+
+    // Rebuild the workspace from a stored session: one page per tab, then the
+    // remembered active tab and window state. Shared by the startup restore
+    // and the "Load Session" action.
+    let apply_session = {
+        let tab_view = tab_view.clone();
+        let window = window.clone();
+        let add_tab = add_tab.clone();
+        let add_tab_layout = add_tab_layout.clone();
+        let add_browser_tab = add_browser_tab.clone();
+        Rc::new(move |session: &SessionState| -> anyhow::Result<()> {
+            for tab in &session.tabs {
+                match &tab.kind {
+                    TabKind::Browser { url } => {
+                        let page = add_browser_tab(url.as_deref());
+                        if let Some(title) = &tab.title {
+                            set_tab_renamed(&page, true);
+                            page.set_title(title);
+                        }
+                    }
+                    TabKind::Terminal => {
+                        add_tab_layout(tab.title.clone(), &tab.layout)?;
+                    }
+                }
+            }
+            if tab_view.n_pages() == 0 {
+                add_tab(LaunchRequest::default())?;
+            } else {
+                let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
+                let page = tab_view.nth_page(index as i32);
+                tab_view.set_selected_page(&page);
+            }
+            if session.maximized {
+                window.maximize();
+            }
+            Ok(())
+        })
     };
 
     // Currently focused terminal of the selected page.
@@ -2489,13 +2531,24 @@ fn build_window(
         });
     }
 
+    // Set while a named profile load swaps the whole workspace: every tab is
+    // closed in bulk, so per-tab confirmations and the window close on the
+    // last removed tab must not fire.
+    let loading_session = Rc::new(Cell::new(false));
+
     // Confirm close; drop our page refs.
     {
         let pages = pages.clone();
         let file_trees = file_trees.clone();
         let window = window.clone();
         let config = config.clone();
+        let loading_session = loading_session.clone();
         tab_view.connect_close_page(move |tv, page| {
+            if loading_session.get() {
+                release_tab(&pages, &file_trees, page);
+                tv.close_page_finish(page, true);
+                return glib::Propagation::Stop;
+            }
             // AdwTabView allows an async answer: hold the close, then finish it
             // once the user has decided.
             let has_child = pages
@@ -2636,7 +2689,7 @@ fn build_window(
             session.width = Some(window.width().max(1));
             session.height = Some(window.height().max(1));
             session.maximized = window.is_maximized();
-            match session.save() {
+            match session.save(None) {
                 Ok(()) => {
                     tracing::info!("saved {} tab(s) for the next session", session.tabs.len())
                 }
@@ -2733,6 +2786,138 @@ fn build_window(
         source_ids.borrow_mut().push(source);
     }
 
+    // --- Named session profiles (workspaces) ---
+    // Snapshot the workspace and write it to the default (`None`) or a named
+    // profile path. Returns the number of tabs saved.
+    let save_session_to: SessionSaver = {
+        let tab_view = tab_view.clone();
+        let pages = pages.clone();
+        let window = window.clone();
+        Rc::new(move |name| {
+            let mut session = capture_session(&tab_view, &pages);
+            session.width = Some(window.width().max(1));
+            session.height = Some(window.height().max(1));
+            session.maximized = window.is_maximized();
+            session.name = name.map(str::to_string);
+            let tabs = session.tabs.len();
+            session.save(name)?;
+            Ok(tabs)
+        })
+    };
+    // Swap the whole workspace for a named profile: back the current one up
+    // under the default session, close every tab in bulk, rebuild from the
+    // profile. Exposed as `win.load-session-profile` so the picker, tests and
+    // a future `--profile` flag share one path.
+    let load_profile: Rc<dyn Fn(String)> = {
+        let config = config.clone();
+        let tab_view = tab_view.clone();
+        let apply_session = apply_session.clone();
+        let toast = toast.clone();
+        let save_session_to = save_session_to.clone();
+        let loading_session = loading_session.clone();
+        Rc::new(move |name: String| {
+            let Some(session) = SessionState::load(Some(&name)) else {
+                tracing::warn!("session profile “{name}” could not be loaded");
+                toast(&format!("Could not load “{name}”"));
+                return;
+            };
+            // Keep the current workspace recoverable under the default
+            // unnamed session before replacing it.
+            if config.borrow().session_restore
+                && let Err(err) = save_session_to(None)
+            {
+                tracing::warn!("could not back up the current session: {err:#}");
+            }
+            // Close every tab in bulk; the flag suppresses per-tab
+            // confirmations and keeps the window open when the last
+            // old tab goes away. Bounded so a wedged close can never spin
+            // the UI thread forever.
+            loading_session.set(true);
+            let mut guard = tab_view.n_pages();
+            while guard > 0 {
+                tab_view.close_page(&tab_view.nth_page(0));
+                let pages = tab_view.n_pages();
+                if pages >= guard {
+                    break;
+                }
+                guard = pages;
+            }
+            loading_session.set(false);
+            if tab_view.n_pages() > 0 {
+                tracing::error!("could not close every tab before loading “{name}”");
+                toast("Could not close the current tabs; profile not loaded");
+                return;
+            }
+            if let Err(err) = apply_session(&session) {
+                tracing::warn!("could not restore profile “{name}”: {err:#}");
+                toast("Could not restore every tab from the profile");
+            } else {
+                toast(&format!("Loaded “{name}”"));
+            }
+        })
+    };
+    {
+        let load_profile = load_profile.clone();
+        let action = gio::SimpleAction::new("load-session-profile", Some(glib::VariantTy::STRING));
+        action.connect_activate(move |_, param| {
+            if let Some(name) = param.and_then(glib::Variant::str) {
+                load_profile(name.to_string());
+            }
+        });
+        window.add_action(&action);
+    }
+    {
+        let picker_window = window.clone();
+        let toast = toast.clone();
+        let save_session_to = save_session_to.clone();
+        let load_profile = load_profile.clone();
+
+        let open_picker: Rc<dyn Fn()> = Rc::new(move || {
+            let on_save = {
+                let save_session_to = save_session_to.clone();
+                let toast = toast.clone();
+                Rc::new(move |name: String| match save_session_to(Some(&name)) {
+                    Ok(tabs) => toast(&format!("Saved {tabs} tab(s) as “{name}”")),
+                    Err(err) => {
+                        tracing::warn!("could not save session profile “{name}”: {err:#}");
+                        toast("Could not save the session profile");
+                    }
+                })
+            };
+            let on_load = load_profile.clone();
+            let on_delete = {
+                let toast = toast.clone();
+                Rc::new(
+                    move |name: String| match SessionState::delete_profile(&name) {
+                        Ok(()) => toast(&format!("Deleted “{name}”")),
+                        Err(err) => {
+                            tracing::warn!("could not delete session profile “{name}”: {err:#}");
+                            toast("Could not delete the session profile");
+                        }
+                    },
+                )
+            };
+            show_session_profile_picker(
+                &picker_window,
+                SessionState::list_profiles(),
+                None,
+                on_save,
+                on_load,
+                on_delete,
+            );
+        });
+
+        let action = |name: &str| {
+            let open_picker = open_picker.clone();
+            add_simple(name, Box::new(move || open_picker()))
+        };
+        // The picker covers saving, loading and deleting, so all three
+        // entries open the same dialog.
+        window.add_action(&action("save-session-as"));
+        window.add_action(&action("load-session"));
+        window.add_action(&action("manage-sessions"));
+    }
+
     // Apply the configured tab layout, then open the tabs.
     set_tabs_location(config.borrow().tabs_location);
 
@@ -2745,7 +2930,7 @@ fn build_window(
         config
             .borrow()
             .session_restore
-            .then(SessionState::load)
+            .then(|| SessionState::load(None))
             .flatten()
     };
 
@@ -2756,30 +2941,7 @@ fn build_window(
             if let (Some(w), Some(h)) = (session.width, session.height) {
                 window.set_default_size(w, h);
             }
-            for tab in &session.tabs {
-                match &tab.kind {
-                    TabKind::Browser { url } => {
-                        let page = add_browser_tab(url.as_deref());
-                        if let Some(title) = &tab.title {
-                            set_tab_renamed(&page, true);
-                            page.set_title(title);
-                        }
-                    }
-                    TabKind::Terminal => {
-                        add_tab_layout(tab.title.clone(), &tab.layout)?;
-                    }
-                }
-            }
-            if tab_view.n_pages() == 0 {
-                add_tab(LaunchRequest::default())?;
-            } else {
-                let index = session.active.min(tab_view.n_pages().max(1) as usize - 1);
-                let page = tab_view.nth_page(index as i32);
-                tab_view.set_selected_page(&page);
-            }
-            if session.maximized {
-                window.maximize();
-            }
+            apply_session(&session)?;
             tracing::info!(
                 "restored {} tab(s) from the last session",
                 session.tabs.len()
@@ -2836,6 +2998,7 @@ fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
         .map(|p| tab_view.page_position(&p).max(0) as usize)
         .unwrap_or(0);
     SessionState {
+        name: None,
         tabs,
         active,
         width: None,
@@ -3422,7 +3585,7 @@ mod tests {
             app.windows().is_empty(),
             "SIGTERM must not open a confirmation dialog"
         );
-        let session = SessionState::load().unwrap();
+        let session = SessionState::load(None).unwrap();
         assert_eq!(session.active, 1);
         assert_eq!(
             session
@@ -3437,6 +3600,164 @@ mod tests {
                 .tabs
                 .iter()
                 .all(|tab| tab.panes() == vec![Some("/tmp".into())])
+        );
+    }
+
+    /// A named profile swaps the whole live workspace: the current tabs are
+    /// backed up under the default session, every tab is closed without
+    /// confirmations, and the profile's tabs take their place. Runs in a
+    /// subprocess with its own D-Bus/home, like the test above.
+    #[test]
+    fn isolated_window_swaps_workspace_for_a_named_profile() {
+        let named = |titles: &[&str], active: usize| SessionState {
+            name: None,
+            tabs: titles
+                .iter()
+                .map(|title| TabState {
+                    title: Some((*title).into()),
+                    layout: PaneLayout::Leaf {
+                        cwd: Some("/tmp".into()),
+                    },
+                    kind: TabKind::Terminal,
+                })
+                .collect(),
+            active,
+            ..SessionState::default()
+        };
+        if std::env::var_os("OPTIONTERM_PROFILE_WINDOW_TEST").is_none() {
+            let dir = crate::test_support::TestDir::new("window-profile");
+            let state_dir = dir.path().join(".option/terminal");
+            let config = Config {
+                source: state_dir.join("config.toml"),
+                // The bulk close must not raise one dialog per tab.
+                confirm_close_tab: true,
+                ..Config::default()
+            };
+            config.save().unwrap();
+            crate::storage::atomic_write(
+                &state_dir.join("session.toml"),
+                named(&["first", "second"], 1).to_toml().as_bytes(),
+            )
+            .unwrap();
+            let mut profile = named(&["w-one", "w-two", "w-three"], 2);
+            profile.name = Some("work".into());
+            std::fs::create_dir(state_dir.join("sessions")).unwrap();
+            crate::storage::atomic_write(
+                &state_dir.join("sessions/work.toml"),
+                profile.to_toml().as_bytes(),
+            )
+            .unwrap();
+            let result = std::process::Command::new("/usr/bin/dbus-run-session")
+                .arg("--dbus-daemon=/usr/bin/dbus-daemon")
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::tests::isolated_window_swaps_workspace_for_a_named_profile",
+                    "--nocapture",
+                ])
+                .env("OPTIONTERM_PROFILE_WINDOW_TEST", dir.path())
+                .env("OPTION_HOME", dir.path().join(".option"))
+                .env("HOME", dir.path())
+                .env("XDG_CONFIG_HOME", dir.path().join("config"))
+                .env("XDG_DATA_HOME", dir.path().join("data"))
+                .env("XDG_CACHE_HOME", dir.path().join("cache"))
+                .env("XDG_STATE_HOME", dir.path().join("state"))
+                .env("PATH", dir.path())
+                .env("SHELL", "/bin/cat")
+                .env("GSETTINGS_BACKEND", "memory")
+                .env("GTK_A11Y", "none")
+                .env("GTK_USE_PORTAL", "0")
+                .env("GIO_USE_VFS", "local")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            // The exit save wrote the loaded workspace to the default session…
+            let saved = SessionState::load_from(&state_dir.join("session.toml")).unwrap();
+            assert_eq!(saved.name, None);
+            assert_eq!(saved.active, 2);
+            assert_eq!(
+                saved
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.title.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                ["w-one", "w-two", "w-three"]
+            );
+            assert!(
+                saved
+                    .tabs
+                    .iter()
+                    .all(|tab| tab.panes() == vec![Some("/tmp".into())])
+            );
+            // …and the profile file itself is untouched.
+            assert_eq!(
+                SessionState::load_from(&state_dir.join("sessions/work.toml")),
+                Some(profile)
+            );
+            return;
+        }
+
+        let home = PathBuf::from(std::env::var_os("OPTIONTERM_PROFILE_WINDOW_TEST").unwrap());
+        assert_eq!(crate::config::config_dir(), home.join(".option/terminal"));
+        gtk4::init().unwrap();
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("io.option.terminal.test")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let shared = Rc::new(SharedLaunch {
+            pending: RefCell::new(Vec::new()),
+            open_in_window: RefCell::new(None),
+        });
+        build_window(&app, shared, LaunchRequest::default()).unwrap();
+        let window = app.windows().into_iter().next().unwrap();
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while window.width() == 0 && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(window.width() > 0);
+        gtk4::prelude::WidgetExt::activate_action(
+            &window,
+            "win.load-session-profile",
+            Some(&"work".to_variant()),
+        )
+        .unwrap();
+        // The current workspace was backed up under the default session before
+        // the swap; the loaded tabs are only persisted on exit.
+        let backup = SessionState::parse(
+            &std::fs::read_to_string(home.join(".option/terminal/session.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            backup
+                .tabs
+                .iter()
+                .map(|tab| tab.title.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        // Let the fresh PTYs settle before the exit save captures their cwd.
+        for _ in 0..50 {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGTERM).unwrap();
+        while !app.windows().is_empty() && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            app.windows().is_empty(),
+            "loading a profile must not leave a confirmation dialog behind"
         );
     }
 
