@@ -6,7 +6,15 @@
 //! its own entry in `kdeglobals`. So this writes whichever ones apply and
 //! reports back exactly what it touched rather than claiming success blindly.
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+
+/// Upper bound for any external probe, so a slow `gsettings`/`kwriteconfig`
+/// cannot freeze the shell while setting the default terminal.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 use anyhow::{Context, Result};
 
@@ -112,32 +120,56 @@ pub fn set_default() -> Result<Vec<String>> {
     Ok(applied)
 }
 
+/// Run `binary` with `args`, silently, bounded by [`PROBE_TIMEOUT`].
+/// Returns the exit status on success, or `None` if it could not start or
+/// timed out.
+fn probe(binary: &str, args: &[&str]) -> Option<bool> {
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("{binary} wait failed: {err}");
+                return None;
+            }
+        }
+    }
+}
+
 fn which(binary: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {binary}")])
-        .output()
-        .is_ok_and(|out| out.status.success())
+    probe("sh", &["-c", &format!("command -v {binary}")]).unwrap_or(false)
 }
 
 fn run(binary: &str, args: &[&str]) -> bool {
-    match Command::new(binary).args(args).output() {
-        Ok(out) => out.status.success(),
-        Err(err) => {
-            tracing::warn!("{binary} failed: {err}");
+    match probe(binary, args) {
+        Some(success) => success,
+        None => {
+            tracing::warn!("{binary} failed or timed out");
             false
         }
     }
 }
 
 fn schema_exists(schema: &str) -> bool {
-    Command::new("gsettings")
-        .args(["list-schemas"])
-        .output()
-        .is_ok_and(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .any(|line| line == schema)
-        })
+    gtk4::gio::SettingsSchemaSource::default()
+        .and_then(|source| source.lookup(schema, true))
+        .is_some()
 }
 
 #[cfg(test)]

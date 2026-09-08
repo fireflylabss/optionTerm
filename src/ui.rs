@@ -21,6 +21,27 @@ use crate::{
 
 /// (label, action, accel) for menus and the command palette.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("Command Palette", "win.command-palette", "Ctrl+Shift+P"),
+    (
+        "Resize Split Left",
+        "win.resize-split-left",
+        "Ctrl+Shift+Super+Left",
+    ),
+    (
+        "Resize Split Right",
+        "win.resize-split-right",
+        "Ctrl+Shift+Super+Right",
+    ),
+    (
+        "Resize Split Up",
+        "win.resize-split-up",
+        "Ctrl+Shift+Super+Up",
+    ),
+    (
+        "Resize Split Down",
+        "win.resize-split-down",
+        "Ctrl+Shift+Super+Down",
+    ),
     ("New Tab", "win.new-tab", "Ctrl+Shift+T"),
     ("Close Tab", "win.close-tab", "Ctrl+Shift+W"),
     ("Next Tab", "win.next-tab", "Ctrl+PgDn"),
@@ -63,8 +84,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
 ];
 
 /// Menu behind the new-tab `+` button: grouped by what it opens.
-pub fn tabs_menu() -> gio::Menu {
-    use crate::agents::{self, AgentKind};
+pub fn tabs_menu(agents: &gio::Menu) -> gio::Menu {
     let menu = gio::Menu::new();
 
     // New surfaces.
@@ -78,18 +98,7 @@ pub fn tabs_menu() -> gio::Menu {
     menu.append_submenu(Some("Split"), &splits_menu());
 
     // One entry per installed agent; opens a dedicated agent tab.
-    let agents = gio::Menu::new();
-    for kind in AgentKind::ALL {
-        if agents::is_installed(kind) {
-            agents.append(
-                Some(kind.label()),
-                Some(&format!("win.agent-{}", kind.as_str())),
-            );
-        }
-    }
-    if agents.n_items() > 0 {
-        menu.append_submenu(Some("Agents"), &agents);
-    }
+    menu.append_submenu(Some("Agents"), agents);
     menu
 }
 
@@ -298,6 +307,8 @@ pub fn attach_context_menu(view: &Rc<TerminalView>) {
 pub struct SearchBar {
     pub widget: gtk4::SearchBar,
     entry: gtk4::SearchEntry,
+    sync: Rc<dyn Fn() -> Option<Rc<TerminalView>>>,
+    query: Rc<RefCell<String>>,
 }
 
 impl SearchBar {
@@ -324,16 +335,70 @@ impl SearchBar {
             .child(&boxed)
             .build();
         bar.connect_entry(&entry);
+        let target: Rc<RefCell<Option<std::rc::Weak<TerminalView>>>> = Rc::new(RefCell::new(None));
+        let last_query = Rc::new(RefCell::new(String::new()));
+        let sync: Rc<dyn Fn() -> Option<Rc<TerminalView>>> = {
+            let current_view = current_view.clone();
+            let target = target.clone();
+            let last_query = last_query.clone();
+            let entry = entry.downgrade();
+            Rc::new(move || {
+                let next = current_view();
+                let old = target.borrow().as_ref().and_then(std::rc::Weak::upgrade);
+                let same = old
+                    .as_ref()
+                    .zip(next.as_ref())
+                    .is_some_and(|(a, b)| Rc::ptr_eq(a, b));
+                let query = entry.upgrade()?.text().to_string();
+                if !same || *last_query.borrow() != query {
+                    if let Some(old) = old {
+                        old.search_set_query("");
+                    }
+                    if let Some(next) = next.as_ref() {
+                        next.search_set_query(&query);
+                    }
+                    *target.borrow_mut() = next.as_ref().map(Rc::downgrade);
+                    *last_query.borrow_mut() = query;
+                }
+                next
+            })
+        };
+        {
+            let current_view = current_view.clone();
+            bar.connect_search_mode_enabled_notify(move |bar| {
+                if !bar.is_search_mode() {
+                    let previous = target.borrow_mut().take().and_then(|v| v.upgrade());
+                    if let Some(previous) = previous {
+                        previous.search_set_query("");
+                    }
+                    if let Some(view) = current_view() {
+                        view.focus();
+                    }
+                }
+            });
+        }
+        {
+            let bar = bar.downgrade();
+            entry.connect_stop_search(move |_| {
+                if let Some(bar) = bar.upgrade() {
+                    bar.set_search_mode(false);
+                }
+            });
+        }
+        let current_view = sync.clone();
 
         {
             let current_view = current_view.clone();
+            let bar = bar.downgrade();
             entry.connect_search_changed(move |e| {
+                if !bar.upgrade().is_some_and(|bar| bar.is_search_mode()) {
+                    return;
+                }
                 let query = e.text().to_string();
-                if let Some(view) = current_view() {
-                    view.search_set_query(&query);
-                    if !query.trim().is_empty() {
-                        let _ = view.search_find_next();
-                    }
+                if let Some(view) = current_view()
+                    && !query.is_empty()
+                {
+                    let _ = view.search_find_next();
                 }
             });
         }
@@ -365,6 +430,7 @@ impl SearchBar {
             let bar_weak = bar.downgrade();
             let current_view = current_view.clone();
             let key = gtk4::EventControllerKey::new();
+            key.set_propagation_phase(gtk4::PropagationPhase::Capture);
             key.connect_key_pressed(move |_, keyval, _, modifier| {
                 if keyval == gdk::Key::Return && modifier.contains(gdk::ModifierType::SHIFT_MASK) {
                     if let Some(view) = current_view() {
@@ -376,10 +442,6 @@ impl SearchBar {
                     if let Some(bar) = bar_weak.upgrade() {
                         bar.set_search_mode(false);
                     }
-                    if let Some(view) = current_view() {
-                        view.search_set_query("");
-                        view.focus();
-                    }
                     return gtk4::glib::Propagation::Stop;
                 }
                 gtk4::glib::Propagation::Proceed
@@ -387,12 +449,32 @@ impl SearchBar {
             entry.add_controller(key);
         }
 
-        Self { widget: bar, entry }
+        Self {
+            widget: bar,
+            entry,
+            sync,
+            query: last_query,
+        }
+    }
+
+    pub fn sync_target(&self) {
+        if self.widget.is_search_mode() {
+            (self.sync)();
+        }
     }
 
     /// Open the bar and focus the entry; re-running the query if there is one.
     pub fn open(&self) {
+        if self.entry.text().is_empty() {
+            let query = self.query.borrow().clone();
+            self.entry.set_text(&query);
+        }
         self.widget.set_search_mode(true);
+        if let Some(view) = (self.sync)()
+            && !self.entry.text().is_empty()
+        {
+            let _ = view.search_find_next();
+        }
         self.entry.grab_focus();
         self.entry.select_region(0, -1);
     }
@@ -401,6 +483,7 @@ impl SearchBar {
 pub fn show_command_palette(
     window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
+    bindings: &Bindings,
     open_launch: Rc<dyn Fn(crate::launch::LaunchRequest)>,
 ) {
     let dialog = adw::Dialog::builder()
@@ -429,15 +512,10 @@ pub fn show_command_palette(
         Launch(crate::launch::LaunchRequest),
     }
 
-    let mut entries: Vec<(String, String, PaletteAction)> = COMMANDS
-        .iter()
-        .map(|(label, action, accel)| {
-            (
-                (*label).to_string(),
-                (*accel).to_string(),
-                PaletteAction::Win(action),
-            )
-        })
+    let mut entries: Vec<(String, String, PaletteAction)> = bindings
+        .effective()
+        .into_iter()
+        .map(|(label, action, accel)| (label.to_string(), accel, PaletteAction::Win(action)))
         .collect();
     for cmd in &config.borrow().commands {
         entries.push((
@@ -573,6 +651,9 @@ pub fn show_command_palette(
     entry.grab_focus();
 }
 
+type ConfigUpdater = Rc<dyn Fn(&Config)>;
+pub type ConfigObservers = Rc<RefCell<Vec<(glib::WeakRef<adw::PreferencesDialog>, ConfigUpdater)>>>;
+
 /// Everything Preferences needs to push a change back into the live window.
 #[derive(Clone)]
 pub struct PrefsHooks {
@@ -583,6 +664,8 @@ pub struct PrefsHooks {
     pub save_config: Rc<dyn Fn()>,
     pub bindings: Rc<RefCell<Bindings>>,
     pub apply_bindings: Rc<dyn Fn()>,
+    pub applying_config: Rc<std::cell::Cell<bool>>,
+    pub config_observers: ConfigObservers,
 }
 
 pub fn show_preferences(
@@ -599,6 +682,8 @@ pub fn show_preferences(
         save_config,
         bindings,
         apply_bindings,
+        applying_config,
+        config_observers,
     } = hooks;
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
@@ -621,7 +706,11 @@ pub fn show_preferences(
         let pages = pages.clone();
         let config = config.clone();
         let save_config = save_config.clone();
+        let applying_config = applying_config.clone();
         Rc::new(move |f: Rc<dyn Fn(&mut Config)>| {
+            if applying_config.get() {
+                return;
+            }
             f(&mut config.borrow_mut());
             for (_, views) in pages.borrow().iter() {
                 for view in views {
@@ -1122,7 +1211,7 @@ pub fn show_preferences(
     open_btn.set_valign(gtk4::Align::Center);
     open_btn.add_css_class("flat");
     {
-        let uri = format!("file://{}", source.display());
+        let uri = gio::File::for_path(&source).uri();
         open_btn.connect_clicked(move |_| {
             if let Err(err) =
                 gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE)
@@ -1147,7 +1236,8 @@ pub fn show_preferences(
         let config = config.clone();
         let font_row = font_row.clone();
         reload_btn.connect_clicked(move |_| {
-            font_row.set_value(config.borrow().font_size as f64);
+            let size = config.borrow().font_size as f64;
+            font_row.set_value(size);
         });
     }
     reload_row.add_suffix(&reload_btn);
@@ -1227,42 +1317,80 @@ pub fn show_preferences(
     let default_row = adw::ActionRow::builder()
         .title("Set as Default Terminal")
         .build();
-    let default_btn = gtk4::Button::new();
+    let default_btn = gtk4::Button::with_label("Set as Default");
     default_btn.add_css_class("flat");
     default_btn.set_valign(gtk4::Align::Center);
 
     let refresh_default = {
-        let row = default_row.clone();
-        let button = default_btn.clone();
+        let row = default_row.downgrade();
+        let button = default_btn.downgrade();
+        let revision = Rc::new(std::cell::Cell::new(0u64));
         Rc::new(move || {
-            if crate::default_terminal::is_default() {
-                row.set_subtitle("optionTerm is the preferred terminal");
-                button.set_label("Set Again");
-            } else {
-                row.set_subtitle("Another terminal is preferred");
-                button.set_label("Set as Default");
-            }
+            let current = revision.get().wrapping_add(1);
+            revision.set(current);
+            let revision = revision.clone();
+            let row = row.clone();
+            let button = button.clone();
+            let job = gio::spawn_blocking(crate::default_terminal::is_default);
+            glib::spawn_future_local(async move {
+                let result = job.await;
+                if revision.get() != current {
+                    return;
+                }
+                let (Some(row), Some(button)) = (row.upgrade(), button.upgrade()) else {
+                    return;
+                };
+                match result {
+                    Ok(true) => {
+                        row.set_subtitle("optionTerm is the preferred terminal");
+                        button.set_label("Set Again");
+                    }
+                    Ok(false) => {
+                        row.set_subtitle("Another terminal is preferred");
+                        button.set_label("Set as Default");
+                    }
+                    Err(_) => row.set_subtitle("Could not check the default terminal"),
+                }
+            });
         })
     };
     refresh_default();
     {
         let refresh_default = refresh_default.clone();
-        let dialog = dialog.clone();
-        default_btn.connect_clicked(move |_| {
-            let toast = match crate::default_terminal::set_default() {
-                // Say what actually changed: silently claiming success would
-                // hide a desktop we could not reach.
-                Ok(applied) if applied.is_empty() => {
-                    "Nothing could be set on this desktop".to_string()
+        let dialog = dialog.downgrade();
+        default_btn.connect_clicked(move |button| {
+            if !button.is_sensitive() {
+                return;
+            }
+            button.set_sensitive(false);
+            let button = button.downgrade();
+            let dialog = dialog.clone();
+            let refresh_default = refresh_default.clone();
+            let job = gio::spawn_blocking(crate::default_terminal::set_default);
+            glib::spawn_future_local(async move {
+                let result = job
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("default-terminal worker failed")));
+                let toast = match result {
+                    // Say what actually changed: silently claiming success would
+                    // hide a desktop we could not reach.
+                    Ok(applied) if applied.is_empty() => {
+                        "Nothing could be set on this desktop".to_string()
+                    }
+                    Ok(applied) => format!("Updated {}", applied.join(", ")),
+                    Err(err) => {
+                        tracing::warn!("could not set default terminal: {err:#}");
+                        "Could not set the default terminal".to_string()
+                    }
+                };
+                if let Some(button) = button.upgrade() {
+                    button.set_sensitive(true);
                 }
-                Ok(applied) => format!("Updated {}", applied.join(", ")),
-                Err(err) => {
-                    tracing::warn!("could not set default terminal: {err:#}");
-                    "Could not set the default terminal".to_string()
+                refresh_default();
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.add_toast(adw::Toast::builder().title(&toast).timeout(4).build());
                 }
-            };
-            refresh_default();
-            dialog.add_toast(adw::Toast::builder().title(&toast).timeout(4).build());
+            });
         });
     }
     default_row.add_suffix(&default_btn);
@@ -1341,13 +1469,22 @@ pub fn show_preferences(
             let button = button.clone();
             let reset_c = reset.clone();
             let name = name.clone();
-            let builtin = COMMANDS
-                .iter()
-                .find(|(_, a, _)| a.trim_start_matches("win.") == name)
-                .map(|(_, _, d)| *d)
-                .unwrap_or("");
+            let builtin = Bindings::default().display(&name);
+            let dialog = dialog.downgrade();
             reset.connect_clicked(move |_| {
-                bindings.borrow_mut().set(&name, None);
+                let mut proposed = bindings.borrow().clone();
+                proposed.set(&name, None);
+                if let Some(conflict) = proposed
+                    .accels(&name)
+                    .iter()
+                    .find_map(|accel| proposed.conflict(accel, &name))
+                {
+                    if let Some(dialog) = dialog.upgrade() {
+                        dialog.add_toast(adw::Toast::new(&format!("Already used by {conflict}")));
+                    }
+                    return;
+                }
+                *bindings.borrow_mut() = proposed;
                 if let Err(err) = bindings.borrow().save() {
                     tracing::warn!("could not save shortcuts: {err:#}");
                 }
@@ -1355,7 +1492,7 @@ pub fn show_preferences(
                 button.set_label(if builtin.is_empty() {
                     "Unbound"
                 } else {
-                    builtin
+                    &builtin
                 });
                 reset_c.set_visible(false);
             });
@@ -1367,6 +1504,103 @@ pub fn show_preferences(
         shortcuts_group.add(&row);
     }
     shortcuts_page.add(&shortcuts_group);
+
+    let mut updates: Vec<ConfigUpdater> = Vec::new();
+    macro_rules! observe {
+        ($widget:ident, $method:ident, $value:expr) => {{
+            let weak = $widget.downgrade();
+            updates.push(Rc::new(move |config: &Config| {
+                if let Some(widget) = weak.upgrade() {
+                    widget.$method(($value)(config));
+                }
+            }));
+        }};
+    }
+    observe!(theme_row, set_selected, |c: &Config| match c.theme {
+        Theme::System => 0,
+        Theme::Light => 1,
+        Theme::Dark => 2,
+    });
+    observe!(tabs_row, set_selected, |c: &Config| match c.tabs_location {
+        TabsLocation::Top => 0,
+        TabsLocation::Bottom => 1,
+        TabsLocation::Left => 2,
+        TabsLocation::Right => 3,
+        TabsLocation::Hidden => 4,
+    });
+    observe!(
+        new_tab_row,
+        set_selected,
+        |c: &Config| match c.new_tab_position {
+            NewTabPosition::AfterCurrent => 0,
+            NewTabPosition::BeforeCurrent => 1,
+            NewTabPosition::End => 2,
+            NewTabPosition::Start => 3,
+        }
+    );
+    observe!(tab_width_row, set_selected, |c: &Config| u32::from(
+        c.tab_width == TabWidth::Natural
+    ));
+    observe!(tab_overflow_row, set_selected, |c: &Config| u32::from(
+        c.tab_overflow == TabOverflow::Scroll
+    ));
+    observe!(
+        middle_row,
+        set_selected,
+        |c: &Config| match c.middle_click_tab {
+            MiddleClickTab::Ignore => 0,
+            MiddleClickTab::NewTab => 1,
+            MiddleClickTab::CloseTab => 2,
+        }
+    );
+    observe!(
+        cursor_row,
+        set_selected,
+        |c: &Config| match c.cursor_style {
+            CursorStyle::Bar => 1,
+            CursorStyle::Underline => 2,
+            _ => 0,
+        }
+    );
+    observe!(font_row, set_value, |c: &Config| c.font_size as f64);
+    observe!(padding_row, set_value, |c: &Config| c.padding_x);
+    observe!(opacity_row, set_value, |c: &Config| c.background_opacity
+        * 100.0);
+    observe!(scroll_lines_row, set_value, |c: &Config| c.scroll_lines
+        as f64);
+    observe!(sidebar_always_row, set_active, |c: &Config| c
+        .sidebar_always);
+    observe!(search_btn_row, set_active, |c: &Config| c
+        .show_search_button);
+    observe!(ligature_row, set_active, |c: &Config| c.font_ligatures);
+    observe!(system_font_row, set_active, |c: &Config| c.use_system_font);
+    observe!(scroll_bar_row, set_active, |c: &Config| c.scroll_bar);
+    observe!(scroll_btn_row, set_active, |c: &Config| c.scroll_button);
+    observe!(scroll_keys_row, set_active, |c: &Config| c
+        .scroll_on_keystroke);
+    observe!(restore_row, set_active, |c: &Config| c.session_restore);
+    observe!(inherit_row, set_active, |c: &Config| c
+        .inherit_working_directory);
+    observe!(awake_row, set_active, |c: &Config| c.keep_awake);
+    observe!(confirm_tab_row, set_active, |c: &Config| c
+        .confirm_close_tab);
+    observe!(confirm_quit_row, set_active, |c: &Config| c.confirm_quit);
+    observe!(blink_row, set_active, |c: &Config| c.cursor_blink);
+    observe!(bell_row, set_active, |c: &Config| c.bell_sound);
+    observe!(done_row, set_active, |c: &Config| c.command_finished_sound);
+    config_observers.borrow_mut().push((
+        dialog.downgrade(),
+        Rc::new(move |config| {
+            for update in &updates {
+                update(config);
+            }
+        }),
+    ));
+    dialog.connect_closed(move |dialog| {
+        config_observers
+            .borrow_mut()
+            .retain(|(owner, _)| owner.upgrade().as_ref() != Some(dialog));
+    });
 
     dialog.add(&look_page);
     dialog.add(&behavior_page);
@@ -1445,7 +1679,7 @@ fn capture_shortcut(parent: &impl IsA<gtk4::Widget>, on_captured: impl Fn(String
     dialog.present(Some(parent));
 }
 
-pub fn show_shortcuts(window: &adw::ApplicationWindow) {
+pub fn show_shortcuts(window: &adw::ApplicationWindow, bindings: &Bindings) {
     let dialog = adw::Dialog::builder()
         .title("Keyboard Shortcuts")
         .content_width(420)
@@ -1460,9 +1694,13 @@ pub fn show_shortcuts(window: &adw::ApplicationWindow) {
     list.set_margin_start(12);
     list.set_margin_end(12);
 
-    for (label, _, accel) in COMMANDS.iter().filter(|(_, _, a)| !a.is_empty()) {
-        let row = adw::ActionRow::builder().title(*label).build();
-        let key = gtk4::Label::new(Some(accel));
+    for (label, _, accel) in bindings
+        .effective()
+        .into_iter()
+        .filter(|(_, _, a)| !a.is_empty())
+    {
+        let row = adw::ActionRow::builder().title(label).build();
+        let key = gtk4::Label::new(Some(&accel));
         key.add_css_class("dim-label");
         key.add_css_class("numeric");
         row.add_suffix(&key);
@@ -1517,4 +1755,105 @@ pub fn show_about(window: &adw::ApplicationWindow) {
         None,
     );
     about.present(Some(window));
+}
+
+pub fn agent_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    populate_agent_menu(&menu, || {
+        crate::agents::AgentKind::ALL
+            .into_iter()
+            .filter(|kind| crate::agents::is_installed(*kind))
+            .collect()
+    });
+    menu
+}
+
+fn populate_agent_menu(
+    menu: &gio::Menu,
+    probe: impl FnOnce() -> Vec<crate::agents::AgentKind> + Send + 'static,
+) {
+    menu.remove_all();
+    menu.append(Some("Detecting agents…"), None);
+    let menu = menu.downgrade();
+    let job = gio::spawn_blocking(probe);
+    glib::spawn_future_local(async move {
+        let result = job.await;
+        let Some(menu) = menu.upgrade() else { return };
+        menu.remove_all();
+        match result {
+            Ok(kinds) if kinds.is_empty() => menu.append(Some("No installed agents found"), None),
+            Ok(kinds) => {
+                for kind in kinds {
+                    menu.append(
+                        Some(kind.label()),
+                        Some(&format!("win.agent-{}", kind.as_str())),
+                    );
+                }
+            }
+            Err(_) => menu.append(Some("Agent discovery failed"), None),
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gtk4::test]
+    fn search_tracks_panes_and_clears_on_close_and_escape() {
+        let first = Rc::new(TerminalView::new(Config::default(), None, None).unwrap());
+        let second = Rc::new(TerminalView::new(Config::default(), None, None).unwrap());
+        let selected = Rc::new(RefCell::new(first.clone()));
+        let current = selected.clone();
+        let search = SearchBar::new(Rc::new(move || Some(current.borrow().clone())));
+        search.entry.set_text("needle");
+        search.open();
+        assert!(first.has_search());
+        *selected.borrow_mut() = second.clone();
+        search.sync_target();
+        assert!(!first.has_search());
+        assert!(second.has_search());
+        search.widget.set_search_mode(false);
+        assert!(!second.has_search());
+        search.open();
+        assert!(second.has_search());
+        search.entry.emit_by_name::<()>("stop-search", &[]);
+        assert!(!search.widget.is_search_mode());
+        assert!(!second.has_search());
+    }
+
+    #[gtk4::test]
+    fn tab_menus_share_one_agent_model() {
+        let agents = gio::Menu::new();
+        let first = tabs_menu(&agents);
+        let second = tabs_menu(&agents);
+        let first_agents = first.item_link(2, "submenu").unwrap();
+        let second_agents = second.item_link(2, "submenu").unwrap();
+        assert_eq!(first_agents, second_agents);
+        agents.append(Some("Codex"), Some("win.agent-codex"));
+        assert_eq!(first_agents.n_items(), 1);
+        assert_eq!(second_agents.n_items(), 1);
+    }
+
+    #[gtk4::test]
+    fn agent_discovery_does_not_block_the_main_loop() {
+        let menu = gio::Menu::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        glib::idle_add_local_once(move || {
+            let _ = tx.send(());
+        });
+        populate_agent_menu(&menu, move || {
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok(),
+                "main loop was blocked by agent discovery"
+            );
+            vec![crate::agents::AgentKind::Codex]
+        });
+        crate::test_support::spin_until(|| {
+            menu.item_attribute_value(0, "label", None)
+                .and_then(|v| v.get::<String>())
+                .as_deref()
+                == Some("Codex")
+        });
+    }
 }

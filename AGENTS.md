@@ -88,3 +88,40 @@
 - Ver [VERSIONING.md](VERSIONING.md): changelog usa `x.y.z-stable` (ou
   alpha/beta); `Cargo.toml` / tags git ficam numéricos (`0.2.1`, `v0.2.1`).
 - Não marque `stable` no changelog sem estar pronto pra release/AUR.
+
+## Regressões e isolamento
+- `GTK_A11Y=none GTK_USE_PORTAL=0 GIO_USE_VFS=local cargo test --release`
+  executa os testes locais no display disponível, sem ativar portais/acessibilidade.
+  Em CI headless, manter `xvfb-run -a`.
+- O teste de janela usa subprocesso e D-Bus próprios; requer
+  `/usr/bin/dbus-run-session` e `/usr/bin/dbus-daemon`. Isola `HOME`,
+  `OPTION_HOME`, XDG e PATH, sem executar agentes instalados nem alterar a
+  sessão real. `OPTION_HOME` tem precedência sobre `HOME` no optionSDK.
+- Fixtures novas usam `src/test_support.rs`; testes de panic hook e sinais
+  devem ficar em subprocessos, sem alterar hooks/ambiente globais da suíte.
+  O teardown do teste de PTY usa SIGKILL apenas no próprio filho descartável:
+  SIGHUP não garantiu término e deixou waitpid bloqueado numa rodada paralela.
+- No fork VTE fixado, chamar `set_pty(None)` ao encerrar um terminal com PTY
+  ativo causou SIGSEGV em `_vte_pty_get_impl`. Cancelar spawn, encerrar o filho
+  próprio e liberar as referências, sem desconectar o PTY por essa chamada.
+- `terminal-split` identifica divisores de terminais: o Paned do explorador
+  não pode entrar na captura de sessão, no zoom ou na equalização.
+
+## Trabalho em background
+- Probes de agentes, terminal padrão e exportação Codex usam
+  `gio::spawn_blocking`; atualizar GTK somente no retorno ao main loop.
+  Os dois menus de abas compartilham um único modelo de agentes.
+- A sidebar usa `ListBox::bind_model` sobre `TabView::pages`, com bindings
+  de título/ícone. Não recriar todas as linhas para sincronizar seleção.
+  Drag-and-drop transporta a identidade da página, não um índice antigo.
+- FileTree mantém no máximo uma leitura em voo por painel, invalida
+  resultados por geração e cancela cooperativamente ao ser descartado.
+  Cache de diretórios: 2 s; `refresh()` invalida. Limites: 800 entradas por
+  diretório, 1600 linhas visíveis e 32 níveis de expansão. Foco num painel
+  de arquivos oculto não deve iniciar enumeração.
+- Codex indexa os rollouts em uma única travessia, sem seguir symlinks
+  internos; não reintroduzir uma busca de diretórios por thread. Ler cwd
+  pelo cabeçalho e renderizar JSONL linha a linha, usando fixtures nos testes.
+- `storage::atomic_write` cria arquivos privados (0600 em Unix) e preserva
+  os bits rwx do destino existente; não substituir isso por gravação direta
+  na exportação. ACLs/atributos estendidos não são copiados pelo helper.

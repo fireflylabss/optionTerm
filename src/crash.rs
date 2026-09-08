@@ -151,9 +151,17 @@ mod tests {
     /// a temp dir so the test never touches the user's real crash log.
     #[test]
     fn crash_log_writes_message() {
-        let dir = std::env::temp_dir().join("optionterm-crash-test");
-        let path = dir.join("crash.log");
-        let _ = std::fs::remove_file(&path);
+        let Some(path) = std::env::var_os("OPTIONTERM_CRASH_TEST_PATH") else {
+            let dir = crate::test_support::TestDir::new("crash-log");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "crash::tests::crash_log_writes_message"])
+                .env("OPTIONTERM_CRASH_TEST_PATH", dir.path().join("crash.log"))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        };
+        let path = PathBuf::from(path);
 
         // Build a PanicHookInfo by catching a real panic with our writer as the
         // hook; the message must land in `path`.

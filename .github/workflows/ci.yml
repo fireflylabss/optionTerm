@@ -32,6 +32,11 @@ jobs:
             gcc-14 \
             g++-14 \
             libgdk-pixbuf-2.0-dev \
+            liblz4-dev \
+            libgnutls28-dev \
+            xauth \
+            fonts-dejavu-core \
+            dbus-daemon \
             xvfb
 
       - name: Install Rust toolchain

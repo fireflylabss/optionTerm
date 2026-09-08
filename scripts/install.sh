@@ -40,15 +40,21 @@ if $SYSTEM; then
 else
   PREFIX="${PREFIX:-$HOME/.local}"
   BIN_DIR="$PREFIX/bin"
-  APP_DIR="$HOME/.local/share/applications"
-  ICONS_DIR="$HOME/.local/share/icons/hicolor"
+  APP_DIR="$PREFIX/share/applications"
+  ICONS_DIR="$PREFIX/share/icons/hicolor"
 fi
 
+[[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]] || {
+  echo "error: required VTE fork is missing — run scripts/build-vte.sh first" >&2
+  exit 1
+}
 echo "Building optionterm (release)..."
-(
-  cd "$ROOT"
-  cargo build --release
-)
+if [[ "${OPTIONTERM_SKIP_BUILD:-0}" != 1 ]]; then
+  (
+    cd "$ROOT"
+    cargo build --locked --release
+  )
+fi
 
 if [[ ! -f "$ROOT/target/release/optionterm" ]]; then
   echo "error: build did not produce target/release/optionterm" >&2
@@ -58,6 +64,10 @@ fi
 echo "Installing binary to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 install -Dm755 "$ROOT/target/release/optionterm" "$BIN_DIR/optionterm"
+install -Dm755 "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" "$PREFIX/lib/optionterm/libvte-2.91-gtk4.so.0"
+ln -sf libvte-2.91-gtk4.so.0 "$PREFIX/lib/optionterm/libvte-2.91-gtk4.so"
+install -Dm644 "$ROOT/NOTICE" "$PREFIX/share/licenses/optionterm/NOTICE"
+install -Dm644 "$ROOT/LICENSE" "$PREFIX/share/licenses/optionterm/LICENSE"
 ln -sf optionterm "$BIN_DIR/option-term"
 
 echo "Installing .desktop entry to $APP_DIR..."

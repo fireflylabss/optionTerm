@@ -6,12 +6,19 @@ use std::{
 };
 
 use anyhow::Result;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// Replace a file through a sibling temporary file so readers never observe a
 /// partially-written TOML document.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.into()),
+    };
 
     let name = path
         .file_name()
@@ -21,11 +28,17 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let temporary = parent.join(format!(".{name}.tmp-{}-{stamp}", std::process::id()));
 
     let result = (|| -> io::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary)?;
         file.write_all(contents)?;
+        if let Some(permissions) = permissions {
+            #[cfg(unix)]
+            let permissions = fs::Permissions::from_mode(permissions.mode() & 0o777);
+            file.set_permissions(permissions)?;
+        }
         file.sync_all()?;
         fs::rename(&temporary, path)?;
         sync_directory(parent)?;
@@ -53,6 +66,29 @@ mod tests {
     use std::fs;
 
     use super::atomic_write;
+
+    #[cfg(unix)]
+    #[test]
+    fn replacements_preserve_permissions_and_new_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_support::TestDir::new("storage-permissions");
+        let path = dir.path().join("state.toml");
+        for mode in [0o600, 0o640] {
+            fs::write(&path, "original").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            atomic_write(&path, b"replacement").unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        let new = dir.path().join("new.toml");
+        atomic_write(&new, b"private").unwrap();
+        assert_eq!(
+            fs::metadata(new).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn replaces_file_without_leaving_temporary_files() {

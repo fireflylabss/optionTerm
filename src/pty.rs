@@ -53,7 +53,7 @@ mod tests {
 
     impl Drop for TestPty {
         fn drop(&mut self) {
-            let _ = signal::kill(self.child, signal::SIGHUP);
+            let _ = signal::kill(self.child, signal::SIGKILL);
             let _ = wait::waitpid(self.child, None);
         }
     }
@@ -89,7 +89,9 @@ mod tests {
 
         let mut found = None;
         for _ in 0..200 {
-            if let Some(cwd) = foreground_cwd(pty.master.as_raw_fd()) {
+            if let Some(cwd) = foreground_cwd(pty.master.as_raw_fd())
+                && cwd.canonicalize().ok().as_ref() == Some(&dir)
+            {
                 found = Some(cwd);
                 break;
             }

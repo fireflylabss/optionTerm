@@ -76,13 +76,16 @@ impl Bindings {
     /// The action already using `accel`, if any. Used to refuse duplicates,
     /// since two actions on one key means one of them silently never fires.
     pub fn conflict(&self, accel: &str, ignoring: &str) -> Option<String> {
-        for (label, action, default) in COMMANDS {
+        for (label, action, _) in COMMANDS {
             let name = action.trim_start_matches("win.");
             if name == ignoring {
                 continue;
             }
-            let effective = self.get(name).unwrap_or(default);
-            if !effective.is_empty() && accel_eq(effective, accel) {
+            if self
+                .accels(name)
+                .iter()
+                .any(|effective| accel_eq(effective, accel))
+            {
                 return Some((*label).to_string());
             }
         }
@@ -93,12 +96,83 @@ impl Bindings {
     pub fn effective(&self) -> Vec<(&'static str, &'static str, String)> {
         COMMANDS
             .iter()
-            .map(|(label, action, default)| {
+            .map(|(label, action, _)| {
                 let name = action.trim_start_matches("win.");
-                let accel = self.get(name).unwrap_or(default).to_string();
-                (*label, *action, accel)
+                (*label, *action, self.display(name))
             })
             .collect()
+    }
+
+    pub fn display(&self, action: &str) -> String {
+        if let Some(value) = self.get(action) {
+            return value.to_string();
+        }
+        let default = COMMANDS
+            .iter()
+            .find(|(_, name, _)| name.trim_start_matches("win.") == action)
+            .map(|(_, _, key)| *key)
+            .unwrap_or("");
+        std::iter::once(default)
+            .chain(aliases(action).iter().copied())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    pub fn accels(&self, action: &str) -> Vec<String> {
+        if let Some(value) = self.get(action) {
+            return (!value.is_empty())
+                .then(|| to_gtk_accel(value))
+                .into_iter()
+                .collect();
+        }
+        let default = COMMANDS
+            .iter()
+            .find(|(_, name, _)| name.trim_start_matches("win.") == action)
+            .map(|(_, _, key)| *key)
+            .unwrap_or("");
+        std::iter::once(default)
+            .chain(aliases(action).iter().copied())
+            .filter(|s| !s.is_empty())
+            .map(to_gtk_accel)
+            .collect()
+    }
+
+    pub fn apply(&self, app: &impl gtk4::prelude::IsA<gtk4::Application>) {
+        use gtk4::prelude::*;
+        for (_, action, _) in COMMANDS {
+            let name = action.trim_start_matches("win.");
+            let mut accels = self.accels(name);
+            if accels.iter().any(|a| gtk4::accelerator_parse(a).is_none()) {
+                tracing::warn!(action = name, "invalid shortcut; restoring default");
+                accels = Self::default().accels(name);
+            }
+            app.set_accels_for_action(
+                action,
+                &accels.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    pub fn update_tooltips(&self, widget: &gtk4::Widget) {
+        use gtk4::prelude::*;
+        if let Some(actionable) = widget.dynamic_cast_ref::<gtk4::Actionable>()
+            && let Some(action) = actionable.action_name()
+            && let Some((label, _, _)) = COMMANDS.iter().find(|(_, name, _)| *name == action)
+        {
+            let shortcut = self.display(action.trim_start_matches("win."));
+            let text = if shortcut.is_empty() {
+                label.to_string()
+            } else {
+                format!("{label} ({shortcut})")
+            };
+            widget.set_tooltip_text(Some(&text));
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            self.update_tooltips(&widget);
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -115,11 +189,33 @@ impl Bindings {
              # An empty string unbinds the action.\n\n\
              [keys]\n",
         );
-        for (action, accel) in &self.0 {
-            out.push_str(&format!("{action} = \"{accel}\"\n"));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                Self::parse(&text).context("preserving invalid shortcuts file")?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
         }
+        let values: toml::Table = self
+            .0
+            .iter()
+            .map(|(action, value)| (action.clone(), toml::Value::String(value.clone())))
+            .collect();
+        out.push_str(&toml::to_string(&values)?);
         crate::storage::atomic_write(&path, out.as_bytes())
             .with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+fn aliases(action: &str) -> &'static [&'static str] {
+    match action {
+        "tab-overview" => &["Super+Tab"],
+        "next-tab" => &["Ctrl+Tab"],
+        "prev-tab" => &["Ctrl+Shift+Tab"],
+        "zoom-in" => &["<Control>equal", "<Control>KP_Add"],
+        "zoom-out" => &["<Control>KP_Subtract"],
+        "zoom-reset" => &["<Control>KP_0"],
+        _ => &[],
     }
 }
 
@@ -186,6 +282,15 @@ pub fn to_gtk_accel(accel: &str) -> String {
         "+" | "plus" => "plus".to_string(),
         "-" => "minus".to_string(),
         "," => "comma".to_string(),
+        "Enter" | "Return" => "Return".into(),
+        "Tab" => "Tab".into(),
+        "Left" | "←" => "Left".into(),
+        "Right" | "→" => "Right".into(),
+        "Up" | "↑" => "Up".into(),
+        "Down" | "↓" => "Down".into(),
+        "[" => "bracketleft".into(),
+        "]" => "bracketright".into(),
+        other if other.starts_with('F') && other[1..].parse::<u8>().is_ok() => other.to_string(),
         other => other.to_lowercase(),
     });
     out
@@ -194,6 +299,50 @@ pub fn to_gtk_accel(accel: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gtk4::test]
+    fn reset_reinstalls_defaults_and_aliases_immediately() {
+        use gtk4::prelude::*;
+        let app = gtk4::Application::new(
+            Some("io.option.keys.test"),
+            gtk4::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        let mut bindings = Bindings::default();
+        bindings.set("next-tab", Some("<Control>j"));
+        bindings.apply(&app);
+        assert_eq!(app.accels_for_action("win.next-tab").len(), 1);
+        bindings.set("next-tab", None);
+        bindings.apply(&app);
+        assert_eq!(app.accels_for_action("win.next-tab").len(), 2);
+        bindings.set("next-tab", Some(""));
+        bindings.apply(&app);
+        assert!(app.accels_for_action("win.next-tab").is_empty());
+    }
+
+    #[test]
+    fn regression_alias_conflicts_are_detected() {
+        let bindings = Bindings::default();
+        assert_eq!(
+            bindings.conflict("<Control>Tab", "find").as_deref(),
+            Some("Next Tab")
+        );
+        assert_eq!(
+            bindings.conflict("<Control><Alt>Left", "find").as_deref(),
+            Some("Focus Split Left")
+        );
+    }
+
+    #[gtk4::test]
+    fn regression_catalog_keys_are_valid_gtk_accelerators() {
+        for (_, _, accel) in COMMANDS {
+            if !accel.is_empty() {
+                assert!(
+                    gtk4::accelerator_parse(to_gtk_accel(accel)).is_some(),
+                    "invalid shortcut {accel}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn only_overrides_are_stored() {
@@ -233,7 +382,7 @@ mod tests {
         assert_eq!(to_gtk_accel("Ctrl+Shift+T"), "<Control><Shift>t");
         assert_eq!(to_gtk_accel("Ctrl+PgUp"), "<Control>Page_Up");
         assert_eq!(to_gtk_accel("Ctrl+,"), "<Control>comma");
-        assert_eq!(to_gtk_accel("F2"), "f2");
+        assert_eq!(to_gtk_accel("F2"), "F2");
         // Already-GTK strings pass through untouched.
         assert_eq!(to_gtk_accel("<Control><Shift>t"), "<Control><Shift>t");
     }

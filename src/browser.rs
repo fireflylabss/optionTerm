@@ -6,15 +6,17 @@ use webkit6::{LoadEvent, WebView, prelude::WebViewExt};
 const HOME_URI: &str = "https://duckduckgo.com/";
 
 /// Build a browser surface that can live as an ordinary `AdwTabView` page.
-pub fn new_tab() -> gtk4::Box {
+/// `initial_uri` loads the given address instead of the default home page.
+pub fn new_tab(initial_uri: Option<&str>) -> gtk4::Box {
     let back = icon_button("go-previous-symbolic", "Go back");
     let forward = icon_button("go-next-symbolic", "Go forward");
     let reload = icon_button("view-refresh-symbolic", "Reload");
     back.set_sensitive(false);
     forward.set_sensitive(false);
 
+    let start_uri = initial_uri.filter(|s| !s.is_empty()).unwrap_or(HOME_URI);
     let address = Entry::builder()
-        .text(HOME_URI)
+        .text(start_uri)
         .placeholder_text("Enter a web address")
         .hexpand(true)
         .activates_default(true)
@@ -99,8 +101,31 @@ pub fn new_tab() -> gtk4::Box {
         });
     }
 
-    webview.load_uri(HOME_URI);
+    webview.load_uri(start_uri);
     content
+}
+
+/// The URI currently loaded in `root`, if the page is a browser tab built by
+/// [`new_tab`]. Used to persist the address across session restores.
+pub fn current_uri(root: &gtk4::Widget) -> Option<String> {
+    let webview = find_webview(root)?;
+    webview.uri().map(|u| u.to_string())
+}
+
+fn find_webview(widget: &gtk4::Widget) -> Option<WebView> {
+    if let Ok(webview) = widget.clone().downcast::<WebView>() {
+        return Some(webview);
+    }
+    if let Some(first) = widget.first_child() {
+        let mut next = Some(first);
+        while let Some(child) = next {
+            if let Some(webview) = find_webview(&child) {
+                return Some(webview);
+            }
+            next = child.next_sibling();
+        }
+    }
+    None
 }
 
 fn icon_button(icon_name: &str, tooltip: &str) -> Button {

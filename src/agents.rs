@@ -9,7 +9,20 @@
 //! vanishes) on a dark theme. We derive a pure-white copy (`<name>-white.svg`)
 //! into the app cache so a dark theme can show a legible white logo.
 
-use std::{path::Path, process::Command};
+use std::{
+    collections::HashMap,
+    path::Path,
+    process::{Command, Stdio},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+/// How long a successful/failed install probe is remembered. Avoids re-spawning
+/// `--version` on every menu build while keeping new installs visible.
+const INSTALL_TTL: Duration = Duration::from_secs(30);
+/// Upper bound for one probe, so a slow binary (cursor/devin/grok) can never
+/// freeze the shell for long.
+const INSTALL_TIMEOUT: Duration = Duration::from_millis(1500);
 
 use option_sdk::App;
 
@@ -172,13 +185,58 @@ fn derive_white_logo(kind: AgentKind, src: &Path, dst: &Path) -> Option<std::pat
 }
 
 /// Whether the agent's binary is on `$PATH`.
+///
+/// Results are cached for [`INSTALL_TTL`] and each probe is bounded by
+/// [`INSTALL_TIMEOUT`], so opening the agent menu never blocks on a slow
+/// `--version` and repeated probes are cheap.
 pub fn is_installed(kind: AgentKind) -> bool {
-    Command::new(kind.as_str())
+    static CACHE: Mutex<Option<HashMap<AgentKind, (bool, Instant)>>> = Mutex::new(None);
+    {
+        let guard = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((installed, checked)) = guard.as_ref().and_then(|cache| cache.get(&kind))
+            && checked.elapsed() < INSTALL_TTL
+        {
+            return *installed;
+        }
+    }
+    let installed = probe(kind);
+    CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(kind, (installed, Instant::now()));
+    installed
+}
+
+/// Run `--version` once, silently, with a hard timeout.
+fn probe(kind: AgentKind) -> bool {
+    let Ok(mut child) = Command::new(kind.as_str())
         .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+
+    let deadline = Instant::now() + INSTALL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// The argv that starts a brand-new agent session.

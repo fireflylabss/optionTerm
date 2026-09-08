@@ -84,19 +84,35 @@ impl PaneLayout {
     }
 }
 
+/// What kind of page a restored tab holds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum TabKind {
+    /// One or more terminal panes in a `PaneLayout`.
+    #[default]
+    Terminal,
+    /// A single embedded browser page, optionally restoring its URL.
+    Browser { url: Option<String> },
+}
+
 /// One restored tab.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TabState {
     /// Custom title, if the user renamed the tab.
     pub title: Option<String>,
-    /// Nested split tree (preferred).
+    /// Nested split tree (preferred for `TabKind::Terminal`).
     pub layout: PaneLayout,
+    /// Page kind (terminal vs browser). Defaults to `Terminal`.
+    pub kind: TabKind,
 }
 
 impl TabState {
-    /// Legacy accessor: leaf cwds in tree order.
+    /// Legacy accessor: leaf cwds in tree order (empty for browsers).
     pub fn panes(&self) -> Vec<Option<String>> {
-        self.layout.leaf_cwds()
+        if matches!(self.kind, TabKind::Browser { .. }) {
+            Vec::new()
+        } else {
+            self.layout.leaf_cwds()
+        }
     }
 }
 
@@ -122,16 +138,34 @@ impl Session {
 
     pub fn load() -> Option<Self> {
         let text = std::fs::read_to_string(Self::path()).ok()?;
-        Self::parse(&text).ok().filter(|s| !s.is_empty())
+        match Self::parse(&text) {
+            Ok(session) => Some(session).filter(|s| !s.is_empty()),
+            Err(err) => {
+                tracing::warn!(
+                    "session could not be restored; original file will be preserved: {err:#}"
+                );
+                None
+            }
+        }
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+        self.save_to(&Self::path())
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        let text = self.to_toml();
+        Self::parse(&text).context("validating session before saving")?;
+        match std::fs::read_to_string(path) {
+            Ok(existing) => {
+                Self::parse(&existing).context(
+                    "preserving invalid session; recover or move it before saving a replacement",
+                )?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).context("reading existing session before replacing it"),
         }
-        crate::storage::atomic_write(&path, self.to_toml().as_bytes())
+        crate::storage::atomic_write(path, text.as_bytes())
             .with_context(|| format!("writing {}", path.display()))
     }
 
@@ -171,21 +205,33 @@ impl Session {
             if let Some(title) = &tab.title {
                 out.push_str(&format!("title = {}\n", quote(title)));
             }
-            // Keep a flat `panes` list for older readers / debugging.
-            let panes: Vec<String> = tab
-                .panes()
-                .iter()
-                .map(|p| quote(p.as_deref().unwrap_or("")))
-                .collect();
-            out.push_str(&format!("panes = [{}]\n", panes.join(", ")));
-            // `[tab.layout]` attaches to the preceding `[[tab]]` array element.
-            write_layout(&mut out, "tab.layout", &tab.layout);
+            match &tab.kind {
+                TabKind::Terminal => {
+                    // Keep a flat `panes` list for older readers / debugging.
+                    let panes: Vec<String> = tab
+                        .panes()
+                        .iter()
+                        .map(|p| quote(p.as_deref().unwrap_or("")))
+                        .collect();
+                    out.push_str(&format!("panes = [{}]\n", panes.join(", ")));
+                    // `[tab.layout]` attaches to the preceding `[[tab]]` array element.
+                    write_layout(&mut out, "tab.layout", &tab.layout);
+                }
+                TabKind::Browser { url } => {
+                    out.push_str("kind = \"browser\"\n");
+                    if let Some(url) = url {
+                        out.push_str(&format!("url = {}\n", quote(url)));
+                    }
+                }
+            }
         }
         out
     }
 
     pub fn parse(text: &str) -> Result<Self> {
+        anyhow::ensure!(text.len() <= 4 * 1024 * 1024, "session exceeds size limit");
         let table: toml::Table = text.parse().context("parsing session.toml")?;
+        let mut remaining_panes = 1024usize;
         let active = table
             .get("active")
             .and_then(|v| v.as_integer())
@@ -194,12 +240,12 @@ impl Session {
         let width = table
             .get("width")
             .and_then(|v| v.as_integer())
-            .map(|w| w as i32)
+            .and_then(|w| i32::try_from(w).ok())
             .filter(|&w| w > 0);
         let height = table
             .get("height")
             .and_then(|v| v.as_integer())
-            .map(|h| h as i32)
+            .and_then(|h| i32::try_from(h).ok())
             .filter(|&h| h > 0);
         let maximized = table
             .get("maximized")
@@ -208,6 +254,7 @@ impl Session {
 
         let mut tabs = Vec::new();
         if let Some(items) = table.get("tab").and_then(|v| v.as_array()) {
+            anyhow::ensure!(items.len() <= 128, "session exceeds tab limit");
             for item in items {
                 let Some(t) = item.as_table() else { continue };
                 let title = t
@@ -215,7 +262,21 @@ impl Session {
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
                     .filter(|s| !s.is_empty());
-                let layout = if let Some(layout_tbl) = t.get("layout").and_then(|v| v.as_table()) {
+                let kind = match t.get("kind").and_then(|v| v.as_str()) {
+                    Some("browser") => {
+                        let url = t
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                        TabKind::Browser { url }
+                    }
+                    _ => TabKind::Terminal,
+                };
+                let layout = if matches!(kind, TabKind::Browser { .. }) {
+                    PaneLayout::default()
+                } else if let Some(layout_tbl) = t.get("layout").and_then(|v| v.as_table()) {
+                    validate_layout(Some(layout_tbl), 0, &mut remaining_panes)?;
                     parse_layout(layout_tbl)
                 } else {
                     let panes = t
@@ -228,9 +289,18 @@ impl Session {
                         })
                         .filter(|p: &Vec<_>| !p.is_empty())
                         .unwrap_or_else(|| vec![None]);
+                    anyhow::ensure!(
+                        panes.len() <= 64 && panes.len() <= remaining_panes,
+                        "session exceeds pane limit"
+                    );
+                    remaining_panes -= panes.len();
                     PaneLayout::from_flat_panes(panes)
                 };
-                tabs.push(TabState { title, layout });
+                tabs.push(TabState {
+                    title,
+                    layout,
+                    kind,
+                });
             }
         }
         let active = active.min(tabs.len().saturating_sub(1));
@@ -269,6 +339,28 @@ fn write_layout(out: &mut String, key: &str, layout: &PaneLayout) {
     }
 }
 
+fn validate_layout(table: Option<&toml::Table>, depth: usize, remaining: &mut usize) -> Result<()> {
+    anyhow::ensure!(depth <= 64, "session exceeds split depth limit");
+    if let Some(table) = table
+        && table.get("kind").and_then(|v| v.as_str()) == Some("split")
+    {
+        validate_layout(
+            table.get("start").and_then(|v| v.as_table()),
+            depth + 1,
+            remaining,
+        )?;
+        validate_layout(
+            table.get("end").and_then(|v| v.as_table()),
+            depth + 1,
+            remaining,
+        )?;
+    } else {
+        anyhow::ensure!(*remaining > 0, "session exceeds pane limit");
+        *remaining -= 1;
+    }
+    Ok(())
+}
+
 fn parse_layout(table: &toml::Table) -> PaneLayout {
     let kind = table.get("kind").and_then(|v| v.as_str()).unwrap_or("leaf");
     if kind == "split" {
@@ -280,6 +372,7 @@ fn parse_layout(table: &toml::Table) -> PaneLayout {
         let ratio = table
             .get("ratio")
             .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+            .filter(|ratio| ratio.is_finite())
             .unwrap_or(0.5)
             .clamp(0.05, 0.95);
         let start = table
@@ -309,16 +402,46 @@ fn parse_layout(table: &toml::Table) -> PaneLayout {
 }
 
 fn quote(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
-    format!("\"{escaped}\"")
+    toml::Value::String(value.to_string()).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_session_is_not_overwritten() {
+        let dir = crate::test_support::TestDir::new("invalid-session");
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "broken = [").unwrap();
+        assert!(sample().save_to(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken = [");
+    }
+
+    #[test]
+    fn nonfinite_ratios_and_overflowing_dimensions_are_safe() {
+        let session = Session::parse("width = 4294967297\nheight = 9223372036854775807\n[[tab]]\n[tab.layout]\nkind = 'split'\nratio = nan\n").unwrap();
+        assert_eq!(session.width, None);
+        assert_eq!(session.height, None);
+        assert!(matches!(
+            session.tabs[0].layout,
+            PaneLayout::Split { ratio: 0.5, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_tabs_and_legacy_panes() {
+        assert!(Session::parse(&"[[tab]]\n".repeat(129)).is_err());
+        let panes = vec!["''"; 65].join(",");
+        assert!(Session::parse(&format!("[[tab]]\npanes = [{panes}]\n")).is_err());
+    }
+
+    #[test]
+    fn control_characters_round_trip() {
+        let mut session = sample();
+        session.tabs[0].title = Some("a\r\t\u{0001}\\\"b".into());
+        assert_eq!(Session::parse(&session.to_toml()).unwrap(), session);
+    }
 
     fn sample() -> Session {
         Session {
@@ -335,10 +458,12 @@ mod tests {
                             cwd: Some("/tmp".into()),
                         }),
                     },
+                    ..Default::default()
                 },
                 TabState {
                     title: None,
                     layout: PaneLayout::Leaf { cwd: None },
+                    ..Default::default()
                 },
             ],
             active: 1,
@@ -363,6 +488,7 @@ mod tests {
                 layout: PaneLayout::Leaf {
                     cwd: Some(r#"/tmp/we"ird\path"#.into()),
                 },
+                ..Default::default()
             }],
             active: 0,
             width: None,
@@ -409,6 +535,49 @@ mod tests {
     }
 
     #[test]
+    fn browser_tab_round_trips() {
+        let session = Session {
+            tabs: vec![
+                TabState {
+                    title: Some("Docs".into()),
+                    layout: PaneLayout::default(),
+                    kind: TabKind::Browser {
+                        url: Some("https://docs.rust-lang.org".into()),
+                    },
+                },
+                TabState {
+                    title: None,
+                    layout: PaneLayout::default(),
+                    kind: TabKind::Browser { url: None },
+                },
+            ],
+            active: 0,
+            width: None,
+            height: None,
+            maximized: false,
+        };
+        let back = Session::parse(&session.to_toml()).expect("parse");
+        assert_eq!(back, session);
+    }
+
+    #[test]
+    fn browser_tab_ignores_panes_and_layout() {
+        let parsed = Session::parse(
+            "active = 0\n\n[[tab]]\nkind = \"browser\"\nurl = \"https://a.b\"\n\n[[tab]]\npanes = [\"/w\"]\n",
+        )
+        .expect("parse");
+        assert_eq!(parsed.tabs.len(), 2);
+        assert_eq!(
+            parsed.tabs[0].kind,
+            TabKind::Browser {
+                url: Some("https://a.b".into())
+            }
+        );
+        assert_eq!(parsed.tabs[0].panes(), Vec::<Option<String>>::new());
+        assert_eq!(parsed.tabs[1].kind, TabKind::Terminal);
+    }
+
+    #[test]
     fn nested_vertical_split_round_trips() {
         let session = Session {
             tabs: vec![TabState {
@@ -430,6 +599,7 @@ mod tests {
                         }),
                     }),
                 },
+                ..Default::default()
             }],
             active: 0,
             width: Some(900),

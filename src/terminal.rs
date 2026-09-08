@@ -24,9 +24,20 @@ use crate::{
     pty,
 };
 
-type StringCallback = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
-type VoidCallback = Rc<RefCell<Option<Box<dyn Fn()>>>>;
-type ResizeCallback = Rc<RefCell<Option<Box<dyn Fn(u16, u16)>>>>;
+type StringCallback = Rc<RefCell<Option<Rc<dyn Fn(String)>>>>;
+type VoidCallback = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type ResizeCallback = Rc<RefCell<Option<Rc<dyn Fn(u16, u16)>>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessState {
+    Waiting,
+    Starting,
+    Running,
+    Restarting,
+    Exited,
+    Failed,
+    Closed,
+}
 
 /// Pane root: Overlay so split collapse/bounds in `app.rs` keep working.
 pub struct TerminalView {
@@ -43,6 +54,7 @@ pub struct TerminalView {
     on_focus: VoidCallback,
     on_resize: ResizeCallback,
     on_link: StringCallback,
+    on_spawn_error: StringCallback,
     scroll_btn: gtk4::Button,
     /// Whether the child process has been spawned yet (deferred until the
     /// terminal is mapped and has a real size, so full-screen TUIs render).
@@ -52,6 +64,10 @@ pub struct TerminalView {
     bg_provider: gtk4::CssProvider,
     /// Scoping name used by `bg_provider`'s CSS for this overlay.
     overlay_name: String,
+    state: Rc<Cell<ProcessState>>,
+    cancellable: gio::Cancellable,
+    resize_source: RefCell<Option<glib::SourceId>>,
+    font_settings: RefCell<Option<(gio::Settings, glib::SignalHandlerId)>>,
 }
 
 impl TerminalView {
@@ -121,9 +137,18 @@ impl TerminalView {
         let overlay_name = format!("terminal-bg-{}", PANE_ID.fetch_add(1, Ordering::Relaxed));
         overlay.set_widget_name(&overlay_name);
         apply_surface_bg(&bg_provider, &overlay_name, &config);
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &bg_provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
 
         let config = Rc::new(RefCell::new(config));
         let child_pid = Rc::new(Cell::new(-1));
+        let state = Rc::new(Cell::new(ProcessState::Waiting));
+        let cancellable = gio::Cancellable::new();
         let cwd = Rc::new(RefCell::new(cwd));
         let title = Rc::new(RefCell::new(String::from("Terminal")));
         let on_title: StringCallback = Rc::new(RefCell::new(None));
@@ -131,6 +156,7 @@ impl TerminalView {
         let on_focus: VoidCallback = Rc::new(RefCell::new(None));
         let on_resize: ResizeCallback = Rc::new(RefCell::new(None));
         let on_link: StringCallback = Rc::new(RefCell::new(None));
+        let on_spawn_error: StringCallback = Rc::new(RefCell::new(None));
         let last_cols = Rc::new(Cell::new(0u16));
         let last_rows = Rc::new(Cell::new(0u16));
 
@@ -140,7 +166,8 @@ impl TerminalView {
             terminal.connect_window_title_changed(move |t| {
                 let next = sanitize_title(t.window_title().as_deref().unwrap_or("Terminal"));
                 *title.borrow_mut() = next.clone();
-                if let Some(cb) = on_title.borrow().as_ref() {
+                let callback = on_title.borrow().clone();
+                if let Some(cb) = callback {
                     cb(next);
                 }
             });
@@ -149,9 +176,31 @@ impl TerminalView {
         {
             let on_exit = on_exit.clone();
             let child_pid = child_pid.clone();
-            terminal.connect_child_exited(move |_, _status| {
+            let state = state.clone();
+            let cancellable = cancellable.clone();
+            let command = command.clone();
+            let cwd = cwd.clone();
+            let on_spawn_error = on_spawn_error.clone();
+            terminal.connect_child_exited(move |terminal, _status| {
                 child_pid.set(-1);
-                if let Some(cb) = on_exit.borrow().as_ref() {
+                if state.get() == ProcessState::Closed {
+                    return;
+                }
+                let previous = state.replace(ProcessState::Exited);
+                if previous == ProcessState::Restarting {
+                    spawn_child(
+                        terminal,
+                        &command,
+                        &cwd,
+                        &child_pid,
+                        &on_spawn_error,
+                        &state,
+                        &cancellable,
+                    );
+                    return;
+                }
+                let callback = on_exit.borrow().clone();
+                if let Some(cb) = callback {
                     cb();
                 }
             });
@@ -170,7 +219,8 @@ impl TerminalView {
             let on_focus = on_focus.clone();
             let focus = gtk4::EventControllerFocus::new();
             focus.connect_enter(move |_| {
-                if let Some(cb) = on_focus.borrow().as_ref() {
+                let callback = on_focus.borrow().clone();
+                if let Some(cb) = callback {
                     cb();
                 }
             });
@@ -179,12 +229,16 @@ impl TerminalView {
 
         // Ctrl/Shift+click opens OSC-8 hyperlinks or URL regex matches.
         {
-            let terminal_c = terminal.clone();
+            let terminal_c = terminal.downgrade();
             let on_link = on_link.clone();
             let url_regexes = url_regexes.clone();
+            let initial_cwd = cwd.clone();
             let click = GestureClick::new();
             click.set_button(1);
             click.connect_pressed(move |gesture, _n, x, y| {
+                let Some(terminal_c) = terminal_c.upgrade() else {
+                    return;
+                };
                 let Some(event) = gesture.current_event() else {
                     return;
                 };
@@ -202,13 +256,36 @@ impl TerminalView {
                         terminal_c
                             .check_regex_simple_at(x, y, &refs, 0)
                             .into_iter()
-                            .next()
+                            .find(|value| !value.is_empty())
                             .map(|s| s.to_string())
                     });
-                if let Some(uri) = uri
-                    && let Some(cb) = on_link.borrow().as_ref()
-                {
-                    cb(uri);
+                if let Some(uri) = uri {
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    let cwd = terminal_c
+                        .current_directory_uri()
+                        .and_then(|uri| local_directory_uri(&uri))
+                        .or_else(|| {
+                            terminal_c
+                                .pty()
+                                .and_then(|pty| pty::foreground_cwd(pty.fd().as_raw_fd()))
+                                .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .or_else(|| {
+                            initial_cwd
+                                .borrow()
+                                .as_ref()
+                                .map(|p| p.to_string_lossy().into_owned())
+                        });
+                    let callback = on_link.clone();
+                    let job = gio::spawn_blocking(move || detect_link(&uri, cwd.as_deref()));
+                    glib::spawn_future_local(async move {
+                        if let Ok(Some(uri)) = job.await {
+                            let callback = callback.borrow().clone();
+                            if let Some(callback) = callback {
+                                callback(uri);
+                            }
+                        }
+                    });
                 }
             });
             terminal.add_controller(click);
@@ -228,13 +305,16 @@ impl TerminalView {
             terminal.add_controller(key);
         }
 
-        {
+        let resize_source = {
             let on_resize = on_resize.clone();
             let last_cols = last_cols.clone();
             let last_rows = last_rows.clone();
             let notify = {
-                let terminal = terminal.clone();
+                let terminal = terminal.downgrade();
                 Rc::new(move || {
+                    let Some(terminal) = terminal.upgrade() else {
+                        return;
+                    };
                     let cols = terminal.column_count().clamp(0, u16::MAX as i64) as u16;
                     let rows = terminal.row_count().clamp(0, u16::MAX as i64) as u16;
                     if cols == 0 || rows == 0 {
@@ -245,7 +325,8 @@ impl TerminalView {
                     }
                     last_cols.set(cols);
                     last_rows.set(rows);
-                    if let Some(cb) = on_resize.borrow().as_ref() {
+                    let callback = on_resize.borrow().clone();
+                    if let Some(cb) = callback {
                         cb(cols, rows);
                     }
                 })
@@ -256,28 +337,32 @@ impl TerminalView {
             }
             {
                 // VTE does not expose a grid-size signal; poll while mapped.
-                let terminal = terminal.clone();
-                let notify = notify.clone();
+                let terminal = terminal.downgrade();
                 glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-                    if terminal.is_mapped() {
+                    if let Some(terminal) = terminal.upgrade()
+                        && terminal.is_mapped()
+                    {
                         notify();
                     }
                     glib::ControlFlow::Continue
-                });
+                })
             }
-        }
+        };
 
         // Jump-to-bottom button: visible while scrolled up when enabled.
         {
             let btn = scroll_btn.clone();
             let config = config.clone();
-            let term = terminal.clone();
+            let term = terminal.downgrade();
             if let Some(adj) = gtk4::prelude::ScrollableExt::vadjustment(&terminal) {
                 let sync = {
-                    let btn = btn.clone();
+                    let btn = btn.downgrade();
                     let config = config.clone();
-                    let adj = adj.clone();
+                    let adj = adj.downgrade();
                     Rc::new(move || {
+                        let (Some(btn), Some(adj)) = (btn.upgrade(), adj.upgrade()) else {
+                            return;
+                        };
                         let show = config.borrow().scroll_button
                             && adj.upper() - adj.page_size() - adj.value() > 1.0;
                         btn.set_visible(show);
@@ -292,13 +377,28 @@ impl TerminalView {
                     adj.connect_upper_notify(move |_| sync());
                 }
                 btn.connect_clicked(move |_| {
-                    if let Some(adj) = gtk4::prelude::ScrollableExt::vadjustment(&term) {
+                    if let Some(term) = term.upgrade()
+                        && let Some(adj) = gtk4::prelude::ScrollableExt::vadjustment(&term)
+                    {
                         adj.set_value(adj.upper() - adj.page_size());
                     }
                 });
             }
         }
 
+        let font_settings = desktop_font_settings().map(|settings| {
+            let terminal = terminal.downgrade();
+            let config = config.clone();
+            let handler = settings.connect_changed(Some("monospace-font-name"), move |_, _| {
+                let config = config.borrow();
+                if config.use_system_font
+                    && let Some(terminal) = terminal.upgrade()
+                {
+                    apply_font(&terminal, &config);
+                }
+            });
+            (settings, handler)
+        });
         let view = Self {
             overlay,
             terminal,
@@ -312,26 +412,48 @@ impl TerminalView {
             on_focus,
             on_resize,
             on_link,
+            on_spawn_error,
             scroll_btn,
             spawned: Rc::new(Cell::new(false)),
             bg_provider,
             overlay_name,
+            state,
+            cancellable,
+            resize_source: RefCell::new(Some(resize_source)),
+            font_settings: RefCell::new(font_settings),
         };
         // Defer spawning until the terminal is mapped and has a real size.
         // Spawning a full-screen TUI (codex/claude/grok) before the pane has a
         // grid leaves it drawing into a 0x0 window — a black tab.
         {
             let spawned = view.spawned.clone();
-            let terminal = view.terminal.clone();
             let command = view.command.clone();
             let cwd = view.cwd.clone();
             let child_pid = view.child_pid.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(20), move || {
-                if spawned.get() || !terminal.is_mapped() || terminal.row_count() == 0 {
+            let on_spawn_error = view.on_spawn_error.clone();
+            let state = view.state.clone();
+            let cancellable = view.cancellable.clone();
+            view.terminal.add_tick_callback(move |terminal, _| {
+                if spawned.get() || state.get() == ProcessState::Closed {
+                    return glib::ControlFlow::Break;
+                }
+                if terminal.row_count() == 0
+                    || terminal.column_count() == 0
+                    || terminal.width() == 0
+                    || terminal.height() == 0
+                {
                     return glib::ControlFlow::Continue;
                 }
                 spawned.set(true);
-                spawn_child(&terminal, &command, &cwd, &child_pid);
+                spawn_child(
+                    terminal,
+                    &command,
+                    &cwd,
+                    &child_pid,
+                    &on_spawn_error,
+                    &state,
+                    &cancellable,
+                );
                 glib::ControlFlow::Break
             });
         }
@@ -351,23 +473,27 @@ impl TerminalView {
     }
 
     pub fn set_on_title_changed(&self, cb: impl Fn(String) + 'static) {
-        *self.on_title.borrow_mut() = Some(Box::new(cb));
+        *self.on_title.borrow_mut() = Some(Rc::new(cb));
     }
 
     pub fn set_on_exit(&self, cb: impl Fn() + 'static) {
-        *self.on_exit.borrow_mut() = Some(Box::new(cb));
+        *self.on_exit.borrow_mut() = Some(Rc::new(cb));
     }
 
     pub fn set_on_focus(&self, cb: impl Fn() + 'static) {
-        *self.on_focus.borrow_mut() = Some(Box::new(cb));
+        *self.on_focus.borrow_mut() = Some(Rc::new(cb));
     }
 
     pub fn set_on_resize(&self, cb: impl Fn(u16, u16) + 'static) {
-        *self.on_resize.borrow_mut() = Some(Box::new(cb));
+        *self.on_resize.borrow_mut() = Some(Rc::new(cb));
     }
 
     pub fn set_on_link(&self, cb: impl Fn(String) + 'static) {
-        *self.on_link.borrow_mut() = Some(Box::new(cb));
+        *self.on_link.borrow_mut() = Some(Rc::new(cb));
+    }
+
+    pub fn set_on_spawn_error(&self, cb: impl Fn(String) + 'static) {
+        *self.on_spawn_error.borrow_mut() = Some(Rc::new(cb));
     }
 
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
@@ -418,14 +544,15 @@ impl TerminalView {
     }
 
     pub fn pwd(&self) -> Option<String> {
-        if let Some(uri) = self.terminal.current_directory_uri() {
-            let path = pwd_to_path(&uri);
-            if !path.is_empty() {
-                return Some(path);
-            }
+        if let Some(uri) = self.terminal.current_directory_uri()
+            && let Some(path) = local_directory_uri(&uri)
+        {
+            return Some(path);
         }
-        let fd = self.pty_fd()?;
-        pty::foreground_cwd(fd).map(|p| p.to_string_lossy().into_owned())
+        self.pty_fd()
+            .and_then(pty::foreground_cwd)
+            .or_else(|| self.cwd.borrow().clone())
+            .map(|p| p.to_string_lossy().into_owned())
     }
 
     pub fn is_busy(&self) -> bool {
@@ -441,7 +568,7 @@ impl TerminalView {
 
     /// Install a case-insensitive search regex (empty clears).
     pub fn search_set_query(&self, query: &str) {
-        let q = query.trim();
+        let q = query;
         if q.is_empty() {
             self.terminal.search_set_regex(None::<&Regex>, 0);
             return;
@@ -454,6 +581,11 @@ impl TerminalView {
             Ok(re) => self.terminal.search_set_regex(Some(&re), 0),
             Err(err) => tracing::warn!("search regex: {err}"),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_search(&self) -> bool {
+        self.terminal.search_get_regex().is_some()
     }
 
     pub fn search_find_next(&self) -> bool {
@@ -499,21 +631,83 @@ impl TerminalView {
     }
 
     pub fn restart(&self) {
-        let pid = self.child_pid.get();
-        if pid > 0 {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGHUP,
-            );
-            self.child_pid.set(-1);
+        if matches!(
+            self.state.get(),
+            ProcessState::Starting | ProcessState::Restarting | ProcessState::Closed
+        ) {
+            return;
         }
         // Remember cwd before the child exits clears it.
         if let Some(pwd) = self.pwd() {
             *self.cwd.borrow_mut() = Some(PathBuf::from(pwd));
         }
         self.terminal.reset(true, true);
-        self.spawned.set(true);
-        spawn_child(&self.terminal, &self.command, &self.cwd, &self.child_pid);
+        let pid = self.child_pid.get();
+        if pid > 0 {
+            self.state.set(ProcessState::Restarting);
+            if let Err(err) = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGHUP,
+            ) {
+                self.state.set(ProcessState::Running);
+                tracing::warn!("could not restart terminal: {err}");
+            }
+        } else if self.spawned.get() {
+            spawn_child(
+                &self.terminal,
+                &self.command,
+                &self.cwd,
+                &self.child_pid,
+                &self.on_spawn_error,
+                &self.state,
+                &self.cancellable,
+            );
+        }
+    }
+
+    pub fn has_child(&self) -> bool {
+        matches!(
+            self.state.get(),
+            ProcessState::Waiting
+                | ProcessState::Starting
+                | ProcessState::Running
+                | ProcessState::Restarting
+        )
+    }
+
+    pub fn close(&self) {
+        if self.state.replace(ProcessState::Closed) == ProcessState::Closed {
+            return;
+        }
+        self.cancellable.cancel();
+        if let Some((settings, handler)) = self.font_settings.borrow_mut().take() {
+            settings.disconnect(handler);
+        }
+        if let Some(source) = self.resize_source.borrow_mut().take() {
+            source.remove();
+        }
+        self.on_title.borrow_mut().take();
+        self.on_exit.borrow_mut().take();
+        self.on_focus.borrow_mut().take();
+        self.on_resize.borrow_mut().take();
+        self.on_link.borrow_mut().take();
+        self.on_spawn_error.borrow_mut().take();
+        let pid = self.child_pid.replace(-1);
+        if pid > 0 {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGHUP,
+            );
+        }
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_remove_provider_for_display(&display, &self.bg_provider);
+        }
+    }
+}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -526,7 +720,20 @@ fn spawn_child(
     command: &Option<Vec<String>>,
     cwd: &Rc<RefCell<Option<PathBuf>>>,
     child_pid: &Rc<Cell<i32>>,
+    on_spawn_error: &StringCallback,
+    state: &Rc<Cell<ProcessState>>,
+    cancellable: &gio::Cancellable,
 ) {
+    if matches!(
+        state.get(),
+        ProcessState::Closed
+            | ProcessState::Starting
+            | ProcessState::Running
+            | ProcessState::Restarting
+    ) {
+        return;
+    }
+    state.set(ProcessState::Starting);
     let shell = match std::env::var_os("SHELL") {
         Some(s) if !s.is_empty() => PathBuf::from(s),
         _ => match nix::unistd::User::from_uid(nix::unistd::getuid()) {
@@ -563,6 +770,8 @@ fn spawn_child(
     let cwd = cwd_owned.as_deref();
 
     let child_pid = child_pid.clone();
+    let on_spawn_error = on_spawn_error.clone();
+    let state = state.clone();
     terminal.spawn_async(
         PtyFlags::DEFAULT,
         cwd,
@@ -574,12 +783,33 @@ fn spawn_child(
         glib::SpawnFlags::SEARCH_PATH,
         || {},
         -1,
-        None::<&gio::Cancellable>,
-        move |result| match result {
-            Ok(pid) => child_pid.set(pid.0),
-            Err(err) => {
-                tracing::error!("failed to spawn process: {err}");
-                child_pid.set(-1);
+        Some(cancellable),
+        move |result| {
+            if state.get() != ProcessState::Starting {
+                if state.get() == ProcessState::Closed
+                    && let Ok(pid) = result
+                {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid.0),
+                        nix::sys::signal::Signal::SIGHUP,
+                    );
+                }
+                return;
+            }
+            match result {
+                Ok(pid) => {
+                    child_pid.set(pid.0);
+                    state.set(ProcessState::Running);
+                }
+                Err(err) => {
+                    state.set(ProcessState::Failed);
+                    tracing::error!("failed to spawn process: {err}");
+                    child_pid.set(-1);
+                    let callback = on_spawn_error.borrow().clone();
+                    if let Some(cb) = callback {
+                        cb(err.to_string());
+                    }
+                }
             }
         },
     );
@@ -630,13 +860,6 @@ fn apply_surface_bg(provider: &gtk4::CssProvider, name: &str, config: &Config) {
         alpha = alpha
     );
     provider.load_from_string(&css);
-    if let Some(display) = gdk::Display::default() {
-        gtk4::style_context_add_provider_for_display(
-            &display,
-            provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
 }
 
 fn apply_font(terminal: &VteTerminal, config: &Config) {
@@ -691,9 +914,11 @@ fn install_url_matches(terminal: &VteTerminal) -> Rc<Vec<Regex>> {
     // VTE requires PCRE2_MULTILINE on match regexes (runtime assert).
     const PCRE2_MULTILINE: u32 = 0x0000_0400;
     const PATTERNS: &[&str] = &[
+        r#""[^"\r\n]+"|'[^'\r\n]+'"#,
         r"https?://[[:alnum:][:punct:]]+",
         r"www\.[[:alnum:][:punct:]]+",
         r"mailto:[[:alnum:][:punct:]]+",
+        r#"(?:file://|~?/|\./|\.\./)[^\s<>"']+|(?:[[:alnum:]_.-]+/)+[[:alnum:]_.:-]+|[[:alnum:]_.-]+\.[[:alnum:]_:-]+"#,
     ];
     let mut out = Vec::new();
     for pat in PATTERNS {
@@ -718,8 +943,23 @@ fn sanitize_title(title: &str) -> String {
     }
 }
 
+fn desktop_font_settings() -> Option<gio::Settings> {
+    thread_local! {
+        static SETTINGS: Option<gio::Settings> = gio::SettingsSchemaSource::default()
+            .and_then(|source| source.lookup("org.gnome.desktop.interface", true))
+            .filter(|schema| schema.has_key("monospace-font-name"))
+            .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
+    }
+    SETTINGS.with(Clone::clone)
+}
+
 fn system_monospace() -> String {
-    "monospace".into()
+    desktop_font_settings()
+        .and_then(|settings| {
+            FontDescription::from_string(&settings.string("monospace-font-name")).family()
+        })
+        .map(|family| family.to_string())
+        .unwrap_or_else(|| "monospace".into())
 }
 
 fn regex_escape(s: &str) -> String {
@@ -799,40 +1039,183 @@ fn urlencoding_decode(path: &str) -> Option<String> {
 }
 
 /// Turn a screen word into an openable URI (http, mailto, existing paths).
-#[allow(dead_code)]
 pub fn detect_link(word: &str, pwd: Option<&str>) -> Option<String> {
-    let w = word.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | ')' | '(' | '[' | ']'));
-    if w.is_empty() {
+    let original = word.trim().trim_matches(['\'', '"']);
+    if original.is_empty() || original.chars().any(char::is_control) {
         return None;
     }
-    if w.starts_with("https://") || w.starts_with("http://") || w.starts_with("mailto:") {
-        return Some(w.to_string());
-    }
-    if w.starts_with("www.") {
-        return Some(format!("https://{w}"));
-    }
-    let candidate = if w.starts_with('/') {
-        PathBuf::from(w)
-    } else {
-        PathBuf::from(pwd?).join(w)
+    let file_uri = |name: &str| {
+        let path = if let Some(rest) = name.strip_prefix("~/") {
+            dirs::home_dir()?.join(rest)
+        } else if name.starts_with('/') {
+            PathBuf::from(name)
+        } else {
+            PathBuf::from(pwd?).join(name)
+        };
+        path.exists()
+            .then(|| gio::File::for_path(&path).uri().to_string())
     };
-    candidate.exists().then(|| {
-        let path = candidate.clone();
-        glib::filename_to_uri(candidate, None)
-            .map(|u| u.to_string())
-            .unwrap_or_else(|_| format!("file://{}", path.display()))
-    })
+    if !original.contains("://")
+        && !original.starts_with("www.")
+        && !original.starts_with("mailto:")
+        && let Some(uri) = file_uri(original)
+    {
+        return Some(uri);
+    }
+    let mut word = original.trim_start_matches(['(', '[', '{']);
+    loop {
+        let last = word.chars().last()?;
+        let remove = matches!(last, '.' | ',' | ';')
+            || [(')', '('), (']', '['), ('}', '{')]
+                .iter()
+                .any(|(close, open)| {
+                    last == *close && word.matches(*close).count() > word.matches(*open).count()
+                });
+        if !remove {
+            break;
+        }
+        word = &word[..word.len() - last.len_utf8()];
+    }
+    let url = if word.starts_with("www.") {
+        format!("https://{word}")
+    } else {
+        word.to_string()
+    };
+    if let Ok(uri) = glib::Uri::parse(&url, glib::UriFlags::NONE) {
+        match uri.scheme().as_str() {
+            "http" | "https" if uri.host().is_some_and(|host| !host.is_empty()) => {
+                return Some(url);
+            }
+            "mailto" => return Some(url),
+            "file" => return local_directory_uri(&url).and_then(|path| file_uri(&path)),
+            _ if url.contains("://") => return None,
+            _ => {}
+        }
+    }
+    if let Some(uri) = file_uri(word) {
+        return Some(uri);
+    }
+    for _ in 0..2 {
+        let (path, line) = word.rsplit_once(':')?;
+        if line.is_empty() || !line.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        word = path;
+        if let Some(uri) = file_uri(word) {
+            return Some(uri);
+        }
+    }
+    None
+}
+
+fn local_directory_uri(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    let (host, _) = rest.split_once('/')?;
+    if !host.is_empty()
+        && !["localhost", "127.0.0.1", "[::1]"].contains(&host)
+        && !host.eq_ignore_ascii_case(&glib::host_name())
+    {
+        return None;
+    }
+    let path = pwd_to_path(uri);
+    (!path.is_empty() && !path.contains('\0')).then_some(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[gtk4::test]
+    fn unmapped_terminal_preserves_its_initial_directory() {
+        let view = TerminalView::new(Config::default(), Some(PathBuf::from("/tmp")), None).unwrap();
+        assert_eq!(view.pwd().as_deref(), Some("/tmp"));
+    }
+
+    #[gtk4::test]
+    fn dropping_unmapped_terminal_releases_widgets() {
+        for _ in 0..100 {
+            let view = TerminalView::new(Config::default(), None, None).unwrap();
+            let terminal = view.terminal.downgrade();
+            let overlay = view.overlay.downgrade();
+            view.close();
+            assert!(view.resize_source.borrow().is_none());
+            assert!(!view.has_child());
+            drop(view);
+            assert!(overlay.upgrade().is_none());
+            assert!(terminal.upgrade().is_none());
+        }
+    }
+
+    #[gtk4::test]
+    fn callbacks_can_close_their_own_terminal() {
+        let view = Rc::new(TerminalView::new(Config::default(), None, None).unwrap());
+        let weak = Rc::downgrade(&view);
+        view.set_on_exit(move || weak.upgrade().unwrap().close());
+        view.terminal.emit_by_name::<()>("child-exited", &[&0i32]);
+        assert_eq!(view.state.get(), ProcessState::Closed);
+    }
+
+    #[gtk4::test]
+    fn restart_waits_for_previous_child_without_closing_the_view() {
+        let view = TerminalView::new(
+            Config::default(),
+            Some(PathBuf::from("/tmp")),
+            Some(vec!["/bin/cat".into()]),
+        )
+        .unwrap();
+        let exits = Rc::new(Cell::new(0));
+        let count = exits.clone();
+        view.set_on_exit(move || count.set(count.get() + 1));
+        view.spawned.set(true);
+        spawn_child(
+            &view.terminal,
+            &view.command,
+            &view.cwd,
+            &view.child_pid,
+            &view.on_spawn_error,
+            &view.state,
+            &view.cancellable,
+        );
+        spin_until(|| view.state.get() == ProcessState::Running);
+        let first_pid = view.child_pid.get();
+        view.restart();
+        view.restart();
+        spin_until(|| {
+            view.state.get() == ProcessState::Running && view.child_pid.get() != first_pid
+        });
+        assert_eq!(exits.get(), 0);
+        assert_eq!(view.pwd().as_deref(), Some("/tmp"));
+        view.close();
+        assert_eq!(view.state.get(), ProcessState::Closed);
+    }
+
+    fn spin_until(ready: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready() && std::time::Instant::now() < deadline {
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready(), "terminal did not reach expected state");
+    }
+
     #[test]
     fn pwd_to_path_strips_file_uri() {
         assert_eq!(pwd_to_path("file://host/home/me"), "/home/me");
         assert_eq!(pwd_to_path("file:///tmp/x"), "/tmp/x");
         assert_eq!(pwd_to_path("/plain"), "/plain");
+    }
+
+    #[test]
+    fn regression_links_preserve_dot_paths_and_encode_spaces() {
+        let dir = crate::test_support::TestDir::new("links");
+        let path = dir.path().join(".hidden file");
+        std::fs::write(&path, "").unwrap();
+        let expected = gio::File::for_path(&path).uri().to_string();
+        assert_eq!(
+            detect_link(".hidden file", dir.path().to_str()),
+            Some(expected)
+        );
+        assert_eq!(detect_link("javascript:alert(1)", None), None);
     }
 
     #[test]

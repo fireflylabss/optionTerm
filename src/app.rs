@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::{Rc, Weak},
 };
 
@@ -20,7 +20,7 @@ use crate::{
         Theme,
     },
     launch::LaunchRequest,
-    session::{PaneLayout, Session as SessionState, SplitOrientation, TabState},
+    session::{PaneLayout, Session as SessionState, SplitOrientation, TabKind, TabState},
     terminal::TerminalView,
     tree::FileTree,
     ui::{
@@ -32,10 +32,11 @@ use crate::{
 const APP_ID: &str = "io.option.terminal";
 
 /// How long after our own `config.toml` write the file monitor stays quiet.
-const SELF_WRITE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+pub(crate) const SELF_WRITE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 pub type Pages = Rc<RefCell<Vec<(adw::TabPage, Vec<Rc<TerminalView>>)>>>;
 type Toast = Rc<dyn Fn(&str)>;
+type CallbackSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 type Focused = Rc<RefCell<Option<Weak<TerminalView>>>>;
 type LaunchHandler = Rc<dyn Fn(LaunchRequest)>;
 /// Splits the focused pane in a direction (`orientation`, `before`).
@@ -87,17 +88,33 @@ pub fn run() -> anyhow::Result<()> {
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            if args.iter().any(|a| a == "-h" || a == "--help") {
-                let help = "Usage: optionterm [OPTIONS] [DIRECTORY]\n\n\
-Options:\n\
-  -d, --working-directory DIR   Start in DIR\n\
-  -e, --command CMD [ARGS…]     Run CMD instead of the shell\n\
-  -- CMD [ARGS…]                Same as -e\n\
-  -h, --help                    Show this help\n";
-                eprintln!("{help}");
-                return 0;
+            let cwd = cmdline.cwd().unwrap_or_else(|| PathBuf::from("/"));
+            let mut req = match crate::launch::parse_command_line(&args, &cwd) {
+                Ok(crate::launch::CommandLine::Launch(request)) => request,
+                Ok(crate::launch::CommandLine::Help) => {
+                    command_line_message(cmdline, crate::launch::HELP, false);
+                    return 0;
+                }
+                Ok(crate::launch::CommandLine::Version) => {
+                    command_line_message(
+                        cmdline,
+                        &format!("optionterm {}\n", env!("CARGO_PKG_VERSION")),
+                        false,
+                    );
+                    return 0;
+                }
+                Ok(crate::launch::CommandLine::SelfTest) => {
+                    command_line_message(cmdline, "Run --self-test in a separate process\n", true);
+                    return 2;
+                }
+                Err(err) => {
+                    command_line_message(cmdline, &format!("{err}\n"), true);
+                    return 2;
+                }
+            };
+            if cmdline.is_remote() && req.cwd.is_none() {
+                req.cwd = Some(cwd);
             }
-            let req = crate::launch::parse_args(&args);
             if let Some(open) = shared.open_in_window.borrow().clone() {
                 open(req);
             } else {
@@ -134,6 +151,26 @@ Options:\n\
     }
 }
 
+fn command_line_message(command: &gio::ApplicationCommandLine, text: &str, error: bool) {
+    use glib::translate::ToGlibPtr;
+    let text = std::ffi::CString::new(text.replace('\0', "")).expect("NUL removed");
+    unsafe {
+        if error {
+            gio::ffi::g_application_command_line_printerr(
+                command.to_glib_none().0,
+                c"%s".as_ptr(),
+                text.as_ptr(),
+            );
+        } else {
+            gio::ffi::g_application_command_line_print(
+                command.to_glib_none().0,
+                c"%s".as_ptr(),
+                text.as_ptr(),
+            );
+        }
+    }
+}
+
 /// Apply a config theme to the Adwaita style manager.
 ///
 /// `System` leaves `ColorScheme::Default` in place, which is what makes
@@ -163,6 +200,13 @@ fn apply_window_opacity(window: &adw::ApplicationWindow, opacity: f64) {
 
 /// Install the stylesheet backing `apply_window_opacity` once per display.
 fn install_css(display: &gdk::Display) {
+    const INSTALLED: &str = "optionterm-css-installed";
+    unsafe {
+        if display.data::<bool>(INSTALLED).is_some() {
+            return;
+        }
+        display.set_data(INSTALLED, true);
+    }
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(
         r#"
@@ -251,6 +295,7 @@ fn tab_page_at(tab_bar: &adw::TabBar, x: f64, y: f64) -> Option<adw::TabPage> {
 const RENAMED_KEY: &str = "option-term-renamed";
 /// Key used to keep browser pages out of terminal split operations.
 const BROWSER_TAB_KEY: &str = "option-term-browser";
+const SPLIT_RATIO_KEY: &str = "option-term-split-ratio";
 
 /// Whether the user gave this tab a custom title, in which case the shell's
 /// OSC title updates must not overwrite it.
@@ -345,7 +390,22 @@ fn build_window(
     shared: Rc<SharedLaunch>,
     initial: LaunchRequest,
 ) -> anyhow::Result<()> {
-    let config = Rc::new(RefCell::new(Config::load()?));
+    let (loaded, config_error) = match Config::load() {
+        Ok(config) => (config, false),
+        Err(_) => (
+            Config {
+                source: crate::config::option_config_path(),
+                ..Config::default()
+            },
+            true,
+        ),
+    };
+    let config = Rc::new(RefCell::new(loaded));
+    let source_ids: Rc<RefCell<Vec<glib::SourceId>>> = Rc::new(RefCell::new(Vec::new()));
+    let config_watch = crate::config_watch::ConfigWatch::new(&config.borrow());
+    let applying_config = Rc::new(Cell::new(false));
+    let sync_config: CallbackSlot = Rc::new(RefCell::new(None));
+    let config_observers = crate::ui::ConfigObservers::default();
     let base_font_size = Rc::new(Cell::new(config.borrow().font_size));
 
     // Shortcut overrides live in their own file. Only overridden actions are
@@ -355,17 +415,9 @@ fn build_window(
         let app = app.clone();
         let bindings = bindings.clone();
         Rc::new(move || {
-            for (_, action, _) in crate::ui::COMMANDS {
-                let name = action.trim_start_matches("win.");
-                let Some(accel) = bindings.borrow().get(name).map(str::to_string) else {
-                    continue;
-                };
-                if accel.is_empty() {
-                    app.set_accels_for_action(action, &[]);
-                } else {
-                    let gtk_accel = crate::keys::to_gtk_accel(&accel);
-                    app.set_accels_for_action(action, &[&gtk_accel]);
-                }
+            bindings.borrow().apply(&app);
+            for window in app.windows() {
+                bindings.borrow().update_tooltips(window.upcast_ref());
             }
         })
     };
@@ -384,11 +436,19 @@ fn build_window(
     let save_config: Rc<dyn Fn()> = {
         let config = config.clone();
         let self_write = self_write.clone();
+        let watcher = config_watch.clone();
+        let applying = applying_config.clone();
+        let sync_config = sync_config.clone();
         Rc::new(move || {
-            self_write.set(std::time::Instant::now());
-            if let Err(err) = config.borrow().save() {
-                tracing::warn!("could not persist configuration: {err:#}");
+            if applying.get() {
+                return;
             }
+            tracing::trace!(elapsed = ?self_write.replace(std::time::Instant::now()).elapsed(), "configuration write queued");
+            let sync = sync_config.borrow().clone();
+            if let Some(sync) = sync {
+                sync();
+            }
+            watcher.save(config.borrow().clone());
         })
     };
 
@@ -399,6 +459,7 @@ fn build_window(
     }
     // Make the real agent logos resolvable as tab icons.
     agents::register_icons();
+    let agent_menu = crate::ui::agent_menu();
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -441,13 +502,11 @@ fn build_window(
         let tab_bar = tab_bar.clone();
         let config = config.clone();
         let provider = gtk4::CssProvider::new();
-        if let Some(display) = gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-            );
-        }
+        window_css(
+            &window,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
         Rc::new(move || {
             let (width, overflow) = {
                 let cfg = config.borrow();
@@ -468,7 +527,7 @@ fn build_window(
     let new_tab_btn = adw::SplitButton::builder()
         .icon_name("tab-new-symbolic")
         .tooltip_text("New Tab (Ctrl+Shift+T)")
-        .menu_model(&tabs_menu())
+        .menu_model(&tabs_menu(&agent_menu))
         .build();
     new_tab_btn.set_action_name(Some("win.new-tab"));
     header.pack_start(&new_tab_btn);
@@ -525,7 +584,7 @@ fn build_window(
     let sidebar_new_btn = adw::SplitButton::builder()
         .icon_name("tab-new-symbolic")
         .tooltip_text("New Tab (Ctrl+Shift+T)")
-        .menu_model(&tabs_menu())
+        .menu_model(&tabs_menu(&agent_menu))
         .build();
     sidebar_new_btn.set_action_name(Some("win.new-tab"));
 
@@ -571,6 +630,7 @@ fn build_window(
     // bar is natively draggable. [+ ▾] [⇄▾] … [● ● ●] … [🔍] [☰]
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.add_css_class("flat");
+    sidebar_header.add_css_class("option-chrome");
     sidebar_header.set_show_start_title_buttons(true);
     sidebar_header.set_show_end_title_buttons(true);
     sidebar_header.set_title_widget(Some(&gtk4::Box::new(gtk4::Orientation::Horizontal, 0)));
@@ -615,106 +675,7 @@ fn build_window(
 
     // Rebuild the sidebar rows from the current TabView pages.
     let sidebar_syncing = Rc::new(Cell::new(false));
-    let rebuild_sidebar = {
-        let sidebar_list = sidebar_list.clone();
-        let tab_view = tab_view.clone();
-        let sidebar_syncing = sidebar_syncing.clone();
-        Rc::new(move || {
-            sidebar_syncing.set(true);
-            while let Some(child) = sidebar_list.first_child() {
-                sidebar_list.remove(&child);
-            }
-            let selected = tab_view.selected_page();
-            for i in 0..tab_view.n_pages() {
-                let page = tab_view.nth_page(i);
-                let row = adw::ActionRow::builder()
-                    .title(page.title())
-                    .activatable(true)
-                    .build();
-
-                // Agent tabs carry a real logo icon (set on the TabPage); mirror
-                // it in the sidebar row so the sidebar is as recognizable as the
-                // tab bar.
-                if let Some(icon) = page.icon() {
-                    let image = gtk4::Image::from_gicon(&icon);
-                    image.set_icon_size(gtk4::IconSize::Normal);
-                    row.add_prefix(&image);
-                }
-
-                let close = gtk4::Button::from_icon_name("window-close-symbolic");
-                close.add_css_class("flat");
-                close.set_valign(gtk4::Align::Center);
-                {
-                    let tab_view = tab_view.clone();
-                    let page = page.clone();
-                    close.connect_clicked(move |_| {
-                        tab_view.close_page(&page);
-                    });
-                }
-                row.add_suffix(&close);
-
-                // Double-click a row to rename the tab.
-                {
-                    let page = page.clone();
-                    let row_weak = row.downgrade();
-                    let gesture = gtk4::GestureClick::new();
-                    gesture.set_button(gdk::BUTTON_PRIMARY);
-                    gesture.connect_pressed(move |_, n, _, _| {
-                        if n == 2
-                            && let Some(row) = row_weak.upgrade()
-                        {
-                            rename_tab_dialog(&row, &page);
-                        }
-                    });
-                    row.add_controller(gesture);
-                }
-
-                // Drag a row onto another to reorder the tab.
-                {
-                    let source = gtk4::DragSource::new();
-                    source.set_actions(gdk::DragAction::MOVE);
-                    let idx = i;
-                    source.connect_prepare(move |_, _, _| {
-                        Some(gdk::ContentProvider::for_value(&idx.to_value()))
-                    });
-                    row.add_controller(source);
-
-                    let target = gtk4::DropTarget::new(i32::static_type(), gdk::DragAction::MOVE);
-                    let tab_view = tab_view.clone();
-                    let dest = i;
-                    target.connect_drop(move |_, value, _, _| {
-                        let Ok(from) = value.get::<i32>() else {
-                            return false;
-                        };
-                        if from == dest || from < 0 || from >= tab_view.n_pages() {
-                            return false;
-                        }
-                        let page = tab_view.nth_page(from);
-                        tab_view.reorder_page(&page, dest);
-                        true
-                    });
-                    row.add_controller(target);
-                }
-
-                // Keep the row title in sync without keeping the row alive.
-                {
-                    let weak_row = glib::object::WeakRef::<adw::ActionRow>::new();
-                    weak_row.set(Some(&row));
-                    page.connect_notify_local(Some("title"), move |p, _| {
-                        if let Some(row) = weak_row.upgrade() {
-                            row.set_title(&p.title());
-                        }
-                    });
-                }
-
-                sidebar_list.append(&row);
-                if selected.as_ref() == Some(&page) {
-                    sidebar_list.select_row(Some(&row));
-                }
-            }
-            sidebar_syncing.set(false);
-        })
-    };
+    let rebuild_sidebar = bind_sidebar(&sidebar_list, &tab_view, sidebar_syncing.clone());
 
     {
         let tab_view = tab_view.clone();
@@ -754,10 +715,14 @@ fn build_window(
         let tab_view = tab_view.clone();
         let config = config.clone();
         let bottom_tabs = bottom_tabs.clone();
+        let applied = Cell::new(None::<(TabsLocation, bool)>);
         Rc::new(move |location: TabsLocation| {
             let sidebar_mode = matches!(location, TabsLocation::Left | TabsLocation::Right);
             let show_sidebar =
                 sidebar_mode && (config.borrow().sidebar_always || tab_view.n_pages() > 1);
+            if applied.replace(Some((location, show_sidebar))) == Some((location, show_sidebar)) {
+                return;
+            }
             // When the sidebar is visible the whole header moves into it
             // (system window controls, new tab, palette, menu).
             header.set_visible(!show_sidebar);
@@ -861,6 +826,7 @@ fn build_window(
     // multiple terminals when split.
     let pages: Pages = Rc::new(RefCell::new(Vec::new()));
     let focused: Focused = Rc::new(RefCell::new(None));
+    let search_target_hook: CallbackSlot = Rc::new(RefCell::new(None));
 
     // Per-tab file-tree panels (shown/collapsed via `win.file-tree`).
     let file_trees: FileTrees = Rc::new(RefCell::new(std::collections::HashMap::new()));
@@ -882,6 +848,7 @@ fn build_window(
 
     // Build a TerminalView wired to a page (title/exit/focus/context menu).
     let make_view: MakeViewFn = {
+        let search_target_hook = search_target_hook.clone();
         let unzoom = unzoom.clone();
         let toast = toast.clone();
         let show_resize = show_resize.clone();
@@ -904,16 +871,16 @@ fn build_window(
                     // Ctrl+click or Shift+click on a hyperlink / URL / path.
                     let toast = toast.clone();
                     view.set_on_link(move |uri| {
-                        match gio::AppInfo::launch_default_for_uri(
+                        let toast = toast.clone();
+                        gio::AppInfo::launch_default_for_uri_async(
                             &uri,
                             gio::AppLaunchContext::NONE,
-                        ) {
-                            Ok(()) => toast(&format!("Opening {uri}")),
-                            Err(err) => {
-                                tracing::warn!("could not open {uri}: {err}");
-                                toast("No application to open that link");
-                            }
-                        }
+                            gio::Cancellable::NONE,
+                            move |result| match result {
+                                Ok(()) => toast("Link opened"),
+                                Err(_) => toast("No application to open that link"),
+                            },
+                        );
                     });
                 }
 
@@ -922,8 +889,13 @@ fn build_window(
                     let focused = focused.clone();
                     let page_slot = page_slot.clone();
                     let file_trees = file_trees.clone();
+                    let search_target_hook = search_target_hook.clone();
                     view.set_on_focus(move || {
                         *focused.borrow_mut() = Some(view_weak.clone());
+                        let sync = search_target_hook.borrow().clone();
+                        if let Some(sync) = sync {
+                            sync();
+                        }
                         // Sync this tab's file tree only when the pane moved to
                         // a different directory (cd or tab switch), so the user
                         // can navigate the tree without it snapping back.
@@ -933,12 +905,17 @@ fn build_window(
                         let Some(page) = page_slot.borrow().clone() else {
                             return;
                         };
+                        let Some(slot) = file_trees.borrow().get(&page).cloned().filter(|slot| {
+                            slot.paned
+                                .end_child()
+                                .is_some_and(|panel| panel.is_visible())
+                        }) else {
+                            return;
+                        };
                         let Some(pwd) = view.pwd().map(PathBuf::from) else {
                             return;
                         };
-                        if let Some(slot) = file_trees.borrow().get(&page)
-                            && slot.last_pwd.borrow().as_ref() != Some(&pwd)
-                        {
+                        if slot.last_pwd.borrow().as_ref() != Some(&pwd) {
                             slot.tree.set_root(pwd.clone());
                             *slot.last_pwd.borrow_mut() = Some(pwd);
                         }
@@ -962,6 +939,14 @@ fn build_window(
                         if is_focused {
                             show_resize(cols, rows);
                         }
+                    });
+                }
+
+                {
+                    let toast = toast.clone();
+                    view.set_on_spawn_error(move |err| {
+                        tracing::error!("terminal spawn failed: {err}");
+                        toast(&format!("Failed to launch: {err}"));
                     });
                 }
 
@@ -999,7 +984,9 @@ fn build_window(
                         };
                         let remaining = {
                             let mut pgs = pages.borrow_mut();
-                            if let Some((_, views)) = pgs.iter_mut().find(|(p, _)| p == &page) {
+                            if let Some((_, views)) = pgs.iter_mut().find(|(p, _)| p == &page)
+                                && views.len() > 1
+                            {
                                 views.retain(|v| !Rc::ptr_eq(v, &view));
                                 views.first().cloned()
                             } else {
@@ -1013,7 +1000,6 @@ fn build_window(
                             }
                             None => {
                                 tab_view.close_page(&page);
-                                pages.borrow_mut().retain(|(p, _)| p != &page);
                             }
                         }
                     });
@@ -1092,13 +1078,14 @@ fn build_window(
 
     let add_browser_tab = {
         let tab_view = tab_view.clone();
-        Rc::new(move || {
-            let root = browser::new_tab();
+        Rc::new(move |url: Option<&str>| -> adw::TabPage {
+            let root = browser::new_tab(url);
             let page = tab_view.append(&root);
             set_browser_tab(&page);
             page.set_title("Browser");
             page.set_live_thumbnail(true);
             tab_view.set_selected_page(&page);
+            page
         })
     };
 
@@ -1107,7 +1094,6 @@ fn build_window(
         let tab_view = tab_view.clone();
         let pages = pages.clone();
         let make_view = make_view.clone();
-        let config = config.clone();
         let file_trees = file_trees.clone();
         Rc::new(
             move |title: Option<String>, layout: &PaneLayout| -> anyhow::Result<adw::TabPage> {
@@ -1131,20 +1117,7 @@ fn build_window(
                 root.set_vexpand(true);
                 root.append(&paned);
 
-                let page = match config.borrow().new_tab_position {
-                    NewTabPosition::End => tab_view.append(&root),
-                    NewTabPosition::Start => tab_view.insert(&root, 0),
-                    NewTabPosition::AfterCurrent => match tab_view.selected_page() {
-                        Some(current) => {
-                            tab_view.insert(&root, tab_view.page_position(&current) + 1)
-                        }
-                        None => tab_view.append(&root),
-                    },
-                    NewTabPosition::BeforeCurrent => match tab_view.selected_page() {
-                        Some(current) => tab_view.insert(&root, tab_view.page_position(&current)),
-                        None => tab_view.append(&root),
-                    },
-                };
+                let page = tab_view.append(&root);
                 if let Some(title) = title {
                     set_tab_renamed(&page, true);
                     page.set_title(&title);
@@ -1209,6 +1182,14 @@ fn build_window(
         Rc::new(move || current_view())
     }));
     content_box.prepend(&search_bar.widget);
+    {
+        let search_bar = Rc::downgrade(&search_bar);
+        *search_target_hook.borrow_mut() = Some(Rc::new(move || {
+            if let Some(search_bar) = search_bar.upgrade() {
+                search_bar.sync_target();
+            }
+        }));
+    }
     // Deliberately no `set_key_capture_widget`: in a terminal every keystroke
     // belongs to the shell, so the bar only opens via its explicit action.
 
@@ -1243,6 +1224,7 @@ fn build_window(
                 _ => old.height(),
             } / 2;
             let paned = gtk4::Paned::new(orientation);
+            track_split_geometry(&paned, 0.5);
             paned.set_hexpand(true);
             paned.set_vexpand(true);
             paned.set_wide_handle(true);
@@ -1349,7 +1331,9 @@ fn build_window(
             let horizontal = matches!(dir, "left" | "right");
             let mut widget: gtk4::Widget = cur.widget().clone().upcast();
             while let Some(parent) = widget.parent() {
-                if let Some(paned) = parent.downcast_ref::<gtk4::Paned>() {
+                if let Some(paned) = parent.downcast_ref::<gtk4::Paned>()
+                    && paned.has_css_class("terminal-split")
+                {
                     let is_horizontal = paned.orientation() == gtk4::Orientation::Horizontal;
                     if is_horizontal == horizontal {
                         let delta = if matches!(dir, "left" | "up") {
@@ -1379,7 +1363,9 @@ fn build_window(
             let mut widget: gtk4::Widget = cur.widget().clone().upcast();
             let mut hidden = Vec::new();
             while let Some(parent) = widget.parent() {
-                if let Some(paned) = parent.downcast_ref::<gtk4::Paned>() {
+                if let Some(paned) = parent.downcast_ref::<gtk4::Paned>()
+                    && paned.has_css_class("terminal-split")
+                {
                     let sibling = if paned.start_child().as_ref() == Some(&widget) {
                         paned.end_child()
                     } else {
@@ -1503,19 +1489,11 @@ fn build_window(
 
     {
         let tab_view = tab_view.clone();
-        let pages = pages.clone();
-        let file_trees = file_trees.clone();
-        let window_c = window.clone();
         window.add_action(&add_simple(
             "close-tab",
             Box::new(move || {
                 if let Some(page) = tab_view.selected_page() {
-                    tab_view.close_page(&page);
-                    pages.borrow_mut().retain(|(p, _)| p != &page);
-                    file_trees.borrow_mut().remove(&page);
-                    if tab_view.n_pages() == 0 {
-                        window_c.close();
-                    }
+                    request_tab_close(&tab_view, &page);
                 }
             }),
         ));
@@ -1721,7 +1699,12 @@ fn build_window(
         let toast = toast.clone();
         let save_config = save_config.clone();
         let sync_quick = sync_quick.clone();
+        let applying_config = applying_config.clone();
         Rc::new(move |size: f32| {
+            if applying_config.get() {
+                return;
+            }
+            let size = size.clamp(6.0, 40.0);
             let mut applied = size;
             for (_, views) in pages.borrow().iter() {
                 for view in views {
@@ -1740,7 +1723,7 @@ fn build_window(
         let apply_zoom = apply_zoom.clone();
         window.add_action(&add_simple(
             "zoom-in",
-            Box::new(move || apply_zoom(config.borrow().font_size + 1.0)),
+            Box::new(move || zoom_step(&config, &*apply_zoom, 1.0)),
         ));
     }
     {
@@ -1748,7 +1731,7 @@ fn build_window(
         let apply_zoom = apply_zoom.clone();
         window.add_action(&add_simple(
             "zoom-out",
-            Box::new(move || apply_zoom(config.borrow().font_size - 1.0)),
+            Box::new(move || zoom_step(&config, &*apply_zoom, -1.0)),
         ));
     }
     {
@@ -1762,41 +1745,61 @@ fn build_window(
 
     // Re-read config.toml and push it into every live pane. Shared by the
     // explicit action and the file-monitor auto-reload.
-    let reload_config: Rc<dyn Fn(bool)> = {
+    let apply_config_ui: Rc<dyn Fn()> = {
         let config = config.clone();
-        let pages = pages.clone();
-        let toast = toast.clone();
-        let base_font_size = base_font_size.clone();
+        let window = window.downgrade();
         let set_tabs_location = set_tabs_location.clone();
-        let window_c = window.clone();
-        Rc::new(move |notify: bool| match Config::load() {
-            Ok(new_cfg) => {
-                base_font_size.set(new_cfg.font_size);
-                *config.borrow_mut() = new_cfg.clone();
-                for (_, views) in pages.borrow().iter() {
-                    for view in views {
-                        view.apply_config(&new_cfg);
-                    }
-                }
-                apply_theme(new_cfg.theme);
-                apply_window_opacity(&window_c, new_cfg.background_opacity);
-                set_tabs_location(new_cfg.tabs_location);
-                tracing::info!(
-                    "configuration reloaded (font={} size={})",
-                    new_cfg.font_family,
-                    new_cfg.font_size
-                );
-                if notify {
-                    toast("Configuration reloaded");
+        let apply_tab_shape = apply_tab_shape.clone();
+        let palette_btn = palette_btn.downgrade();
+        let sidebar_palette_btn = sidebar_palette_btn.downgrade();
+        let sync_quick = sync_quick.clone();
+        Rc::new(move || {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let cfg = config.borrow().clone();
+            apply_theme(cfg.theme);
+            apply_window_opacity(&window, cfg.background_opacity);
+            set_tabs_location(cfg.tabs_location);
+            apply_tab_shape();
+            for button in [&palette_btn, &sidebar_palette_btn] {
+                if let Some(button) = button.upgrade() {
+                    button.set_visible(cfg.show_search_button);
                 }
             }
-            Err(err) => {
-                tracing::error!("config reload failed: {err:#}");
-                if notify {
-                    toast("Failed to reload configuration");
+            sync_quick();
+            let tabs = match cfg.tabs_location {
+                TabsLocation::Top => "top",
+                TabsLocation::Bottom => "bottom",
+                TabsLocation::Left => "left",
+                TabsLocation::Right => "right",
+                TabsLocation::Hidden => "hidden",
+            };
+            let cursor = match cfg.cursor_style {
+                CursorStyle::Bar => "bar",
+                CursorStyle::Underline => "underline",
+                _ => "block",
+            };
+            for (name, value) in [
+                ("theme", cfg.theme.as_str().to_variant()),
+                ("tabs-pos", tabs.to_variant()),
+                ("cursor-shape", cursor.to_variant()),
+                ("cursor-blink", cfg.cursor_blink.to_variant()),
+                ("sidebar-always", cfg.sidebar_always.to_variant()),
+            ] {
+                if let Some(action) = window
+                    .lookup_action(name)
+                    .and_then(|a| a.downcast::<gio::SimpleAction>().ok())
+                {
+                    action.set_state(&value);
                 }
             }
         })
+    };
+    *sync_config.borrow_mut() = Some(apply_config_ui.clone());
+    let reload_config: Rc<dyn Fn(bool)> = {
+        let watcher = config_watch.clone();
+        Rc::new(move |notify| watcher.reload(notify))
     };
 
     {
@@ -1811,47 +1814,41 @@ fn build_window(
     // Editors write via rename/replace, so CHANGED alone is not
     // enough — react to created/renamed too, and debounce the burst.
     {
-        let path = config.borrow().source.clone();
-        let file = gio::File::for_path(&path);
-        match file.monitor_file(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) {
-            Ok(monitor) => {
-                let reload_config = reload_config.clone();
-                let toast = toast.clone();
-                let self_write = self_write.clone();
-                let pending = Rc::new(Cell::new(false));
-                monitor.connect_changed(move |_, _, _, event| {
-                    use gio::FileMonitorEvent as Ev;
-                    if !matches!(
-                        event,
-                        Ev::ChangesDoneHint | Ev::Created | Ev::MovedIn | Ev::Renamed
-                    ) {
-                        return;
+        let config = config.clone();
+        let pages = pages.clone();
+        let base_font_size = base_font_size.clone();
+        let applying = applying_config.clone();
+        let observers = config_observers.clone();
+        let apply_ui = apply_config_ui.clone();
+        // Ignore the write we just made from the UI.
+        // The monitor must outlive this scope to keep firing.
+        config_watch.watch(
+            Rc::new(move |new_cfg| {
+                applying.set(true);
+                base_font_size.set(new_cfg.font_size);
+                *config.borrow_mut() = new_cfg.clone();
+                let views: Vec<_> = pages
+                    .borrow()
+                    .iter()
+                    .flat_map(|(_, views)| views.clone())
+                    .collect();
+                for view in views {
+                    view.apply_config(&new_cfg);
+                }
+                apply_ui();
+                let updates = observers.borrow().clone();
+                for (owner, update) in updates {
+                    if owner.upgrade().is_some() {
+                        update(&new_cfg);
                     }
-                    // Ignore the write we just made from the UI.
-                    if self_write.get().elapsed() < SELF_WRITE_GRACE {
-                        return;
-                    }
-                    if pending.replace(true) {
-                        return;
-                    }
-                    let reload_config = reload_config.clone();
-                    let toast = toast.clone();
-                    let pending = pending.clone();
-                    glib::timeout_add_local_once(
-                        std::time::Duration::from_millis(150),
-                        move || {
-                            pending.set(false);
-                            reload_config(false);
-                            toast("Configuration reloaded");
-                        },
-                    );
-                });
-                // The monitor must outlive this scope to keep firing.
-                std::mem::forget(monitor);
-                tracing::info!("watching {} for changes", path.display());
-            }
-            Err(err) => tracing::warn!("could not watch {}: {err}", path.display()),
-        }
+                }
+                applying.set(false);
+            }),
+            toast.clone(),
+        );
+    }
+    if config_error {
+        toast("Invalid configuration; using defaults without replacing your file");
     }
 
     // The header and the sidebar each have their own palette button.
@@ -1875,6 +1872,8 @@ fn build_window(
         let save_config = save_config.clone();
         let bindings = bindings.clone();
         let apply_bindings = apply_bindings.clone();
+        let applying_config = applying_config.clone();
+        let config_observers = config_observers.clone();
         window.add_action(&add_simple(
             "preferences",
             Box::new(move || {
@@ -1890,6 +1889,8 @@ fn build_window(
                         save_config: save_config.clone(),
                         bindings: bindings.clone(),
                         apply_bindings: apply_bindings.clone(),
+                        applying_config: applying_config.clone(),
+                        config_observers: config_observers.clone(),
                     },
                 );
             }),
@@ -1899,6 +1900,7 @@ fn build_window(
     {
         let window_c = window.clone();
         let config_c = config.clone();
+        let bindings = bindings.clone();
         let add_tab_c = add_tab.clone();
         window.add_action(&add_simple(
             "command-palette",
@@ -1911,7 +1913,7 @@ fn build_window(
                         }
                     })
                 };
-                show_command_palette(&window_c, &config_c, open_launch);
+                show_command_palette(&window_c, &config_c, &bindings.borrow(), open_launch);
             }),
         ));
     }
@@ -1925,7 +1927,9 @@ fn build_window(
         let add_browser_tab = add_browser_tab.clone();
         window.add_action(&add_simple(
             "open-browser",
-            Box::new(move || add_browser_tab()),
+            Box::new(move || {
+                add_browser_tab(None);
+            }),
         ));
     }
 
@@ -1975,9 +1979,6 @@ fn build_window(
         let tab_view = tab_view.clone();
         let rebuild_sidebar = rebuild_sidebar.clone();
         for kind in agents::AgentKind::ALL {
-            if !agents::is_installed(kind) {
-                continue;
-            }
             window.add_action(&add_simple(&format!("agent-{}", kind.as_str()), {
                 let add_tab = add_tab.clone();
                 let inherit_cwd = inherit_cwd.clone();
@@ -2037,48 +2038,72 @@ fn build_window(
     // Save the most recent Codex thread as a Markdown transcript to a chosen
     // directory (defaulting to the focused pane's working directory).
     {
-        let window_c = window.clone();
+        let window_c = window.downgrade();
         let toast = toast.clone();
         let current_view = current_view.clone();
+        let busy = Rc::new(Cell::new(false));
         window.add_action(&add_simple(
             "save-codex-thread",
             Box::new(move || {
-                let Some(thread) = codex::list_threads().into_iter().next() else {
-                    toast("No Codex thread found");
+                if busy.replace(true) {
                     return;
-                };
-                let folder = current_view()
-                    .and_then(|v| v.pwd())
-                    .map(PathBuf::from)
-                    .filter(|d| d.is_dir());
-                let dialog = gtk4::FileDialog::builder()
-                    .initial_name(format!("{}.md", codex::slugify(&thread.title)))
-                    .build();
-                if let Some(folder) = folder {
-                    dialog.set_initial_folder(Some(&gio::File::for_path(&folder)));
                 }
-
-                let thread_file = thread.file.clone();
+                let folder = current_view().and_then(|v| v.pwd()).map(PathBuf::from);
+                let window_c = window_c.clone();
                 let toast = toast.clone();
-                dialog.save(Some(&window_c), None::<&gio::Cancellable>, move |res| {
-                    let Ok(file) = res else { return }; // cancelled
-                    let Some(path) = file.path() else {
-                        toast("No local path for the chosen file");
+                let busy = busy.clone();
+                let job = gio::spawn_blocking(move || {
+                    (codex::list_threads().next(), folder.filter(|d| d.is_dir()))
+                });
+                glib::spawn_future_local(async move {
+                    let result = job.await;
+                    let Some(window) = window_c.upgrade().filter(|w| w.is_visible()) else {
+                        busy.set(false);
                         return;
                     };
-                    match codex::render_markdown(&thread_file) {
-                        Ok(md) => match std::fs::write(&path, md) {
-                            Ok(()) => toast("Codex thread saved"),
-                            Err(err) => {
-                                tracing::error!("saving codex thread: {err}");
-                                toast("Failed to save thread");
-                            }
-                        },
-                        Err(err) => {
-                            tracing::error!("rendering codex thread: {err:#}");
-                            toast("Failed to render thread");
+                    let (thread, folder) = match result {
+                        Ok((Some(thread), folder)) => (thread, folder),
+                        other => {
+                            busy.set(false);
+                            toast(if other.is_err() {
+                                "Could not load Codex conversations"
+                            } else {
+                                "No Codex thread found"
+                            });
+                            return;
                         }
+                    };
+                    let dialog = gtk4::FileDialog::builder()
+                        .title(format!("Export Codex: {}", thread.title))
+                        .initial_name(format!("{}.md", codex::slugify(&thread.title)))
+                        .build();
+                    if let Some(folder) = folder {
+                        dialog.set_initial_folder(Some(&gio::File::for_path(&folder)));
                     }
+                    let thread_file = thread.file;
+                    dialog.save(Some(&window), None::<&gio::Cancellable>, move |res| {
+                        let Ok(file) = res else {
+                            busy.set(false);
+                            return;
+                        }; // cancelled
+                        let Some(path) = file.path() else {
+                            busy.set(false);
+                            toast("No local path for the chosen file");
+                            return;
+                        };
+                        let job =
+                            gio::spawn_blocking(move || codex::save_markdown(&thread_file, &path));
+                        glib::spawn_future_local(async move {
+                            let result = job.await;
+                            busy.set(false);
+                            if window_c.upgrade().is_some_and(|w| w.is_visible()) {
+                                match result {
+                                    Ok(Ok(())) => toast("Codex thread saved"),
+                                    _ => toast("Failed to save thread"),
+                                }
+                            }
+                        });
+                    });
                 });
             }),
         ));
@@ -2107,9 +2132,10 @@ fn build_window(
 
     {
         let window_c = window.clone();
+        let bindings = bindings.clone();
         window.add_action(&add_simple(
             "shortcuts",
-            Box::new(move || show_shortcuts(&window_c)),
+            Box::new(move || show_shortcuts(&window_c, &bindings.borrow())),
         ));
     }
 
@@ -2246,49 +2272,12 @@ fn build_window(
     }
     window.add_action(&sidebar_always_action);
 
-    app.set_accels_for_action("win.tab-overview", &["F1", "<Super>Tab"]);
-    app.set_accels_for_action("win.new-tab", &["<Control><Shift>t"]);
-    app.set_accels_for_action("win.close-tab", &["<Control><Shift>w"]);
-    app.set_accels_for_action("win.next-tab", &["<Control>Page_Down", "<Control>Tab"]);
-    app.set_accels_for_action("win.prev-tab", &["<Control>Page_Up", "<Control><Shift>Tab"]);
-    app.set_accels_for_action("win.quit", &["<Control><Shift>q"]);
-    app.set_accels_for_action("win.copy", &["<Control><Shift>c"]);
-    app.set_accels_for_action("win.paste", &["<Control><Shift>v"]);
-    app.set_accels_for_action("win.select-all", &["<Control><Shift>a"]);
-    app.set_accels_for_action("win.clear-tab", &["<Control><Shift>k"]);
-    app.set_accels_for_action("win.restart-tab", &["<Control><Shift>r"]);
     // Split bindings for tiling panes.
-    app.set_accels_for_action("win.split-right", &["<Control><Shift>o"]);
-    app.set_accels_for_action("win.split-down", &["<Control><Shift>e"]);
-    app.set_accels_for_action("win.split-left", &["<Control><Shift>l"]);
-    app.set_accels_for_action("win.split-up", &["<Control><Shift>u"]);
-    app.set_accels_for_action("win.focus-split-up", &["<Control><Alt>Up"]);
-    app.set_accels_for_action("win.focus-split-down", &["<Control><Alt>Down"]);
-    app.set_accels_for_action("win.focus-split-left", &["<Control><Alt>Left"]);
-    app.set_accels_for_action("win.focus-split-right", &["<Control><Alt>Right"]);
-    app.set_accels_for_action("win.focus-split-previous", &["<Control><Super>bracketleft"]);
-    app.set_accels_for_action("win.focus-split-next", &["<Control><Super>bracketright"]);
-    app.set_accels_for_action("win.resize-split-up", &["<Control><Shift><Super>Up"]);
-    app.set_accels_for_action("win.resize-split-down", &["<Control><Shift><Super>Down"]);
-    app.set_accels_for_action("win.resize-split-left", &["<Control><Shift><Super>Left"]);
-    app.set_accels_for_action("win.resize-split-right", &["<Control><Shift><Super>Right"]);
-    app.set_accels_for_action("win.toggle-split-zoom", &["<Control><Shift>Return"]);
-    app.set_accels_for_action("win.command-palette", &["<Control><Shift>p"]);
-    app.set_accels_for_action("win.find", &["<Control><Shift>f"]);
-    app.set_accels_for_action("win.open-browser", &["<Control><Shift>b"]);
-    app.set_accels_for_action("win.file-tree", &["F9"]);
-    app.set_accels_for_action("win.save-codex-thread", &["<Control><Shift>d"]);
-    app.set_accels_for_action("win.rename-tab", &["F2"]);
-    app.set_accels_for_action(
-        "win.zoom-in",
-        &["<Control>plus", "<Control>equal", "<Control>KP_Add"],
-    );
-    app.set_accels_for_action("win.zoom-out", &["<Control>minus", "<Control>KP_Subtract"]);
-    app.set_accels_for_action("win.zoom-reset", &["<Control>0", "<Control>KP_0"]);
-    app.set_accels_for_action("win.preferences", &["<Control>comma"]);
+    crate::keys::Bindings::default().apply(app);
 
     // keys.toml wins over everything set above.
     apply_bindings();
+    apply_config_ui();
 
     // Browser tabs keep split and tiling actions unavailable.
     let sync_split_actions: Rc<dyn Fn(Option<adw::TabPage>)> = {
@@ -2331,8 +2320,12 @@ fn build_window(
         let sidebar_list = sidebar_list.clone();
         let sidebar_syncing = sidebar_syncing.clone();
         let sync_split_actions = sync_split_actions.clone();
+        let search_bar = Rc::downgrade(&search_bar);
         tab_view.connect_notify_local(Some("selected-page"), move |tv, _| {
             sync_split_actions(tv.selected_page());
+            if let Some(search_bar) = search_bar.upgrade() {
+                search_bar.sync_target();
+            }
             if let Some(page) = tv.selected_page() {
                 if let Some(view) = current_view() {
                     window.set_title(Some(&view.title()));
@@ -2357,7 +2350,12 @@ fn build_window(
         tab_view.connect_close_page(move |tv, page| {
             // AdwTabView allows an async answer: hold the close, then finish it
             // once the user has decided.
-            if config.borrow().confirm_close_tab {
+            let has_child = pages
+                .borrow()
+                .iter()
+                .find(|(p, _)| p == page)
+                .is_none_or(|(_, views)| views.iter().any(|v| v.has_child()));
+            if config.borrow().confirm_close_tab && has_child {
                 let dialog = adw::AlertDialog::new(
                     Some("Close this tab?"),
                     Some("Anything still running in it will be terminated."),
@@ -2376,8 +2374,7 @@ fn build_window(
                 dialog.choose(&parent, gio::Cancellable::NONE, move |response| {
                     let closing = response == "close";
                     if closing {
-                        pages.borrow_mut().retain(|(p, _)| p != &page);
-                        file_trees.borrow_mut().remove(&page);
+                        release_tab(&pages, &file_trees, &page);
                     }
                     tv.close_page_finish(&page, closing);
                     if closing && tv.n_pages() == 0 {
@@ -2387,8 +2384,7 @@ fn build_window(
                 return glib::Propagation::Stop;
             }
 
-            pages.borrow_mut().retain(|(p, _)| p != page);
-            file_trees.borrow_mut().remove(page);
+            release_tab(&pages, &file_trees, page);
             // Must call close_page_finish for AdwTabView.
             tv.close_page_finish(page, true);
             if tv.n_pages() == 0 {
@@ -2407,13 +2403,7 @@ fn build_window(
             ".terminal {{ font-family: \"{family}\"; font-size: {}pt; }}",
             cfg.font_size
         ));
-        if let Some(display) = gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &css,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
+        window_css(&window, &css, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
     // Keep the session awake while any pane has a foreground job, so a long
@@ -2425,10 +2415,20 @@ fn build_window(
         let window = window.clone();
         // The GTK inhibit cookie; 0 means "not inhibiting".
         let cookie = Rc::new(Cell::new(0u32));
+        {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            window.connect_destroy(move |_| {
+                let held = cookie.replace(0);
+                if held != 0 {
+                    app.uninhibit(held);
+                }
+            });
+        }
         // Was anything running last time we looked? A busy-to-idle transition
         // is what "the command finished" means without shell integration.
         let was_busy = Rc::new(Cell::new(false));
-        glib::timeout_add_seconds_local(4, move || {
+        let source = glib::timeout_add_seconds_local(4, move || {
             let busy = pages
                 .borrow()
                 .iter()
@@ -2464,6 +2464,7 @@ fn build_window(
             }
             glib::ControlFlow::Continue
         });
+        source_ids.borrow_mut().push(source);
     }
 
     // Persist the workspace so the next start can restore it.
@@ -2491,18 +2492,53 @@ fn build_window(
                 Ok(()) => {
                     tracing::info!("saved {} tab(s) for the next session", session.tabs.len())
                 }
-                Err(err) => tracing::warn!("could not save session: {err:#}"),
+                Err(err) => {
+                    saved.set(false);
+                    tracing::warn!("could not save session: {err:#}");
+                }
             }
             // Drop leftover VT dumps from ≤0.1.x installs.
             SessionState::clear_legacy_scrollback();
         })
     };
 
+    let shutdown: Rc<dyn Fn()> = {
+        let pages = pages.clone();
+        let file_trees = file_trees.clone();
+        let source_ids = source_ids.clone();
+        let config_watch = config_watch.clone();
+        let sync_config = sync_config.clone();
+        let observers = config_observers.clone();
+        let shared = shared.clone();
+        Rc::new(move || {
+            for source in source_ids.borrow_mut().drain(..) {
+                source.remove();
+            }
+            if let Err(err) = config_watch.stop() {
+                tracing::warn!("settings flush failed: {err}");
+            }
+            sync_config.borrow_mut().take();
+            observers.borrow_mut().clear();
+            shared.open_in_window.borrow_mut().take();
+            let tabs = std::mem::take(&mut *pages.borrow_mut());
+            for (_, views) in tabs {
+                for view in views {
+                    view.close();
+                }
+            }
+            file_trees.borrow_mut().clear();
+        })
+    };
+    {
+        let shutdown = shutdown.clone();
+        window.connect_destroy(move |_| shutdown());
+    }
+    let confirmed_quit = Rc::new(Cell::new(false));
     {
         let save_session = save_session.clone();
         let config = config.clone();
         let tab_view = tab_view.clone();
-        let confirmed_quit = Rc::new(Cell::new(false));
+        let confirmed_quit = confirmed_quit.clone();
         window.connect_close_request(move |window| {
             // Confirming a single tab would just be in the way.
             let ask = config.borrow().confirm_quit && tab_view.n_pages() > 1;
@@ -2529,6 +2565,7 @@ fn build_window(
                 return glib::Propagation::Stop;
             }
             save_session();
+            shutdown();
             glib::Propagation::Proceed
         });
     }
@@ -2538,11 +2575,14 @@ fn build_window(
     for signal in [nix::libc::SIGTERM, nix::libc::SIGINT] {
         let save_session = save_session.clone();
         let window_c = window.clone();
-        glib::unix_signal_add_local(signal, move || {
+        let confirmed_quit = confirmed_quit.clone();
+        let source = glib::unix_signal_add_local(signal, move || {
+            confirmed_quit.set(true);
             save_session();
             window_c.close();
             glib::ControlFlow::Break
         });
+        source_ids.borrow_mut().push(source);
     }
 
     // Apply the configured tab layout, then open the tabs.
@@ -2569,7 +2609,18 @@ fn build_window(
                 window.set_default_size(w, h);
             }
             for tab in &session.tabs {
-                add_tab_layout(tab.title.clone(), &tab.layout)?;
+                match &tab.kind {
+                    TabKind::Browser { url } => {
+                        let page = add_browser_tab(url.as_deref());
+                        if let Some(title) = &tab.title {
+                            set_tab_renamed(&page, true);
+                            page.set_title(title);
+                        }
+                    }
+                    TabKind::Terminal => {
+                        add_tab_layout(tab.title.clone(), &tab.layout)?;
+                    }
+                }
             }
             if tab_view.n_pages() == 0 {
                 add_tab(LaunchRequest::default())?;
@@ -2610,13 +2661,26 @@ fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
     let mut tabs = Vec::new();
     for i in 0..tab_view.n_pages() {
         let page = tab_view.nth_page(i);
+        let title = tab_is_renamed(&page).then(|| page.title().to_string());
+        if is_browser_tab(&page) {
+            let url = browser::current_uri(&page.child());
+            tabs.push(TabState {
+                title,
+                layout: PaneLayout::default(),
+                kind: TabKind::Browser { url },
+            });
+            continue;
+        }
         let Some((_, views)) = pages.borrow().iter().find(|(p, _)| p == &page).cloned() else {
             continue;
         };
-        let layout = capture_pane_layout(&page.child(), &views);
+        let Some(layout) = capture_pane_layout(&page.child(), &views) else {
+            continue;
+        };
         tabs.push(TabState {
-            title: tab_is_renamed(&page).then(|| page.title().to_string()),
+            title,
             layout,
+            kind: TabKind::Terminal,
         });
     }
     let active = tab_view
@@ -2633,49 +2697,49 @@ fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
 }
 
 /// Walk a tab's widget tree into a `PaneLayout`.
-fn capture_pane_layout(widget: &gtk4::Widget, views: &[Rc<TerminalView>]) -> PaneLayout {
-    if let Ok(paned) = widget.clone().downcast::<gtk4::Paned>() {
-        let orientation = match paned.orientation() {
-            gtk4::Orientation::Horizontal => SplitOrientation::Horizontal,
-            _ => SplitOrientation::Vertical,
-        };
-        let size = match paned.orientation() {
-            gtk4::Orientation::Horizontal => paned.width(),
-            _ => paned.height(),
-        };
-        let ratio = if size > 0 {
-            (paned.position() as f64 / size as f64).clamp(0.05, 0.95)
-        } else {
-            0.5
-        };
+fn capture_pane_layout(widget: &gtk4::Widget, views: &[Rc<TerminalView>]) -> Option<PaneLayout> {
+    if let Some(view) = views
+        .iter()
+        .find(|v| v.widget().upcast_ref::<gtk4::Widget>() == widget)
+    {
+        return Some(PaneLayout::Leaf { cwd: view.pwd() });
+    }
+    if !views.iter().any(|v| v.widget().is_ancestor(widget)) {
+        return None;
+    }
+    if let Some(paned) = widget.downcast_ref::<gtk4::Paned>() {
         let start = paned
             .start_child()
-            .map(|c| capture_pane_layout(&c, views))
-            .unwrap_or_default();
+            .and_then(|c| capture_pane_layout(&c, views));
         let end = paned
             .end_child()
-            .map(|c| capture_pane_layout(&c, views))
-            .unwrap_or_default();
-        PaneLayout::Split {
-            orientation,
-            ratio,
-            start: Box::new(start),
-            end: Box::new(end),
-        }
-    } else if let Ok(overlay) = widget.clone().downcast::<gtk4::Overlay>() {
-        let cwd = views
-            .iter()
-            .find(|v| v.widget() == &overlay)
-            .and_then(|v| v.pwd());
-        PaneLayout::Leaf { cwd }
-    } else if let Ok(bx) = widget.clone().downcast::<gtk4::Box>() {
-        if let Some(child) = bx.first_child() {
-            capture_pane_layout(&child, views)
-        } else {
-            PaneLayout::Leaf { cwd: None }
+            .and_then(|c| capture_pane_layout(&c, views));
+        match (start, end) {
+            (Some(start), Some(end)) => {
+                let orientation = match paned.orientation() {
+                    gtk4::Orientation::Horizontal => SplitOrientation::Horizontal,
+                    _ => SplitOrientation::Vertical,
+                };
+                let ratio = visible_split_ratio(paned)
+                    .or_else(|| unsafe {
+                        paned
+                            .data::<Rc<Cell<f64>>>(SPLIT_RATIO_KEY)
+                            .map(|value| value.as_ref().get())
+                    })
+                    .unwrap_or(0.5);
+                Some(PaneLayout::Split {
+                    orientation,
+                    ratio,
+                    start: Box::new(start),
+                    end: Box::new(end),
+                })
+            }
+            (start, end) => start.or(end),
         }
     } else {
-        PaneLayout::Leaf { cwd: None }
+        widget
+            .first_child()
+            .and_then(|child| capture_pane_layout(&child, views))
     }
 }
 
@@ -2687,7 +2751,14 @@ fn build_layout_widget(
 ) -> anyhow::Result<(gtk4::Widget, Vec<Rc<TerminalView>>)> {
     match layout {
         PaneLayout::Leaf { cwd } => {
-            let view = make_view(page_slot.clone(), cwd.clone().map(PathBuf::from), None)?;
+            // A saved cwd may point at a directory that no longer exists (e.g.
+            // an unmounted volume). Fall back to the shell's launch dir instead
+            // of silently opening in `$HOME`, and surface the drop.
+            let cwd = cwd.as_deref().filter(|p| Path::new(p).is_dir());
+            if cwd.is_none() {
+                tracing::debug!("restoring tab with a missing cwd; using launch cwd");
+            }
+            let view = make_view(page_slot.clone(), cwd.map(PathBuf::from), None)?;
             Ok((view.widget().clone().upcast(), vec![view]))
         }
         PaneLayout::Split {
@@ -2703,6 +2774,7 @@ fn build_layout_widget(
                 SplitOrientation::Vertical => gtk4::Orientation::Vertical,
             };
             let paned = gtk4::Paned::new(orient);
+            track_split_geometry(&paned, *ratio);
             paned.set_wide_handle(true);
             paned.set_resize_start_child(true);
             paned.set_resize_end_child(true);
@@ -2712,19 +2784,50 @@ fn build_layout_widget(
             paned.set_end_child(Some(&end_w));
             let ratio = (*ratio).clamp(0.05, 0.95);
             // Apply the saved divider once the paned has a real size.
-            paned.connect_map(move |p| {
+            paned.add_tick_callback(move |p, _| {
                 let size = match p.orientation() {
                     gtk4::Orientation::Horizontal => p.width(),
                     _ => p.height(),
                 };
-                if size > 0 {
-                    p.set_position((size as f64 * ratio) as i32);
+                if size <= 0 {
+                    return glib::ControlFlow::Continue;
                 }
+                p.set_position((size as f64 * ratio) as i32);
+                glib::ControlFlow::Break
             });
             start_views.extend(end_views);
             Ok((paned.upcast(), start_views))
         }
     }
+}
+
+fn window_css(window: &adw::ApplicationWindow, provider: &gtk4::CssProvider, priority: u32) {
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(&display, provider, priority);
+        let provider = provider.clone();
+        window.connect_destroy(move |_| {
+            gtk4::style_context_remove_provider_for_display(&display, &provider)
+        });
+    }
+}
+
+fn chrome_font_css(font: &str, dpi_scale: f64, text_scale: f64) -> String {
+    let font = gtk4::pango::FontDescription::from_string(font);
+    let family = font
+        .family()
+        .unwrap_or_else(|| "Sans".into())
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let size = (font.size() as f64 / gtk4::pango::SCALE as f64).max(1.0);
+    let extra_scale = if (dpi_scale - text_scale).abs() < 0.01 {
+        1.0
+    } else {
+        text_scale
+    };
+    format!(
+        ".option-chrome {{ font-family: \"{family}\"; font-size: {}pt; }}",
+        size * extra_scale
+    )
 }
 
 /// Honor `gtk-decoration-layout`, chrome font and text scaling.
@@ -2733,6 +2836,7 @@ fn apply_desktop_chrome(header: &adw::HeaderBar, window: &adw::ApplicationWindow
         return;
     };
 
+    let mut handlers: Vec<(glib::Object, glib::SignalHandlerId)> = Vec::new();
     let apply_decoration = {
         let header = header.clone();
         let settings = settings.clone();
@@ -2748,7 +2852,8 @@ fn apply_desktop_chrome(header: &adw::HeaderBar, window: &adw::ApplicationWindow
     apply_decoration();
     {
         let apply_decoration = apply_decoration.clone();
-        settings.connect_gtk_decoration_layout_notify(move |_| apply_decoration());
+        let handler = settings.connect_gtk_decoration_layout_notify(move |_| apply_decoration());
+        handlers.push((settings.clone().upcast(), handler));
     }
 
     let provider = gtk4::CssProvider::new();
@@ -2759,39 +2864,59 @@ fn apply_desktop_chrome(header: &adw::HeaderBar, window: &adw::ApplicationWindow
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
         );
     }
+    // GNOME's text-scaling-factor (org.gnome.desktop.interface) is what the
+    // system uses to scale UI text; honoring it keeps our chrome in step.
+    let gnome_interface = gio::SettingsSchemaSource::default()
+        .and_then(|source| source.lookup("org.gnome.desktop.interface", true))
+        .filter(|schema| schema.has_key("text-scaling-factor"))
+        .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
     let apply_font = {
         let settings = settings.clone();
         let provider = provider.clone();
-        let window = window.clone();
+        let gnome_interface = gnome_interface.clone();
         Rc::new(move || {
             let font = settings.gtk_font_name().unwrap_or_else(|| "Sans 10".into());
-            let scale = settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0;
-            let scale = if scale <= 0.0 { 1.0 } else { scale };
-            // Prefer the desktop text-scaling-factor when available via settings.
-            let text_scale = settings
-                .property_value("gtk-xft-dpi")
-                .get::<i32>()
-                .ok()
-                .map(|dpi| dpi as f64 / 1024.0 / 96.0)
-                .unwrap_or(scale);
-            let css = format!(
-                ".option-chrome, .option-chrome * {{ font: {font}; }}\n\
-                 window {{ font-size: {}pt; }}",
-                10.0 * text_scale.max(0.5)
-            );
+            let dpi_scale = settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0;
+            let dpi_scale = if dpi_scale <= 0.0 { 1.0 } else { dpi_scale };
+            // Multiply the DPI-derived scale by the GNOME text-scaling-factor.
+            // `value()` returns a Variant without panicking; `get::<f64>()` is
+            // fallible for a missing schema/key on non-GNOME desktops.
+            let text_scale = gnome_interface
+                .as_ref()
+                .and_then(|settings| settings.value("text-scaling-factor").get::<f64>())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(1.0);
+            let css = chrome_font_css(&font, dpi_scale, text_scale);
             provider.load_from_string(&css);
-            let _ = &window;
         })
     };
     apply_font();
     {
         let apply_font = apply_font.clone();
-        settings.connect_gtk_font_name_notify(move |_| apply_font());
+        let handler = settings.connect_gtk_font_name_notify(move |_| apply_font());
+        handlers.push((settings.clone().upcast(), handler));
     }
     {
         let apply_font = apply_font.clone();
-        settings.connect_gtk_xft_dpi_notify(move |_| apply_font());
+        let handler = settings.connect_gtk_xft_dpi_notify(move |_| apply_font());
+        handlers.push((settings.clone().upcast(), handler));
     }
+    if let Some(gnome_interface) = gnome_interface {
+        let apply_font = apply_font.clone();
+        let handler = gnome_interface.connect_changed(Some("text-scaling-factor"), move |_, _| {
+            apply_font();
+        });
+        handlers.push((gnome_interface.upcast(), handler));
+    }
+    let handlers = RefCell::new(handlers);
+    window.connect_destroy(move |_| {
+        for (object, handler) in handlers.borrow_mut().drain(..) {
+            object.disconnect(handler);
+        }
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_remove_provider_for_display(&display, &provider);
+        }
+    });
     // Animations: leave GtkSettings alone so gtk-enable-animations is honored.
 }
 
@@ -2801,6 +2926,12 @@ fn equalize_splits(widget: &gtk4::Widget) -> i32 {
     let Some(paned) = widget.downcast_ref::<gtk4::Paned>() else {
         return 1;
     };
+    if !paned.has_css_class("terminal-split") {
+        return paned
+            .start_child()
+            .map(|child| equalize_splits(&child))
+            .unwrap_or(0);
+    }
     let start = paned
         .start_child()
         .map(|c| equalize_splits(&c))
@@ -2843,4 +2974,444 @@ fn abbreviate_home(path: &str) -> String {
         };
     }
     path.to_string()
+}
+
+fn bind_sidebar(
+    list: &gtk4::ListBox,
+    view: &adw::TabView,
+    syncing: Rc<Cell<bool>>,
+) -> Rc<dyn Fn()> {
+    let model = view.pages();
+    let weak_view = view.downgrade();
+    list.bind_model(Some(&model), move |item| {
+        let page = item.downcast_ref::<adw::TabPage>().expect("TabView page");
+        make_sidebar_row(&weak_view, page).upcast()
+    });
+    let list = list.downgrade();
+    let view = view.downgrade();
+    let sync: Rc<dyn Fn()> = Rc::new(move || {
+        let (Some(list), Some(view)) = (list.upgrade(), view.upgrade()) else {
+            return;
+        };
+        syncing.set(true);
+        let row = view.selected_page().and_then(|page| {
+            (0..view.n_pages())
+                .find(|&i| view.nth_page(i) == page)
+                .and_then(|i| list.row_at_index(i))
+        });
+        list.select_row(row.as_ref());
+        syncing.set(false);
+    });
+    let update = sync.clone();
+    model.connect_items_changed(move |_, _, _, _| update());
+    sync();
+    sync
+}
+
+fn make_sidebar_row(view: &glib::WeakRef<adw::TabView>, page: &adw::TabPage) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().activatable(true).build();
+    row.set_use_markup(false);
+
+    // Agent tabs carry a real logo icon (set on the TabPage); mirror
+    // it in the sidebar row so the sidebar is as recognizable as the
+    // tab bar.
+    let image = gtk4::Image::new();
+    image.set_icon_size(gtk4::IconSize::Normal);
+    page.bind_property("icon", &image, "gicon")
+        .sync_create()
+        .build();
+    page.bind_property("icon", &image, "visible")
+        .transform_to(|_, icon: Option<gio::Icon>| Some(icon.is_some()))
+        .sync_create()
+        .build();
+    row.add_prefix(&image);
+
+    let close = gtk4::Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("flat");
+    close.set_valign(gtk4::Align::Center);
+    close.set_tooltip_text(Some("Close tab"));
+    {
+        let view = view.clone();
+        let page = page.downgrade();
+        close.connect_clicked(move |_| {
+            if let (Some(view), Some(page)) = (view.upgrade(), page.upgrade()) {
+                view.close_page(&page);
+            }
+        });
+    }
+    row.add_suffix(&close);
+
+    // Double-click a row to rename the tab.
+    {
+        let page = page.downgrade();
+        let row_weak = row.downgrade();
+        let gesture = gtk4::GestureClick::new();
+        gesture.set_button(gdk::BUTTON_PRIMARY);
+        gesture.connect_pressed(move |_, n, _, _| {
+            if n == 2
+                && let (Some(row), Some(page)) = (row_weak.upgrade(), page.upgrade())
+            {
+                rename_tab_dialog(&row, &page);
+            }
+        });
+        row.add_controller(gesture);
+    }
+
+    // Drag a row onto another to reorder the tab.
+    {
+        let source = gtk4::DragSource::new();
+        source.set_actions(gdk::DragAction::MOVE);
+        let page = page.downgrade();
+        source.connect_prepare(move |_, _, _| {
+            Some(gdk::ContentProvider::for_value(&page.upgrade()?.to_value()))
+        });
+        row.add_controller(source);
+    }
+    {
+        let target = gtk4::DropTarget::new(adw::TabPage::static_type(), gdk::DragAction::MOVE);
+        let view = view.clone();
+        let destination = page.downgrade();
+        target.connect_drop(move |_, value, _, _| {
+            let (Some(view), Some(destination), Ok(page)) = (
+                view.upgrade(),
+                destination.upgrade(),
+                value.get::<adw::TabPage>(),
+            ) else {
+                return false;
+            };
+            reorder_sidebar_page(&view, &page, &destination)
+        });
+        row.add_controller(target);
+    }
+
+    // Keep the row title in sync without keeping the row alive.
+    page.bind_property("title", &row, "title")
+        .sync_create()
+        .build();
+    row
+}
+
+fn reorder_sidebar_page(
+    view: &adw::TabView,
+    page: &adw::TabPage,
+    destination: &adw::TabPage,
+) -> bool {
+    if page == destination || !(0..view.n_pages()).any(|i| view.nth_page(i) == *page) {
+        return false;
+    }
+    let Some(index) = (0..view.n_pages()).find(|&i| view.nth_page(i) == *destination) else {
+        return false;
+    };
+    view.reorder_page(page, index);
+    true
+}
+
+fn visible_split_ratio(paned: &gtk4::Paned) -> Option<f64> {
+    if !paned.is_mapped() || !paned.start_child()?.is_visible() || !paned.end_child()?.is_visible()
+    {
+        return None;
+    }
+    let size = match paned.orientation() {
+        gtk4::Orientation::Horizontal => paned.width(),
+        _ => paned.height(),
+    };
+    (size > 0).then(|| (paned.position() as f64 / size as f64).clamp(0.05, 0.95))
+}
+
+fn track_split_geometry(paned: &gtk4::Paned, initial_ratio: f64) {
+    paned.add_css_class("terminal-split");
+    let ratio = Rc::new(Cell::new(initial_ratio.clamp(0.05, 0.95)));
+    unsafe {
+        paned.set_data(SPLIT_RATIO_KEY, ratio.clone());
+    }
+    paned.connect_position_notify(move |paned| {
+        if let Some(value) = visible_split_ratio(paned) {
+            ratio.set(value);
+        }
+    });
+}
+
+fn zoom_step(config: &RefCell<Config>, apply: &dyn Fn(f32), delta: f32) {
+    let size = config.borrow().font_size;
+    apply((size + delta).clamp(6.0, 40.0));
+}
+
+fn request_tab_close(tv: &adw::TabView, page: &adw::TabPage) {
+    tv.close_page(page);
+}
+
+fn release_tab(pages: &Pages, trees: &FileTrees, page: &adw::TabPage) {
+    let removed = {
+        let mut pages = pages.borrow_mut();
+        pages
+            .iter()
+            .position(|(p, _)| p == page)
+            .map(|i| pages.remove(i))
+    };
+    if let Some((_, views)) = removed {
+        for view in views {
+            view.close();
+        }
+    }
+    trees.borrow_mut().remove(page);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_window_restores_order_and_saves_on_sigterm() {
+        if std::env::var_os("OPTIONTERM_WINDOW_TEST").is_none() {
+            let dir = crate::test_support::TestDir::new("window-session");
+            let state_dir = dir.path().join(".option/terminal");
+            let config = Config {
+                source: state_dir.join("config.toml"),
+                new_tab_position: NewTabPosition::Start,
+                confirm_quit: true,
+                ..Config::default()
+            };
+            config.save().unwrap();
+            let session = SessionState {
+                tabs: ["first", "second"]
+                    .into_iter()
+                    .map(|title| TabState {
+                        title: Some(title.into()),
+                        layout: PaneLayout::Leaf {
+                            cwd: Some("/tmp".into()),
+                        },
+                        kind: TabKind::Terminal,
+                    })
+                    .collect(),
+                active: 1,
+                ..SessionState::default()
+            };
+            crate::storage::atomic_write(
+                &state_dir.join("session.toml"),
+                session.to_toml().as_bytes(),
+            )
+            .unwrap();
+            let result = std::process::Command::new("/usr/bin/dbus-run-session")
+                .arg("--dbus-daemon=/usr/bin/dbus-daemon")
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::tests::isolated_window_restores_order_and_saves_on_sigterm",
+                    "--nocapture",
+                ])
+                .env("OPTIONTERM_WINDOW_TEST", dir.path())
+                .env("OPTION_HOME", dir.path().join(".option"))
+                .env("HOME", dir.path())
+                .env("XDG_CONFIG_HOME", dir.path().join("config"))
+                .env("XDG_DATA_HOME", dir.path().join("data"))
+                .env("XDG_CACHE_HOME", dir.path().join("cache"))
+                .env("XDG_STATE_HOME", dir.path().join("state"))
+                .env("PATH", dir.path())
+                .env("SHELL", "/bin/cat")
+                .env("GSETTINGS_BACKEND", "memory")
+                .env("GTK_A11Y", "none")
+                .env("GTK_USE_PORTAL", "0")
+                .env("GIO_USE_VFS", "local")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let home = PathBuf::from(std::env::var_os("OPTIONTERM_WINDOW_TEST").unwrap());
+        assert_eq!(crate::config::config_dir(), home.join(".option/terminal"));
+        gtk4::init().unwrap();
+        adw::init().unwrap();
+        let app = adw::Application::builder()
+            .application_id("io.option.terminal.test")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let shared = Rc::new(SharedLaunch {
+            pending: RefCell::new(Vec::new()),
+            open_in_window: RefCell::new(None),
+        });
+        build_window(&app, shared, LaunchRequest::default()).unwrap();
+        let window = app.windows().into_iter().next().unwrap();
+        gtk4::prelude::WidgetExt::activate_action(&window, "win.zoom-in", None).unwrap();
+        gtk4::prelude::WidgetExt::activate_action(&window, "win.zoom-out", None).unwrap();
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while window.width() == 0 && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(window.width() > 0);
+        nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGTERM).unwrap();
+        while !app.windows().is_empty() && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            app.windows().is_empty(),
+            "SIGTERM must not open a confirmation dialog"
+        );
+        let session = SessionState::load().unwrap();
+        assert_eq!(session.active, 1);
+        assert_eq!(
+            session
+                .tabs
+                .iter()
+                .map(|tab| tab.title.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(
+            session
+                .tabs
+                .iter()
+                .all(|tab| tab.panes() == vec![Some("/tmp".into())])
+        );
+    }
+
+    #[gtk4::test]
+    fn sidebar_keeps_rows_when_tabs_are_added_and_selection_is_synced() {
+        let view = adw::TabView::new();
+        let list = gtk4::ListBox::new();
+        let sync = bind_sidebar(&list, &view, Rc::new(Cell::new(false)));
+        let first = view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        let row = list.row_at_index(0).unwrap();
+        for _ in 0..30 {
+            let page = view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+            sync();
+            assert_eq!(list.row_at_index(0).as_ref(), Some(&row));
+            view.close_page(&page);
+        }
+        first.set_title("literal <b>title</b>");
+        let row = row.downcast::<adw::ActionRow>().unwrap();
+        assert_eq!(row.title(), "literal <b>title</b>");
+        assert!(!row.uses_markup());
+        assert_eq!(list.selected_row().as_ref(), Some(row.upcast_ref()));
+    }
+
+    #[gtk4::test]
+    fn sidebar_drag_uses_page_identity_after_reordering() {
+        let view = adw::TabView::new();
+        let first = view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        let second = view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        let third = view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        view.reorder_page(&third, 0);
+        assert!(reorder_sidebar_page(&view, &first, &second));
+        assert_eq!(view.nth_page(2), first);
+        assert!(!reorder_sidebar_page(&view, &first, &first));
+        let other = adw::TabView::new();
+        let foreign = other.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        assert!(!reorder_sidebar_page(&view, &foreign, &second));
+    }
+
+    #[gtk4::test]
+    fn sidebar_property_bindings_do_not_retain_rows() {
+        let view = adw::TabView::new();
+        let page = view.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        for _ in 0..100 {
+            let row = make_sidebar_row(&view.downgrade(), &page);
+            page.set_icon(Some(&gio::ThemedIcon::new("utilities-terminal")));
+            let weak = row.downgrade();
+            drop(row);
+            assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[gtk4::test]
+    fn desktop_css_is_valid_and_does_not_double_text_scaling() {
+        let css = chrome_font_css("Sans 11", 1.25, 1.25);
+        assert!(css.contains("11pt"));
+        let provider = gtk4::CssProvider::new();
+        let errors = Rc::new(Cell::new(0));
+        let count = errors.clone();
+        provider.connect_parsing_error(move |_, _, _| count.set(count.get() + 1));
+        provider.load_from_string(&css);
+        assert_eq!(errors.get(), 0);
+        assert!(chrome_font_css("Sans 11", 1.0, 1.25).contains("13.75pt"));
+    }
+
+    #[test]
+    fn zoom_releases_config_before_applying() {
+        let config = RefCell::new(Config::default());
+        zoom_step(&config, &|size| config.borrow_mut().font_size = size, 1.0);
+        assert_eq!(config.borrow().font_size, 14.0);
+    }
+
+    #[gtk4::test]
+    fn cancelled_close_preserves_page_state() {
+        let tv = adw::TabView::new();
+        let page = tv.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        let pages: Pages = Rc::new(RefCell::new(vec![(page.clone(), Vec::new())]));
+        tv.connect_close_page(|_, _| glib::Propagation::Stop);
+        request_tab_close(&tv, &page);
+        assert_eq!(pages.borrow().len(), 1);
+        tv.close_page_finish(&page, false);
+        assert_eq!(tv.n_pages(), 1);
+        assert_eq!(pages.borrow()[0].0, page);
+    }
+
+    #[gtk4::test]
+    fn releasing_a_tab_breaks_callback_ownership_cycles() {
+        let tv = adw::TabView::new();
+        let view = Rc::new(TerminalView::new(Config::default(), None, None).unwrap());
+        let weak = Rc::downgrade(&view);
+        let page = tv.append(view.widget());
+        let pages: Pages = Rc::new(RefCell::new(vec![(page.clone(), vec![view.clone()])]));
+        let owned_pages = pages.clone();
+        view.set_on_exit(move || {
+            let _ = owned_pages.borrow().len();
+        });
+        drop(view);
+        let trees: FileTrees = Rc::new(RefCell::new(std::collections::HashMap::new()));
+        release_tab(&pages, &trees, &page);
+        release_tab(&pages, &trees, &page);
+        assert!(pages.borrow().is_empty());
+        assert!(weak.upgrade().is_none());
+        tv.close_page(&page);
+    }
+
+    #[gtk4::test]
+    fn repeated_restoration_preserves_only_terminal_leaves() {
+        let initial = PaneLayout::Split {
+            orientation: SplitOrientation::Vertical,
+            ratio: 0.33,
+            start: Box::new(PaneLayout::Leaf {
+                cwd: Some("/tmp".into()),
+            }),
+            end: Box::new(PaneLayout::Leaf {
+                cwd: Some("/".into()),
+            }),
+        };
+        let make_view: MakeViewFn = Rc::new(|_, cwd, command| {
+            Ok(Rc::new(TerminalView::new(Config::default(), cwd, command)?))
+        });
+        let mut layout = initial.clone();
+        for _ in 0..5 {
+            let slot = Rc::new(RefCell::new(None));
+            let (terminals, views) = build_layout_widget(&layout, &make_view, &slot).unwrap();
+            let container = gtk4::Paned::new(gtk4::Orientation::Horizontal);
+            container.set_start_child(Some(&terminals));
+            container.set_end_child(Some(&gtk4::Box::new(gtk4::Orientation::Vertical, 0)));
+            layout = capture_pane_layout(container.upcast_ref(), &views).unwrap();
+            assert_eq!(layout, initial);
+            assert_eq!(equalize_splits(container.upcast_ref()), 2);
+        }
+    }
+
+    #[gtk4::test]
+    fn session_capture_does_not_turn_file_tree_into_terminal() {
+        let view = Rc::new(TerminalView::new(Config::default(), None, None).unwrap());
+        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
+        paned.set_start_child(Some(view.widget()));
+        paned.set_end_child(Some(&gtk4::Box::new(gtk4::Orientation::Vertical, 0)));
+        root.append(&paned);
+        let layout = capture_pane_layout(root.upcast_ref(), &[view]).unwrap();
+        assert_eq!(layout.leaf_cwds().len(), 1);
+    }
 }

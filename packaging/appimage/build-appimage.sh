@@ -21,6 +21,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == x86_64 ]] || {
+  echo "error: build AppImage on Ubuntu 24.04 x86_64 (use packaging/verification.Dockerfile)" >&2
+  exit 1
+}
+[[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]] || {
+  echo "error: required VTE fork is missing" >&2
+  exit 1
+}
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 [[ -n "$version" ]] || { echo "error: could not read version from Cargo.toml" >&2; exit 1; }
 
@@ -35,7 +44,7 @@ binary="$ROOT/target/release/optionterm"
 export APPIMAGE_EXTRACT_AND_RUN=1
 # linuxdeploy ships an old binutils whose `strip` chokes on the `.relr.dyn`
 # sections modern distros emit; the size saving is not worth a failed build.
-export NO_STRIP="${NO_STRIP:-1}"
+export NO_STRIP=1
 
 mkdir -p "$TOOLS"
 fetch() { # fetch <url> <dest>
@@ -55,8 +64,8 @@ fetch \
   "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
   "$TOOLS/appimagetool"
 
-appdir="$ROOT/target/AppDir"
-rm -rf "$appdir"
+appdir="$(mktemp -d "$ROOT/target/AppDir.XXXXXX")"
+trap 'rm -rf "$appdir"' EXIT
 install -Dm755 "$binary" "$appdir/usr/bin/optionterm"
 
 # Bundle the pinned FoxTerminal VTE fork. The binary's RUNPATH searches
@@ -68,7 +77,8 @@ if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then
   ln -sf libvte-2.91-gtk4.so.0 \
     "$appdir/usr/lib/libvte-2.91-gtk4.so"
 else
-  echo "warning: vte-dist not found — run scripts/build-vte.sh first" >&2
+  echo "error: required VTE fork is missing — run scripts/build-vte.sh first" >&2
+  exit 1
 fi
 
 # The AppImage must not use the generic theme icon: give it a real one.
@@ -90,10 +100,31 @@ done
 
 mkdir -p "$OUT_DIR"
 export OUTPUT="$OUT_DIR/optionTerm-${version}-x86_64.AppImage"
-rm -f "$OUTPUT"
+[[ ! -e "$OUTPUT" ]] || { echo "error: refusing to overwrite $OUTPUT" >&2; exit 1; }
 
+webkit_dir="$(pkg-config --variable=libdir webkitgtk-6.0)/webkitgtk-6.0"
+[[ -x "$webkit_dir/WebKitWebProcess" && -x "$webkit_dir/WebKitNetworkProcess" ]] || {
+  echo "error: WebKit helper processes were not found" >&2
+  exit 1
+}
+extra=()
+for helper in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
+  if [[ -x "$webkit_dir/$helper" ]]; then
+    install -Dm755 "$webkit_dir/$helper" "$appdir/usr/libexec/webkitgtk-6.0/$helper"
+    extra+=(--executable "$appdir/usr/libexec/webkitgtk-6.0/$helper")
+  fi
+done
+install -Dm755 "$webkit_dir/injected-bundle/libwebkitgtkinjectedbundle.so" "$appdir/usr/libexec/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so"
+install -Dm644 "$ROOT/NOTICE" "$appdir/usr/share/licenses/optionterm/NOTICE"
+install -Dm644 "$ROOT/LICENSE" "$appdir/usr/share/licenses/optionterm/LICENSE"
+mkdir -p "$appdir/apprun-hooks"
+cat > "$appdir/apprun-hooks/webkit.sh" <<'EOF'
+export WEBKIT_EXEC_PATH="$APPDIR/usr/libexec/webkitgtk-6.0"
+export WEBKIT_INJECTED_BUNDLE_PATH="$APPDIR/usr/libexec/webkitgtk-6.0/injected-bundle"
+EOF
 PATH="$TOOLS:$PATH" "$TOOLS/linuxdeploy" \
   --appdir "$appdir" \
+  "${extra[@]}" \
   --desktop-file "$desktop" \
   --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/$APP_ID.png" \
   --plugin gtk \

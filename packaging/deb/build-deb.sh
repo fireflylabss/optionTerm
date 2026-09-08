@@ -52,7 +52,8 @@ if [[ -f "$ROOT/vte-dist/lib/libvte-2.91-gtk4.so.0" ]]; then
   ln -s libvte-2.91-gtk4.so.0 \
     "$root/usr/lib/optionterm/libvte-2.91-gtk4.so"
 else
-  echo "warning: vte-dist not found — run scripts/build-vte.sh first" >&2
+  echo "error: required VTE fork is missing — run scripts/build-vte.sh first" >&2
+  exit 1
 fi
 
 install -Dm644 "$ROOT/packaging/$APP_ID.desktop" \
@@ -80,13 +81,18 @@ fi
 installed_kb="$(du -sk "$root" | cut -f1)"
 
 mkdir -p "$root/DEBIAN"
+glibc_version="$(getconf GNU_LIBC_VERSION | cut -d' ' -f2)"
+gtk_version="$(pkg-config --modversion gtk4)"
+adw_version="$(pkg-config --modversion libadwaita-1)"
+glib_version="$(pkg-config --modversion glib-2.0)"
+webkit_version="$(pkg-config --modversion webkitgtk-6.0)"
 cat > "$root/DEBIAN/control" <<EOF
 Package: $PKG
 Version: $version
 Section: utils
 Priority: optional
 Architecture: $arch
-Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0, libwebkitgtk-6.0-4, libpango-1.0-0, libcairo2, libglib2.0-0
+Depends: libc6 (>= $glibc_version), libstdc++6 (>= 14), libgtk-4-1 (>= $gtk_version), libadwaita-1-0 (>= $adw_version), libvte-2.91-gtk4-0, libwebkitgtk-6.0-4 (>= $webkit_version), libpango-1.0-0, libcairo2, libglib2.0-0t64 (>= $glib_version) | libglib2.0-0 (>= $glib_version)
 Conflicts: option-term
 Replaces: option-term
 Provides: option-term
@@ -101,7 +107,7 @@ EOF
 
 mkdir -p "$OUT_DIR"
 deb="$OUT_DIR/${PKG}_${version}_${arch}.deb"
-rm -f "$deb"
+[[ ! -e "$deb" ]] || { echo "error: refusing to overwrite $deb" >&2; exit 1; }
 
 if command -v dpkg-deb >/dev/null 2>&1; then
   dpkg-deb --root-owner-group --build "$root" "$deb" >/dev/null

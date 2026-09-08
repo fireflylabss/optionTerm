@@ -39,6 +39,13 @@ jobs:
             gcc-14 \
             g++-14 \
             libgdk-pixbuf-2.0-dev \
+            liblz4-dev \
+            libgnutls28-dev \
+            xvfb \
+            xauth \
+            dbus-daemon \
+            fonts-dejavu-core \
+            python3 \
             imagemagick \
             desktop-file-utils \
             file

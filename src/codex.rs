@@ -6,7 +6,12 @@
 //! id to its most recent title. A thread can be renamed, so the id is the
 //! stable key; the title only makes the exported filename friendlier.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -36,49 +41,78 @@ pub fn codex_home() -> Option<PathBuf> {
 
 /// Find the session file (rollout) for a thread id under the given sessions
 /// tree (`<home>/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`).
+#[cfg(test)]
 fn find_rollout(sessions_root: &Path, id: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(sessions_root)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    while let Some(dir) = dirs.pop() {
-        match std::fs::read_dir(&dir) {
-            Ok(entries) => {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        dirs.push(p);
-                    } else if p
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.ends_with(&format!("-{id}.jsonl")))
-                    {
-                        return Some(p.to_path_buf());
+    index_rollouts(sessions_root, &HashSet::from([id.to_string()]))
+        .0
+        .remove(id)
+}
+
+fn index_rollouts(
+    sessions_root: &Path,
+    wanted: &HashSet<String>,
+) -> (HashMap<String, PathBuf>, usize) {
+    let mut found: HashMap<String, PathBuf> = HashMap::new();
+    let mut dirs = vec![(sessions_root.to_path_buf(), 0usize)];
+    let mut visited = 0;
+    while let Some((dir, depth)) = dirs.pop() {
+        visited += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() && depth < 32 {
+                dirs.push((path, depth + 1));
+            } else if kind.is_file() {
+                let name = entry.file_name();
+                let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".jsonl")) else {
+                    continue;
+                };
+                if !stem.starts_with("rollout-") {
+                    continue;
+                }
+                for (offset, _) in stem.match_indices('-') {
+                    let id = &stem[offset + 1..];
+                    if wanted.contains(id) {
+                        let file = found.entry(id.to_string()).or_insert_with(|| path.clone());
+                        if path > *file {
+                            *file = path.clone();
+                        }
                     }
                 }
             }
-            Err(_) => continue,
         }
     }
-    None
+    (found, visited)
 }
 
 /// All saved threads, newest first (by the index's update time).
-pub fn list_threads() -> Vec<CodexThread> {
-    let Some(home) = codex_home() else {
-        return Vec::new();
-    };
+pub fn list_threads() -> impl Iterator<Item = CodexThread> {
+    codex_home()
+        .map(|home| list_threads_in(&home))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut thread| {
+            thread.cwd = session_cwd(&thread.file);
+            thread
+        })
+}
+
+fn list_threads_in(home: &Path) -> Vec<CodexThread> {
     let index = home.join("session_index.jsonl");
-    let Ok(text) = std::fs::read_to_string(&index) else {
+    let Ok(file) = File::open(&index) else {
         return Vec::new();
     };
     let sessions_root = home.join("sessions");
 
-    let mut entries: Vec<(String, String, i64)> = Vec::new();
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+    let mut entries: HashMap<String, (String, i64)> = HashMap::new();
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { return Vec::new() };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         let (Some(id), Some(updated)) = (
@@ -93,22 +127,27 @@ pub fn list_threads() -> Vec<CodexThread> {
             .unwrap_or("Untitled")
             .to_string();
         let ts = parse_iso_time(updated).unwrap_or(0);
-        if !entries.iter().any(|(eid, _, _)| eid == id) {
-            entries.push((id.to_string(), title, ts));
+        if entries.get(id).is_none_or(|(_, time)| ts >= *time) {
+            entries.insert(id.to_string(), (title, ts));
         }
     }
-    entries.sort_by_key(|e| std::cmp::Reverse(e.2));
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let wanted = entries.keys().cloned().collect();
+    let (mut files, _) = index_rollouts(&sessions_root, &wanted);
+    let mut entries: Vec<_> = entries.into_iter().collect();
+    entries.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.0.cmp(&b.0)));
 
     entries
         .into_iter()
-        .filter_map(|(id, title, ts)| {
-            let file = find_rollout(&sessions_root, &id)?;
-            let cwd = session_cwd(&file);
+        .filter_map(|(id, (title, ts))| {
+            let file = files.remove(&id)?;
             Some(CodexThread {
                 id,
                 title,
                 file,
-                cwd,
+                cwd: None,
                 time: ts,
             })
         })
@@ -117,11 +156,10 @@ pub fn list_threads() -> Vec<CodexThread> {
 
 /// The `session_meta.payload.cwd` for a rollout file.
 fn session_cwd(file: &Path) -> Option<PathBuf> {
-    let first = std::fs::read_to_string(file)
-        .ok()?
-        .lines()
-        .next()?
-        .to_string();
+    let mut first = String::new();
+    BufReader::new(File::open(file).ok()?)
+        .read_line(&mut first)
+        .ok()?;
     let v: Value = serde_json::from_str(&first).ok()?;
     v.get("payload")
         .and_then(|p| p.get("cwd"))
@@ -134,8 +172,7 @@ fn session_cwd(file: &Path) -> Option<PathBuf> {
 /// Messages are emitted in their original order; consecutive turns from the
 /// same side are joined under a single heading.
 pub fn render_markdown(file: &Path) -> Result<String> {
-    let text =
-        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let file = File::open(file).context("opening transcript")?;
 
     enum Role {
         User,
@@ -143,8 +180,9 @@ pub fn render_markdown(file: &Path) -> Result<String> {
     }
     // (role, text)
     let mut blocks: Vec<(Role, String)> = Vec::new();
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+    for line in BufReader::new(file).lines() {
+        let line = line.context("reading transcript")?;
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if v.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
@@ -190,6 +228,11 @@ pub fn render_markdown(file: &Path) -> Result<String> {
         out.push_str("\n\n");
     }
     Ok(out)
+}
+
+pub fn save_markdown(source: &Path, target: &Path) -> Result<()> {
+    let markdown = render_markdown(source)?;
+    crate::storage::atomic_write(target, markdown.as_bytes())
 }
 
 /// A filesystem- and Markdown-safe filename for a thread title.
@@ -247,6 +290,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn newest_index_entry_wins_after_rename() {
+        let dir = crate::test_support::TestDir::new("codex-index");
+        let sessions = dir.path().join("sessions/2026/05/22");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for id in ["abc123", "other"] {
+            std::fs::write(
+                sessions.join(format!("rollout-2026-05-22T01-45-24-{id}.jsonl")),
+                "{\"payload\":{\"cwd\":\"/tmp\"}}\n",
+            )
+            .unwrap();
+        }
+        let index = [
+            r#"{"id":"abc123","thread_name":"old","updated_at":"2026-05-22T01:00:00Z"}"#,
+            r#"{"id":"other","thread_name":"other","updated_at":"2026-05-22T02:00:00Z"}"#,
+            r#"{"id":"abc123","thread_name":"renamed","updated_at":"2026-05-22T03:00:00Z"}"#,
+            r#"{"id":"abc123","thread_name":"stale","updated_at":"2026-05-22T00:00:00Z"}"#,
+        ]
+        .join("\n");
+        std::fs::write(dir.path().join("session_index.jsonl"), index).unwrap();
+        let threads = list_threads_in(dir.path());
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].id, "abc123");
+        assert_eq!(threads[0].title, "renamed");
+    }
+
+    #[test]
+    fn cwd_reader_does_not_read_transcript_body() {
+        let dir = crate::test_support::TestDir::new("codex-header");
+        let file = dir.path().join("rollout.jsonl");
+        let mut data = b"{\"payload\":{\"cwd\":\"/tmp\"}}\n".to_vec();
+        data.extend([0xff; 1024]);
+        std::fs::write(&file, data).unwrap();
+        assert_eq!(session_cwd(&file), Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn indexes_all_threads_in_one_directory_walk() {
+        let dir = crate::test_support::TestDir::new("codex-scan");
+        let root = dir.path().join("sessions");
+        let day = root.join("2026/05/22");
+        std::fs::create_dir_all(&day).unwrap();
+        let wanted: HashSet<_> = (0..200).map(|i| format!("thread-{i}")).collect();
+        for id in &wanted {
+            std::fs::write(
+                day.join(format!("rollout-2026-05-22T01-45-24-{id}.jsonl")),
+                "",
+            )
+            .unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, day.join("loop")).unwrap();
+        let (files, visited) = index_rollouts(&root, &wanted);
+        assert_eq!(files.len(), 200);
+        assert_eq!(visited, 4);
+    }
+
+    #[test]
+    fn failed_export_preserves_existing_destination() {
+        let dir = crate::test_support::TestDir::new("codex-export");
+        let target = dir.path().join("saved.md");
+        std::fs::write(&target, "keep me").unwrap();
+        assert!(save_markdown(&dir.path().join("missing.jsonl"), &target).is_err());
+        let invalid = dir.path().join("invalid.jsonl");
+        std::fs::write(&invalid, [0xff]).unwrap();
+        assert!(save_markdown(&invalid, &target).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+    }
+
+    #[test]
     fn slugify_is_fragment_safe() {
         assert_eq!(
             slugify("Criar nosso Lovable.dev"),
@@ -266,9 +378,8 @@ mod tests {
     #[test]
     fn renders_known_message_types() {
         // A tiny fake rollout exercising both message kinds.
-        let dir = std::env::temp_dir().join("option-codex-test");
-        std::fs::create_dir_all(&dir).ok();
-        let file = dir.join("rollout-1.jsonl");
+        let dir = crate::test_support::TestDir::new("codex-render");
+        let file = dir.path().join("rollout-1.jsonl");
         let body = [
             "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp\"}}",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"oi\"}}",
@@ -282,12 +393,15 @@ mod tests {
         assert!(md.contains("## Codex"));
         assert!(md.contains("oi"));
         assert!(md.contains("olá"));
-        std::fs::remove_dir_all(&dir).ok();
+        let target = dir.path().join("transcript.md");
+        save_markdown(&file, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), md);
     }
 
     #[test]
     fn finds_rollout_nested() {
-        let root = std::env::temp_dir().join("option-codex-rollout-test");
+        let dir = crate::test_support::TestDir::new("codex-rollout");
+        let root = dir.path();
         let deep = root.join("sessions").join("2026").join("05").join("22");
         std::fs::create_dir_all(&deep).ok();
         std::fs::write(deep.join("rollout-2026-05-22T01-45-24-abc123.jsonl"), "").ok();
@@ -297,6 +411,5 @@ mod tests {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.ends_with("-abc123.jsonl"))
         }));
-        std::fs::remove_dir_all(&root).ok();
     }
 }

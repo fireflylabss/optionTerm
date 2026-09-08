@@ -29,6 +29,18 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.11-beta · 08/09/2026
+
+Deep stability and performance pass over state, restores and background I/O, with regression coverage up to 90 tests. This version was made for GNOME with a beta release channel on 08/09/2026 (v0.2.11-beta).
+
+- Fixed zoom actions crashing on a held settings borrow, cancelled tab-close wiping internal state, and session capture cloning the file-explorer pane into ghost terminals.
+- Restores keep tab order, active tab, unmapped pane cwd and split ratios; restart is serialized so a stale child exit no longer closes the view.
+- Agent probes, default-terminal setup and Codex export now run off the GTK thread; sidebar updates incrementally and the file tree loads asynchronously with caching and stale-result discard.
+- Codex indexing resolves rollouts in a single traversal with streaming reads; export writes atomically while preserving existing file permissions.
+- Config reload coalesces saves off-thread and never overwrites the file on invalid input; shortcuts reapply defaults/aliases immediately; `-e CMD --help` reaches the child and relative paths resolve against the caller.
+- Search follows pane identity and clears on close/Escape; link clicks use the normalized URI detector.
+- Packaging fails clearly without the pinned VTE fork, bundles WebKit helpers and license files, and the release smoke test is a real gate on Ubuntu 24.04.
+
 ## v0.2.10-beta · 24/08/2026
 
 IDE-style helpers, a full-bleed terminal and a recoverable crash report. This version was made for GNOME with a beta release channel on 24/08/2026 (v0.2.10-beta).

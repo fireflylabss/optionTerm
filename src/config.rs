@@ -214,6 +214,7 @@ pub struct Config {
     pub padding_x: f64,
     pub padding_y: f64,
     pub source: PathBuf,
+    pub(crate) source_text: Option<String>,
 }
 
 impl Default for Config {
@@ -259,6 +260,7 @@ impl Default for Config {
             padding_x: 0.0,
             padding_y: 0.0,
             source: PathBuf::new(),
+            source_text: None,
         }
     }
 }
@@ -268,15 +270,17 @@ impl Config {
     /// generated from built-in defaults (sidebar tabs).
     pub fn load() -> Result<Self> {
         let path = option_config_path();
-        if path.exists() {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let mut cfg = Self::parse_toml(&text)?;
-            cfg.source = path;
-            return Ok(cfg);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let mut cfg = Self::parse_toml(&text)?;
+                cfg.source = path;
+                return Ok(cfg);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).context("reading configuration"),
         }
 
-        let cfg = Self {
+        let mut cfg = Self {
             source: path.clone(),
             ..Self::default()
         };
@@ -287,13 +291,17 @@ impl Config {
             );
         } else {
             tracing::info!("generated default config at {}", path.display());
+            cfg.source_text = Some(cfg.to_toml());
         }
         Ok(cfg)
     }
 
     pub fn parse_toml(text: &str) -> Result<Self> {
         let table: toml::Table = text.parse().context("parsing config.toml")?;
-        let mut cfg = Self::default();
+        let mut cfg = Self {
+            source_text: Some(text.to_string()),
+            ..Self::default()
+        };
 
         let str_at = |section: &str, key: &str| -> Option<String> {
             table
@@ -305,7 +313,9 @@ impl Config {
         };
         let num_at = |section: &str, key: &str| -> Option<f64> {
             let v = table.get(section)?.as_table()?.get(key)?;
-            v.as_float().or_else(|| v.as_integer().map(|i| i as f64))
+            v.as_float()
+                .or_else(|| v.as_integer().map(|i| i as f64))
+                .filter(|v| v.is_finite())
         };
         let bool_at = |section: &str, key: &str| -> Option<bool> {
             table.get(section)?.as_table()?.get(key)?.as_bool()
@@ -317,7 +327,7 @@ impl Config {
             cfg.font_family = v;
         }
         if let Some(v) = num_at("font", "size") {
-            cfg.font_size = v as f32;
+            cfg.font_size = v.clamp(6.0, 40.0) as f32;
         }
         if let Some(v) = bool_at("font", "ligatures") {
             cfg.font_ligatures = v;
@@ -405,6 +415,21 @@ impl Config {
             cfg.scroll_lines = (v as i64).clamp(0, 1_000_000);
         }
         if let Some(items) = table.get("command").and_then(|v| v.as_array()) {
+            for item in items {
+                let args = item
+                    .get("argv")
+                    .and_then(|v| v.as_array())
+                    .context("command argv must be an array")?;
+                anyhow::ensure!(
+                    !args.is_empty() && args[0].as_str().is_some_and(|s| !s.is_empty()),
+                    "command executable must not be empty"
+                );
+                anyhow::ensure!(
+                    args.iter()
+                        .all(|v| v.as_str().is_some_and(|s| !s.contains('\0'))),
+                    "command arguments must be strings without NUL"
+                );
+            }
             cfg.commands = items
                 .iter()
                 .filter_map(|item| {
@@ -418,7 +443,6 @@ impl Config {
                         .as_array()?
                         .iter()
                         .filter_map(|v| v.as_str().map(str::to_string))
-                        .filter(|s| !s.is_empty())
                         .collect::<Vec<_>>();
                     if argv.is_empty() {
                         return None;
@@ -445,10 +469,10 @@ impl Config {
         // Ignored legacy key from ≤0.1.x (scrollback-content restore removed).
         let _ = bool_at("window", "session_restore_scrollback");
         if let Some(v) = num_at("window", "padding_x") {
-            cfg.padding_x = v;
+            cfg.padding_x = v.clamp(0.0, 32.0);
         }
         if let Some(v) = num_at("window", "padding_y") {
-            cfg.padding_y = v;
+            cfg.padding_y = v.clamp(0.0, 32.0);
         }
 
         let color_at = |key: &str| str_at("colors", key).as_deref().and_then(parse_color);
@@ -480,6 +504,7 @@ impl Config {
         Ok(cfg)
     }
 
+    #[cfg(test)]
     pub fn save(&self) -> Result<()> {
         let path = if self.source.as_os_str().is_empty() {
             option_config_path()
@@ -489,11 +514,48 @@ impl Config {
         self.write_to(&path)
     }
 
+    pub fn read_from(path: &std::path::Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).context("reading configuration")?;
+        let mut config = Self::parse_toml(&text)?;
+        config.source = path.to_path_buf();
+        Ok(config)
+    }
+
     pub fn write_to(&self, path: &std::path::Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+        let previous = read_document(path)?;
+        self.write_checked(path, previous.as_deref()).map(|_| ())
+    }
+
+    pub(crate) fn write_checked(
+        &self,
+        path: &std::path::Path,
+        expected: Option<&str>,
+    ) -> Result<String> {
+        let previous = read_document(path)?;
+        anyhow::ensure!(
+            previous.as_deref() == expected,
+            "configuration changed externally; reload before saving"
+        );
+        let mut text = self.to_toml();
+        if let Some(previous) = previous.as_deref() {
+            Self::parse_toml(previous).context("preserving invalid configuration")?;
+            let mut document: toml::Table = previous.parse()?;
+            if self.commands.is_empty() {
+                document.remove("command");
+            }
+            merge_document(&mut document, text.parse()?);
+            text = toml::to_string_pretty(&document)?;
         }
+        Self::parse_toml(&text)?;
+        anyhow::ensure!(
+            read_document(path)?.as_deref() == expected,
+            "configuration changed while saving"
+        );
+        crate::storage::atomic_write(path, text.as_bytes())?;
+        Ok(text)
+    }
+
+    pub fn to_toml(&self) -> String {
         let style = match self.cursor_style {
             CursorStyle::Block => "block",
             CursorStyle::Bar => "bar",
@@ -514,16 +576,16 @@ impl Config {
                 String::from("\n# Named launch presets — open from the command palette.\n");
             for cmd in &self.commands {
                 block.push_str("\n[[command]]\n");
-                block.push_str(&format!("name = \"{}\"\n", escape_toml(&cmd.name)));
+                block.push_str(&format!("name = {}\n", escape_toml(&cmd.name)));
                 let args = cmd
                     .argv
                     .iter()
-                    .map(|a| format!("\"{}\"", escape_toml(a)))
+                    .map(|a| escape_toml(a))
                     .collect::<Vec<_>>()
                     .join(", ");
                 block.push_str(&format!("argv = [{args}]\n"));
                 if let Some(cwd) = &cmd.cwd {
-                    block.push_str(&format!("cwd = \"{}\"\n", escape_toml(cwd)));
+                    block.push_str(&format!("cwd = {}\n", escape_toml(cwd)));
                 }
             }
             block
@@ -538,7 +600,7 @@ impl Config {
             r##"# optionTerm — ~/.option/terminal/config.toml
 
 [font]
-family = "{family}"
+family = {family}
 size = {size}
 ligatures = {ligatures}   # shape ->, =>, != as single glyphs
 use_system = {use_system}   # ignore `family` and use the desktop's monospace font
@@ -587,7 +649,7 @@ palette = [
 ]
 {commands}
 "##,
-            family = self.font_family,
+            family = escape_toml(&self.font_family),
             size = self.font_size,
             ligatures = self.font_ligatures,
             use_system = self.use_system_font,
@@ -621,8 +683,7 @@ palette = [
             sel_bg = hex(self.selection_background),
             sel_fg = hex(self.selection_foreground),
         );
-        crate::storage::atomic_write(path, text.as_bytes())
-            .with_context(|| format!("writing {}", path.display()))
+        text
     }
 }
 
@@ -637,10 +698,42 @@ pub fn option_config_path() -> PathBuf {
 }
 
 fn escape_toml(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    toml::Value::String(value.to_string()).to_string()
+}
+
+fn read_document(path: &std::path::Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).context("reading configuration before saving"),
+    }
+}
+
+fn merge_document(existing: &mut toml::Table, updated: toml::Table) {
+    for (key, mut value) in updated {
+        match (existing.get_mut(&key), &mut value) {
+            (Some(toml::Value::Table(old)), toml::Value::Table(new)) => {
+                merge_document(old, std::mem::take(new));
+                continue;
+            }
+            (Some(toml::Value::Array(old)), toml::Value::Array(new)) if key == "command" => {
+                for entry in new {
+                    if let Some(table) = entry.as_table_mut()
+                        && let Some(previous) = old
+                            .iter()
+                            .filter_map(|v| v.as_table())
+                            .find(|v| v.get("name") == table.get("name"))
+                    {
+                        let mut merged = previous.clone();
+                        merge_document(&mut merged, std::mem::take(table));
+                        *table = merged;
+                    }
+                }
+            }
+            _ => {}
+        }
+        existing.insert(key, value);
+    }
 }
 
 fn hex(c: RgbColor) -> String {
@@ -649,6 +742,9 @@ fn hex(c: RgbColor) -> String {
 
 fn parse_color(value: &str) -> Option<RgbColor> {
     let v = value.trim().trim_start_matches('#');
+    if !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     if v.len() == 6 {
         let r = u8::from_str_radix(&v[0..2], 16).ok()?;
         let g = u8::from_str_radix(&v[2..4], 16).ok()?;
@@ -692,6 +788,59 @@ fn default_ansi() -> [RgbColor; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_preserves_unknown_settings_and_escapes_strings() {
+        let dir = crate::test_support::TestDir::new("config-merge");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[custom]\nkeep = 'yes'\n[font]\nfuture = true\n").unwrap();
+        let config = Config {
+            font_family: "Font \"Quoted\"\\Name\t".into(),
+            ..Config::default()
+        };
+        config.write_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed = Config::parse_toml(&text).unwrap();
+        assert_eq!(parsed.font_family, config.font_family);
+        let table: toml::Table = text.parse().unwrap();
+        assert_eq!(table["custom"]["keep"].as_str(), Some("yes"));
+        assert_eq!(table["font"]["future"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn regression_invalid_existing_config_is_not_replaced() {
+        let dir = crate::test_support::TestDir::new("config-invalid");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "invalid = [").unwrap();
+        assert!(Config::default().write_to(&path).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid = [");
+    }
+
+    #[test]
+    fn regression_presets_preserve_empty_arguments_and_reject_mixed_types() {
+        let config =
+            Config::parse_toml("[[command]]\nname = 'test'\nargv = ['printf', '', 'x']\n").unwrap();
+        assert_eq!(config.commands[0].argv, ["printf", "", "x"]);
+        assert!(Config::parse_toml("[[command]]\nname = 'test'\nargv = ['printf', 3]\n").is_err());
+    }
+
+    #[test]
+    fn invalid_unicode_colors_do_not_panic() {
+        for value in ["éa", "aéabc", "\u{1f4a5}ab", "zzzzzz"] {
+            assert_eq!(parse_color(value), None);
+        }
+    }
+
+    #[test]
+    fn nonfinite_visual_values_use_safe_defaults() {
+        let cfg = Config::parse_toml(
+            "[font]\nsize = nan\n[window]\nbackground_opacity = nan\npadding_x = inf\npadding_y = -inf\n",
+        ).unwrap();
+        assert_eq!(cfg.font_size, Config::default().font_size);
+        assert_eq!(cfg.background_opacity, 1.0);
+        assert_eq!(cfg.padding_x, 0.0);
+        assert_eq!(cfg.padding_y, 0.0);
+    }
 
     #[test]
     fn ligatures_and_cwd_inheritance_default_on() {
