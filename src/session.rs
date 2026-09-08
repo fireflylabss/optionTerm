@@ -2,6 +2,7 @@
 //!
 //! The shape of the workspace is stored in `session.toml` (tabs, nested split
 //! layout with divider ratios, cwd per leaf, custom titles, window geometry).
+//! Named workspaces ("profiles") live as `sessions/<slug>.toml` next to it.
 //! Scrollback content is not restored.
 
 use std::path::PathBuf;
@@ -119,6 +120,8 @@ impl TabState {
 /// The whole restorable workspace.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Session {
+    /// Profile display name; `None` for the default, unnamed workspace.
+    pub name: Option<String>,
     pub tabs: Vec<TabState>,
     pub active: usize,
     pub width: Option<i32>,
@@ -131,13 +134,35 @@ impl Session {
         self.tabs.is_empty()
     }
 
-    /// `~/.option/terminal/session.toml`
-    pub fn path() -> PathBuf {
+    /// `~/.option/terminal/session.toml` — the default, unnamed workspace.
+    pub fn default_path() -> PathBuf {
         option_sdk::App::TERMINAL.session_toml()
     }
 
-    pub fn load() -> Option<Self> {
-        let text = std::fs::read_to_string(Self::path()).ok()?;
+    /// `~/.option/terminal/sessions/` — storage for named profiles.
+    pub fn profile_dir() -> PathBuf {
+        crate::config::config_dir().join("sessions")
+    }
+
+    /// Storage path for the default workspace (`None` or blank name) or a
+    /// named profile (slugified file name under [`Self::profile_dir`]).
+    pub fn path_for(name: Option<&str>) -> PathBuf {
+        match name.map(str::trim).filter(|n| !n.is_empty()) {
+            None => Self::default_path(),
+            Some(name) => Self::profile_dir().join(format!("{}.toml", slugify_session_name(name))),
+        }
+    }
+
+    /// Load the default (`None`) or a named profile; `None` when missing or
+    /// not restorable.
+    pub fn load(name: Option<&str>) -> Option<Self> {
+        Self::load_from(&Self::path_for(name))
+    }
+
+    /// Load a session from an explicit path (used by tests and a future
+    /// `--profile` CLI flag).
+    pub fn load_from(path: &std::path::Path) -> Option<Self> {
+        let text = std::fs::read_to_string(path).ok()?;
         match Self::parse(&text) {
             Ok(session) => Some(session).filter(|s| !s.is_empty()),
             Err(err) => {
@@ -149,11 +174,12 @@ impl Session {
         }
     }
 
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::path())
+    /// Save to the default (`None`) or a named profile path.
+    pub fn save(&self, name: Option<&str>) -> Result<()> {
+        self.save_to(&Self::path_for(name))
     }
 
-    fn save_to(&self, path: &std::path::Path) -> Result<()> {
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         let text = self.to_toml();
         Self::parse(&text).context("validating session before saving")?;
         match std::fs::read_to_string(path) {
@@ -169,15 +195,53 @@ impl Session {
             .with_context(|| format!("writing {}", path.display()))
     }
 
-    /// Remove a stored session (used when restore is turned off).
+    /// Remove a stored session (used when restore is turned off). Named
+    /// profiles are kept; only the default workspace is cleared.
     pub fn clear() {
-        let _ = std::fs::remove_file(Self::path());
+        let _ = std::fs::remove_file(Self::default_path());
         // Drop leftover VT dumps from ≤0.1.x installs.
         Self::clear_legacy_scrollback();
     }
 
+    /// Named profiles stored under [`Self::profile_dir`], sorted by file
+    /// name. Returns the profile slugs (not their display names).
+    pub fn list_profiles() -> Vec<String> {
+        Self::list_profiles_in(&Self::profile_dir())
+    }
+
+    /// Delete a named profile. The default, unnamed session is not a profile
+    /// and cannot be deleted through here.
+    pub fn delete_profile(name: &str) -> Result<()> {
+        anyhow::ensure!(!name.trim().is_empty(), "the default session is not a profile");
+        let path = Self::path_for(Some(name));
+        std::fs::remove_file(&path).with_context(|| format!("deleting {}", path.display()))
+    }
+
+    /// `list_profiles` over an explicit directory, so tests can use a
+    /// throwaway folder instead of the user's real profile storage.
+    fn list_profiles_in(dir: &std::path::Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     fn scrollback_dir() -> PathBuf {
-        Self::path()
+        Self::default_path()
             .parent()
             .map(|p| p.join("scrollback"))
             .unwrap_or_else(|| PathBuf::from("scrollback"))
@@ -190,6 +254,9 @@ impl Session {
 
     pub fn to_toml(&self) -> String {
         let mut out = String::from("# optionTerm session — regenerated on exit.\n");
+        if let Some(name) = &self.name {
+            out.push_str(&format!("name = {}\n", quote(name)));
+        }
         out.push_str(&format!("active = {}\n", self.active));
         if let Some(w) = self.width {
             out.push_str(&format!("width = {w}\n"));
@@ -232,6 +299,13 @@ impl Session {
         anyhow::ensure!(text.len() <= 4 * 1024 * 1024, "session exceeds size limit");
         let table: toml::Table = text.parse().context("parsing session.toml")?;
         let mut remaining_panes = 1024usize;
+        // Missing (or blank) `name` keeps older files loading as the default
+        // workspace.
+        let name = table
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty());
         let active = table
             .get("active")
             .and_then(|v| v.as_integer())
@@ -305,12 +379,37 @@ impl Session {
         }
         let active = active.min(tabs.len().saturating_sub(1));
         Ok(Self {
+            name,
             tabs,
             active,
             width,
             height,
             maximized,
         })
+    }
+}
+
+/// File-name-safe form of a profile name: lowercase ASCII letters, digits,
+/// `-`, `_` and `.` are kept; everything else collapses into a single `-`.
+pub fn slugify_session_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut dash = false;
+    for ch in name.chars().map(|ch| ch.to_ascii_lowercase()) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+            dash = ch == '-';
+        } else if !dash {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let slug = out.trim_matches('-');
+    // Degenerate names ("!!!" → "") must not become a hidden `.toml` file or a
+    // path fragment; give them a shared, harmless fallback.
+    if slug.is_empty() || slug == "." || slug == ".." {
+        "profile".to_string()
+    } else {
+        slug.to_string()
     }
 }
 
@@ -445,6 +544,7 @@ mod tests {
 
     fn sample() -> Session {
         Session {
+            name: None,
             tabs: vec![
                 TabState {
                     title: Some("build".into()),
@@ -483,6 +583,7 @@ mod tests {
     #[test]
     fn escapes_awkward_paths() {
         let session = Session {
+            name: None,
             tabs: vec![TabState {
                 title: Some("say \"hi\"".into()),
                 layout: PaneLayout::Leaf {
@@ -537,6 +638,7 @@ mod tests {
     #[test]
     fn browser_tab_round_trips() {
         let session = Session {
+            name: None,
             tabs: vec![
                 TabState {
                     title: Some("Docs".into()),
@@ -580,6 +682,7 @@ mod tests {
     #[test]
     fn nested_vertical_split_round_trips() {
         let session = Session {
+            name: None,
             tabs: vec![TabState {
                 title: None,
                 layout: PaneLayout::Split {
@@ -608,5 +711,95 @@ mod tests {
         };
         let back = Session::parse(&session.to_toml()).expect("parse");
         assert_eq!(back, session);
+    }
+
+    #[test]
+    fn path_for_maps_default_and_named_profiles() {
+        assert_eq!(Session::path_for(None), Session::default_path());
+        assert_eq!(Session::path_for(Some("")), Session::default_path());
+        assert_eq!(Session::path_for(Some("   ")), Session::default_path());
+        assert_eq!(
+            Session::path_for(Some("My Work")),
+            Session::profile_dir().join("my-work.toml")
+        );
+        assert_eq!(
+            Session::path_for(Some("dot.files")),
+            Session::profile_dir().join("dot.files.toml")
+        );
+    }
+
+    #[test]
+    fn slugify_is_filename_safe() {
+        assert_eq!(slugify_session_name("My Work"), "my-work");
+        assert_eq!(slugify_session_name("client/server 2!!"), "client-server-2");
+        assert_eq!(slugify_session_name("a_b.tar.gz"), "a_b.tar.gz");
+        assert_eq!(slugify_session_name("Ünïcode"), "n-code");
+        assert_eq!(slugify_session_name("---"), "profile");
+        assert_eq!(slugify_session_name(""), "profile");
+        assert_eq!(slugify_session_name("."), "profile");
+        assert_eq!(slugify_session_name(".."), "profile");
+    }
+
+    #[test]
+    fn list_profiles_only_sees_toml_files_sorted() {
+        let dir = crate::test_support::TestDir::new("session-list");
+        assert!(
+            Session::list_profiles_in(&dir.path().join("missing")).is_empty(),
+            "a missing profile directory lists nothing"
+        );
+        std::fs::write(dir.path().join("zz.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("nested.toml")).unwrap();
+        std::fs::write(dir.path().join("beta.toml"), "").unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), "").unwrap();
+        assert_eq!(Session::list_profiles_in(dir.path()), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn older_sessions_without_a_name_still_parse() {
+        let parsed = Session::parse("active = 0\n\n[[tab]]\npanes = [\"/a\"]\n").unwrap();
+        assert_eq!(parsed.name, None);
+        let named = Session::parse("name = \"My Work\"\nactive = 0\n\n[[tab]]\npanes = [\"/a\"]\n")
+            .unwrap();
+        assert_eq!(named.name.as_deref(), Some("My Work"));
+    }
+
+    /// End-to-end profile save/list/load/delete, run in a subprocess with an
+    /// isolated `OPTION_HOME` so the real `~/.option` tree is never touched.
+    #[test]
+    fn named_profiles_round_trip_in_an_isolated_home() {
+        if std::env::var_os("OPTIONTERM_PROFILE_TEST").is_none() {
+            let dir = crate::test_support::TestDir::new("session-profiles");
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "session::tests::named_profiles_round_trip_in_an_isolated_home",
+                    "--nocapture",
+                ])
+                .env("OPTIONTERM_PROFILE_TEST", dir.path())
+                .env("OPTION_HOME", dir.path().join(".option"))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+
+        let mut session = sample();
+        session.name = Some("My Work".into());
+        session.save(Some("My Work")).unwrap();
+        assert_eq!(Session::list_profiles(), ["my-work"]);
+        assert_eq!(Session::load(Some("My Work")), Some(session));
+        // Profile saves never touch the default, unnamed session.
+        assert_eq!(Session::load(None), None);
+        Session::delete_profile("My Work").unwrap();
+        assert!(Session::list_profiles().is_empty());
+        assert_eq!(Session::load(Some("My Work")), None);
+        // Deleting something missing (or the unnamed default) is an error.
+        assert!(Session::delete_profile("My Work").is_err());
+        assert!(Session::delete_profile("").is_err());
     }
 }

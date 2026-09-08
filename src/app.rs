@@ -2488,7 +2488,7 @@ fn build_window(
             session.width = Some(window.width().max(1));
             session.height = Some(window.height().max(1));
             session.maximized = window.is_maximized();
-            match session.save() {
+            match session.save(None) {
                 Ok(()) => {
                     tracing::info!("saved {} tab(s) for the next session", session.tabs.len())
                 }
@@ -2597,7 +2597,7 @@ fn build_window(
         config
             .borrow()
             .session_restore
-            .then(SessionState::load)
+            .then(|| SessionState::load(None))
             .flatten()
     };
 
@@ -2688,6 +2688,7 @@ fn capture_session(tab_view: &adw::TabView, pages: &Pages) -> SessionState {
         .map(|p| tab_view.page_position(&p).max(0) as usize)
         .unwrap_or(0);
     SessionState {
+        name: None,
         tabs,
         active,
         width: None,
@@ -3256,7 +3257,7 @@ mod tests {
             app.windows().is_empty(),
             "SIGTERM must not open a confirmation dialog"
         );
-        let session = SessionState::load().unwrap();
+        let session = SessionState::load(None).unwrap();
         assert_eq!(session.active, 1);
         assert_eq!(
             session
