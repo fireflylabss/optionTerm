@@ -1183,6 +1183,26 @@ mod tests {
     }
 
     #[gtk4::test]
+    fn text_scale_scales_glyphs_not_the_configured_base() {
+        let view = TerminalView::new(Config::default(), None, None).unwrap();
+        view.set_text_scale(1.5);
+        assert_eq!(view.set_font_size(10.0), 15.0);
+        assert_eq!(view.set_font_size(40.0), 60.0);
+        assert_eq!(view.config.borrow().font_size, 40.0);
+        let desc = view.terminal.font().expect("font description applied");
+        assert_eq!(
+            desc.size() as f64 / gtk4::pango::SCALE as f64,
+            60.0,
+            "VTE must render the scaled size, not the configured base"
+        );
+        // The desktop factor stays clamped to GNOME's text-scaling range.
+        view.set_text_scale(9.0);
+        assert_eq!(view.text_scale.get(), 3.0);
+        view.set_text_scale(0.1);
+        assert_eq!(view.text_scale.get(), 0.5);
+    }
+
+    #[gtk4::test]
     fn restart_waits_for_previous_child_without_closing_the_view() {
         let view = TerminalView::new(
             Config::default(),

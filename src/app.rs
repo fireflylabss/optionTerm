@@ -3405,6 +3405,12 @@ mod tests {
         assert!(chrome_font_css("Sans 11", 1.25).contains("13.75pt"));
     }
 
+    #[gtk4::test]
+    fn text_scale_factor_is_always_usable() {
+        let scale = text_scale_factor();
+        assert!(scale.is_finite() && scale > 0.0);
+    }
+
     #[test]
     fn zoom_releases_config_before_applying() {
         let config = RefCell::new(Config::default());
