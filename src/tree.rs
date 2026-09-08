@@ -911,4 +911,111 @@ mod tests {
         assert!(expanded.borrow().is_empty());
         window.destroy();
     }
+
+    #[test]
+    fn context_menu_model_offers_open_terminal_and_copy() {
+        let attribute = |model: &gio::MenuModel, index: i32, name: &str| {
+            model
+                .item_attribute_value(index, name, None)
+                .and_then(|value| value.str().map(str::to_string))
+        };
+        let menu = tree_context_menu();
+        assert_eq!(menu.n_items(), 2);
+        let open_section = menu.item_link(0, "section").expect("open section");
+        assert_eq!(open_section.n_items(), 2);
+        assert_eq!(
+            attribute(&open_section, 0, "label").as_deref(),
+            Some("Open")
+        );
+        assert_eq!(
+            attribute(&open_section, 0, "action").as_deref(),
+            Some("tree.open")
+        );
+        assert_eq!(
+            attribute(&open_section, 1, "label").as_deref(),
+            Some("Open in Terminal")
+        );
+        assert_eq!(
+            attribute(&open_section, 1, "action").as_deref(),
+            Some("tree.open-in-terminal")
+        );
+        let edit_section = menu.item_link(1, "section").expect("edit section");
+        assert_eq!(edit_section.n_items(), 1);
+        assert_eq!(
+            attribute(&edit_section, 0, "label").as_deref(),
+            Some("Copy Path")
+        );
+        assert_eq!(
+            attribute(&edit_section, 0, "action").as_deref(),
+            Some("tree.copy-path")
+        );
+    }
+
+    #[gtk4::test]
+    fn context_menu_actions_are_wired_per_row() {
+        let dir = crate::test_support::TestDir::new("tree-menu");
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(dir.path().join("file.txt"), "").unwrap();
+
+        let opened = Rc::new(Cell::new(0));
+        let terminals: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let copied: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let actions = TreeActions {
+            open: {
+                let opened = opened.clone();
+                Rc::new(move |_: PathBuf| opened.set(opened.get() + 1))
+            },
+            open_in_terminal: {
+                let terminals = terminals.clone();
+                Rc::new(move |dir: PathBuf| terminals.borrow_mut().push(dir))
+            },
+            copy_path: {
+                let copied = copied.clone();
+                Rc::new(move |path: &Path| copied.borrow_mut().push(path.to_path_buf()))
+            },
+        };
+
+        let list = gtk4::ListBox::new();
+        let expanded: Expanded = Rc::new(RefCell::new(HashSet::new()));
+        let rebuild: RebuildHolder = Rc::new(RefCell::new(None));
+        let snapshot = load_tree(request(dir.path(), HashSet::new(), None)).unwrap();
+        append_dir_rows(&list, dir.path(), 0, &expanded, &rebuild, &snapshot, &actions);
+        let window = gtk4::Window::new();
+        window.set_child(Some(&list));
+
+        // Dirs sort first: the folder at index 0, the file at index 1.
+        let folder_row = list.row_at_index(0).expect("folder row");
+        let file_row = list.row_at_index(1).expect("file row");
+
+        // Every row carries the secondary-click gesture behind the menu.
+        for row in [&folder_row, &file_row] {
+            let controllers = row.observe_controllers();
+            let secondary = (0..controllers.n_items()).any(|i| {
+                controllers
+                    .item(i)
+                    .and_downcast::<gtk4::GestureClick>()
+                    .is_some_and(|gesture| gesture.button() == gtk4::gdk::BUTTON_SECONDARY)
+            });
+            assert!(secondary, "row is missing the secondary-click gesture");
+        }
+
+        folder_row
+            .activate_action("tree.open-in-terminal", None)
+            .unwrap();
+        file_row.activate_action("tree.open", None).unwrap();
+        file_row.activate_action("tree.copy-path", None).unwrap();
+        // A file's terminal opens in its containing folder.
+        file_row
+            .activate_action("tree.open-in-terminal", None)
+            .unwrap();
+
+        assert_eq!(opened.get(), 1);
+        assert_eq!(
+            terminals.borrow().as_slice(),
+            [folder.clone(), dir.path().to_path_buf()]
+        );
+        assert_eq!(copied.borrow().as_slice(), [dir.path().join("file.txt")]);
+        window.destroy();
+    }
 }
