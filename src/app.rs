@@ -1902,6 +1902,7 @@ fn build_window(
         let config_c = config.clone();
         let bindings = bindings.clone();
         let add_tab_c = add_tab.clone();
+        let current_view = current_view.clone();
         window.add_action(&add_simple(
             "command-palette",
             Box::new(move || {
@@ -1913,7 +1914,18 @@ fn build_window(
                         }
                     })
                 };
-                show_command_palette(&window_c, &config_c, &bindings.borrow(), open_launch);
+                // Typed palette commands start where the focused pane is.
+                let current_dir: Rc<dyn Fn() -> Option<PathBuf>> = {
+                    let current_view = current_view.clone();
+                    Rc::new(move || current_view().and_then(|v| v.pwd()).map(PathBuf::from))
+                };
+                show_command_palette(
+                    &window_c,
+                    &config_c,
+                    &bindings.borrow(),
+                    open_launch,
+                    current_dir,
+                );
             }),
         ));
     }
