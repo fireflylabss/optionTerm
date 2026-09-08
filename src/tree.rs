@@ -496,7 +496,12 @@ fn tree_context_menu() -> gio::Menu {
 /// Give one tree row its context menu: a secondary-click `GestureClick`
 /// popping a `PopoverMenu`, and a `tree.*` action group bound to the row's
 /// path so menu entries operate on this row only.
-fn attach_row_context_menu(row: &gtk4::ListBoxRow, path: &Path, is_dir: bool, actions: &TreeActions) {
+fn attach_row_context_menu(
+    row: &gtk4::ListBoxRow,
+    path: &Path,
+    is_dir: bool,
+    actions: &TreeActions,
+) {
     let popover = gtk4::PopoverMenu::from_model(Some(&tree_context_menu()));
     popover.set_parent(row);
     popover.set_has_arrow(false);
@@ -670,15 +675,7 @@ fn append_dir_rows(
 
         list.append(&list_row);
         if already_expanded {
-            append_dir_rows(
-                list,
-                &path,
-                depth + 1,
-                expanded,
-                rebuild,
-                snapshot,
-                actions,
-            );
+            append_dir_rows(list, &path, depth + 1, expanded, rebuild, snapshot, actions);
         }
     }
 }
@@ -980,7 +977,15 @@ mod tests {
         let expanded: Expanded = Rc::new(RefCell::new(HashSet::new()));
         let rebuild: RebuildHolder = Rc::new(RefCell::new(None));
         let snapshot = load_tree(request(dir.path(), HashSet::new(), None)).unwrap();
-        append_dir_rows(&list, dir.path(), 0, &expanded, &rebuild, &snapshot, &actions);
+        append_dir_rows(
+            &list,
+            dir.path(),
+            0,
+            &expanded,
+            &rebuild,
+            &snapshot,
+            &actions,
+        );
         let window = gtk4::Window::new();
         window.set_child(Some(&list));
 
