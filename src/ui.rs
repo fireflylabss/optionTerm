@@ -16,6 +16,7 @@ use crate::{
         Theme,
     },
     keys::Bindings,
+    session::slugify_session_name,
     terminal::TerminalView,
 };
 
@@ -649,6 +650,252 @@ pub fn show_command_palette(
 
     dialog.present(Some(window));
     entry.grab_focus();
+}
+
+/// Named-workspace picker: save the current session under a typed name, then
+/// load or delete existing profiles. `current` prefills the name row when a
+/// profile is active. The callbacks receive profile names verbatim (typed
+/// text for save, listed slug for load/delete).
+#[allow(clippy::too_many_arguments)]
+pub fn show_session_profile_picker(
+    window: &adw::ApplicationWindow,
+    profiles: Vec<String>,
+    current: Option<String>,
+    on_save: Rc<dyn Fn(String)>,
+    on_load: Rc<dyn Fn(String)>,
+    on_delete: Rc<dyn Fn(String)>,
+) {
+    let dialog = adw::Dialog::builder()
+        .title("Session Profiles")
+        .content_width(440)
+        .content_height(480)
+        .build();
+
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    root.set_margin_top(6);
+    root.set_margin_bottom(6);
+    root.set_margin_start(6);
+    root.set_margin_end(6);
+
+    // --- Save the current workspace under a new name ---
+    let save_group = adw::PreferencesGroup::new();
+    let name_row = adw::EntryRow::builder().title("Profile name").build();
+    if let Some(current) = current.as_deref().filter(|c| !c.is_empty()) {
+        name_row.set_text(current);
+    }
+    save_group.add(&name_row);
+
+    let list = gtk4::ListBox::new();
+    list.set_selection_mode(gtk4::SelectionMode::None);
+    list.add_css_class("boxed-list");
+
+    // Slugs in row order; the filter maps `row.index()` into this list, so
+    // every row addition/removal has to keep it in sync.
+    let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(profiles));
+
+    // One existing profile: name, Load, Delete. Loading closes the picker
+    // first — it swaps the whole workspace underneath.
+    let make_row: Rc<dyn Fn(&str) -> gtk4::ListBoxRow> = {
+        let names = names.clone();
+        let list = list.clone();
+        let dialog = dialog.clone();
+        let on_load = on_load.clone();
+        let on_delete = on_delete.clone();
+        Rc::new(move |name: &str| {
+            let name = name.to_string();
+            let row = gtk4::ListBoxRow::new();
+            let hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+            hbox.set_margin_top(8);
+            hbox.set_margin_bottom(8);
+            hbox.set_margin_start(12);
+            hbox.set_margin_end(12);
+            let label = gtk4::Label::new(Some(name.as_str()));
+            label.set_halign(gtk4::Align::Start);
+            label.set_hexpand(true);
+            hbox.append(&label);
+
+            let load = gtk4::Button::with_label("Load");
+            load.add_css_class("flat");
+            {
+                let dialog = dialog.clone();
+                let on_load = on_load.clone();
+                let name = name.clone();
+                load.connect_clicked(move |_| {
+                    dialog.close();
+                    on_load(name.clone());
+                });
+            }
+            hbox.append(&load);
+
+            let delete = gtk4::Button::from_icon_name("user-trash-symbolic");
+            delete.add_css_class("flat");
+            delete.add_css_class("destructive-action");
+            delete.set_tooltip_text(Some("Delete profile"));
+            {
+                let on_delete = on_delete.clone();
+                let names = names.clone();
+                let list = list.clone();
+                let row_for_delete = row.clone();
+                let name = name.clone();
+                delete.connect_clicked(move |_| {
+                    on_delete(name.clone());
+                    let index = row_for_delete.index();
+                    if index >= 0 {
+                        names.borrow_mut().remove(index as usize);
+                        list.remove(&row_for_delete);
+                    }
+                });
+            }
+            hbox.append(&delete);
+
+            row.set_child(Some(&hbox));
+            row
+        })
+    };
+
+    for name in names.borrow().iter() {
+        let row = make_row(name);
+        list.append(&row);
+    }
+
+    let save_row = gtk4::Button::with_label("Save Current Session");
+    save_row.add_css_class("suggested-action");
+    save_row.set_hexpand(true);
+    {
+        let name_entry = name_row.clone();
+        let names = names.clone();
+        let list = list.clone();
+        let on_save = on_save.clone();
+        let make_row = make_row.clone();
+        let do_save: Rc<dyn Fn()> = Rc::new(move || {
+            let name = name_entry.text().trim().to_string();
+            if name.is_empty() {
+                name_entry.add_css_class("error");
+                return;
+            }
+            name_entry.remove_css_class("error");
+            on_save(name.clone());
+            // Show the saved profile right away so it can be loaded without
+            // reopening the picker.
+            let slug = slugify_session_name(&name);
+            let mut names = names.borrow_mut();
+            if !names.contains(&slug) {
+                names.push(slug.clone());
+                drop(names);
+                let row = make_row(&slug);
+                list.append(&row);
+            }
+        });
+        {
+            let do_save = do_save.clone();
+            save_row.connect_clicked(move |_| do_save());
+        }
+        {
+            let do_save = do_save.clone();
+            name_row.connect_entry_activated(move |_| do_save());
+        }
+    }
+    root.append(&save_group);
+    root.append(&save_row);
+
+    // --- Existing profiles, filtered as you type ---
+    let search = gtk4::SearchEntry::new();
+    search.set_placeholder_text(Some("Search profiles…"));
+    root.append(&search);
+
+    let scroll = gtk4::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&list));
+    root.append(&scroll);
+
+    // Same split-on-whitespace matching as the command palette.
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    {
+        let query = query.clone();
+        let names = names.clone();
+        list.set_filter_func(move |row| {
+            let q = query.borrow();
+            if q.is_empty() {
+                return true;
+            }
+            names
+                .borrow()
+                .get(row.index() as usize)
+                .map(|name| {
+                    let needle = name.to_lowercase();
+                    q.split_whitespace().all(|w| needle.contains(w))
+                })
+                .unwrap_or(false)
+        });
+    }
+    {
+        let query = query.clone();
+        let list = list.clone();
+        search.connect_search_changed(move |e| {
+            *query.borrow_mut() = e.text().to_lowercase();
+            list.invalidate_filter();
+        });
+    }
+
+    // Activating a row (or Enter in the search) loads it.
+    let activate_row: Rc<dyn Fn(&gtk4::ListBoxRow)> = {
+        let names = names.clone();
+        let dialog = dialog.clone();
+        let on_load = on_load.clone();
+        Rc::new(move |row: &gtk4::ListBoxRow| {
+            let Some(name) = names.borrow().get(row.index() as usize).cloned() else {
+                return;
+            };
+            dialog.close();
+            on_load(name);
+        })
+    };
+    {
+        let activate_row = activate_row.clone();
+        list.connect_row_activated(move |_, row| activate_row(row));
+    }
+    {
+        let activate_row = activate_row.clone();
+        let list = list.clone();
+        search.connect_activate(move |_| {
+            let mut idx = 0;
+            while let Some(row) = list.row_at_index(idx) {
+                if row.is_mapped() {
+                    activate_row(&row);
+                    return;
+                }
+                idx += 1;
+            }
+        });
+    }
+
+    dialog.set_child(Some(&root));
+
+    // Escape has to be handled twice over (see the command palette).
+    {
+        let dialog = dialog.clone();
+        search.connect_stop_search(move |_| {
+            dialog.close();
+        });
+    }
+    {
+        let dialog_for_keys = dialog.clone();
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                dialog_for_keys.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        dialog.add_controller(keys);
+    }
+    // Clicking outside dismisses it.
+    dialog.set_can_close(true);
+
+    dialog.present(Some(window));
+    name_row.grab_focus();
 }
 
 type ConfigUpdater = Rc<dyn Fn(&Config)>;
