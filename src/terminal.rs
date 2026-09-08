@@ -44,6 +44,11 @@ pub struct TerminalView {
     overlay: Overlay,
     terminal: VteTerminal,
     config: Rc<RefCell<Config>>,
+    /// Desktop-derived text scale for this pane's glyphs. The configured
+    /// `font_size` stays the unscaled base; only rendering multiplies.
+    /// Shared with the system-monospace-font handler so a font-name change
+    /// re-applies the font at the same scale.
+    text_scale: Rc<Cell<f64>>,
     child_pid: Rc<Cell<i32>>,
     cwd: Rc<RefCell<Option<PathBuf>>>,
     /// Optional one-shot command argv (instead of the login shell).
@@ -86,7 +91,10 @@ impl TerminalView {
         terminal.set_enable_sixel(true);
 
         let url_regexes = install_url_matches(&terminal);
-        apply_visuals(&terminal, &config, None, None);
+        // Starts at 1.0; `app.rs` pushes the desktop factor in right after
+        // construction (and again whenever the desktop settings change).
+        let text_scale = Rc::new(Cell::new(1.0));
+        apply_visuals(&terminal, &config, None, None, text_scale.get());
 
         let scroll = ScrolledWindow::builder()
             .child(&terminal)
@@ -389,12 +397,13 @@ impl TerminalView {
         let font_settings = desktop_font_settings().map(|settings| {
             let terminal = terminal.downgrade();
             let config = config.clone();
+            let text_scale = text_scale.clone();
             let handler = settings.connect_changed(Some("monospace-font-name"), move |_, _| {
                 let config = config.borrow();
                 if config.use_system_font
                     && let Some(terminal) = terminal.upgrade()
                 {
-                    apply_font(&terminal, &config);
+                    apply_font(&terminal, &config, text_scale.get());
                 }
             });
             (settings, handler)
@@ -403,6 +412,7 @@ impl TerminalView {
             overlay,
             terminal,
             config,
+            text_scale,
             child_pid,
             cwd,
             command,
@@ -503,6 +513,7 @@ impl TerminalView {
             &self.config.borrow(),
             Some(&self.bg_provider),
             Some(&self.overlay_name),
+            self.text_scale.get(),
         );
         self.sync_scroll_chrome();
     }
@@ -514,6 +525,7 @@ impl TerminalView {
             config,
             Some(&self.bg_provider),
             Some(&self.overlay_name),
+            self.text_scale.get(),
         );
         self.sync_scroll_chrome();
     }
@@ -536,11 +548,24 @@ impl TerminalView {
         self.terminal.select_all();
     }
 
+    /// Stores the requested (unscaled) size and returns the size the grid
+    /// will actually render at, i.e. the base multiplied by the desktop
+    /// text scale, clamped to the effective range.
     pub fn set_font_size(&self, size: f32) -> f32 {
         let size = size.clamp(6.0, 40.0);
         self.config.borrow_mut().font_size = size;
-        apply_font(&self.terminal, &self.config.borrow());
-        size
+        let scale = self.text_scale.get();
+        apply_font(&self.terminal, &self.config.borrow(), scale);
+        (size as f64 * scale).clamp(6.0, 80.0) as f32
+    }
+
+    /// Desktop-derived text scale for this pane, clamped to GNOME's
+    /// text-scaling-factor range. The configured `font_size` is untouched;
+    /// only the rendered glyphs grow or shrink.
+    pub fn set_text_scale(&self, scale: f64) {
+        let scale = scale.clamp(0.5, 3.0);
+        self.text_scale.set(scale);
+        apply_font(&self.terminal, &self.config.borrow(), scale);
     }
 
     pub fn pwd(&self) -> Option<String> {
@@ -820,8 +845,9 @@ fn apply_visuals(
     config: &Config,
     bg_provider: Option<&gtk4::CssProvider>,
     overlay_name: Option<&str>,
+    text_scale: f64,
 ) {
-    apply_font(terminal, config);
+    apply_font(terminal, config, text_scale);
     apply_colors(terminal, config);
     apply_cursor(terminal, config);
     terminal.set_scroll_on_keystroke(config.scroll_on_keystroke);
@@ -862,13 +888,14 @@ fn apply_surface_bg(provider: &gtk4::CssProvider, name: &str, config: &Config) {
     provider.load_from_string(&css);
 }
 
-fn apply_font(terminal: &VteTerminal, config: &Config) {
+fn apply_font(terminal: &VteTerminal, config: &Config, text_scale: f64) {
     let family = if config.use_system_font {
         system_monospace()
     } else {
         config.font_family.clone()
     };
-    let desc = FontDescription::from_string(&format!("{family} {}", config.font_size));
+    let effective = (config.font_size as f64 * text_scale).clamp(6.0, 80.0) as f32;
+    let desc = FontDescription::from_string(&format!("{family} {effective}"));
     terminal.set_font(Some(&desc));
 }
 

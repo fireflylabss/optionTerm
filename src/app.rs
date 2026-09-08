@@ -673,6 +673,11 @@ fn build_window(
     // Follow desktop GTK settings for chrome font / scale / decorations.
     apply_desktop_chrome(&header, &window);
 
+    // Terminal glyphs follow the same desktop text scale as the chrome
+    // (see `text_scale_factor`). Views pick it up at creation, and the
+    // change handlers below re-push it when the desktop settings move.
+    let text_scale = Rc::new(Cell::new(text_scale_factor()));
+
     // Rebuild the sidebar rows from the current TabView pages.
     let sidebar_syncing = Rc::new(Cell::new(false));
     let rebuild_sidebar = bind_sidebar(&sidebar_list, &tab_view, sidebar_syncing.clone());
@@ -828,6 +833,43 @@ fn build_window(
     let focused: Focused = Rc::new(RefCell::new(None));
     let search_target_hook: CallbackSlot = Rc::new(RefCell::new(None));
 
+    // Desktop text-scale changes must reach every live terminal view, not
+    // just the chrome. Handlers are dropped with the window so the settings
+    // singletons never keep destroyed panes alive.
+    {
+        let push_scale = {
+            let pages = pages.clone();
+            let text_scale = text_scale.clone();
+            Rc::new(move || {
+                let scale = text_scale_factor();
+                text_scale.set(scale);
+                for (_, views) in pages.borrow().iter() {
+                    for view in views {
+                        view.set_text_scale(scale);
+                    }
+                }
+            })
+        };
+        let mut handlers: Vec<(glib::Object, glib::SignalHandlerId)> = Vec::new();
+        if let Some(settings) = gtk4::Settings::default() {
+            let push_scale = push_scale.clone();
+            let handler = settings.connect_gtk_xft_dpi_notify(move |_| push_scale());
+            handlers.push((settings.upcast(), handler));
+        }
+        if let Some(gnome_interface) = gnome_interface_settings("text-scaling-factor") {
+            let push_scale = push_scale.clone();
+            let handler = gnome_interface
+                .connect_changed(Some("text-scaling-factor"), move |_, _| push_scale());
+            handlers.push((gnome_interface.upcast(), handler));
+        }
+        let handlers = RefCell::new(handlers);
+        window.connect_destroy(move |_| {
+            for (object, handler) in handlers.borrow_mut().drain(..) {
+                object.disconnect(handler);
+            }
+        });
+    }
+
     // Per-tab file-tree panels (shown/collapsed via `win.file-tree`).
     let file_trees: FileTrees = Rc::new(RefCell::new(std::collections::HashMap::new()));
 
@@ -858,6 +900,7 @@ fn build_window(
         let window = window.clone();
         let focused = focused.clone();
         let file_trees = file_trees.clone();
+        let text_scale = text_scale.clone();
         Rc::new(
             move |page_slot: Rc<RefCell<Option<adw::TabPage>>>,
                   cwd: Option<PathBuf>,
@@ -865,6 +908,9 @@ fn build_window(
                   -> anyhow::Result<Rc<TerminalView>> {
                 let cfg = config.borrow().clone();
                 let view = Rc::new(TerminalView::new(cfg, cwd, command)?);
+                // Desktop text scale, before the child spawns and the grid
+                // takes its first measurement.
+                view.set_text_scale(text_scale.get());
                 attach_context_menu(&view);
 
                 {
@@ -1711,7 +1757,10 @@ fn build_window(
                     applied = view.set_font_size(size);
                 }
             }
-            config.borrow_mut().font_size = applied;
+            // `applied` is the scaled size (for the toast); the stored and
+            // persisted base must stay unscaled so zoom steps and config
+            // saves never bake the desktop factor in.
+            config.borrow_mut().font_size = size;
             save_config();
             sync_quick();
             toast(&format!("Font: {applied:.0} pt"));
@@ -2811,7 +2860,44 @@ fn window_css(window: &adw::ApplicationWindow, provider: &gtk4::CssProvider, pri
     }
 }
 
-fn chrome_font_css(font: &str, dpi_scale: f64, text_scale: f64) -> String {
+/// `org.gnome.desktop.interface` settings, when the schema exposes `key`.
+fn gnome_interface_settings(key: &str) -> Option<gio::Settings> {
+    gio::SettingsSchemaSource::default()
+        .and_then(|source| source.lookup("org.gnome.desktop.interface", true))
+        .filter(|schema| schema.has_key(key))
+        .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None))
+}
+
+/// GNOME folds text scaling into the Xft DPI on many setups, so the two
+/// factors must not multiply blindly: only pass the text factor through
+/// when the DPI does not already encode it.
+fn combined_text_scale(dpi_scale: f64, text_scale: f64) -> f64 {
+    if (dpi_scale - text_scale).abs() < 0.01 {
+        1.0
+    } else {
+        text_scale
+    }
+}
+
+/// Desktop text scale for terminal glyphs: GNOME's `text-scaling-factor`
+/// (org.gnome.desktop.interface), unless the Xft DPI already applies it.
+/// Returns 1.0 when the schema source or key is unavailable, or the value
+/// is non-finite or non-positive.
+pub fn text_scale_factor() -> f64 {
+    let dpi_scale = gtk4::Settings::default()
+        .map(|settings| settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0)
+        .map(|scale| if scale <= 0.0 { 1.0 } else { scale })
+        .unwrap_or(1.0);
+    // `value()` returns a Variant without panicking; `get::<f64>()` is
+    // fallible for a missing schema/key on non-GNOME desktops.
+    let text_scale = gnome_interface_settings("text-scaling-factor")
+        .and_then(|settings| settings.value("text-scaling-factor").get::<f64>())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    combined_text_scale(dpi_scale, text_scale)
+}
+
+fn chrome_font_css(font: &str, text_scale: f64) -> String {
     let font = gtk4::pango::FontDescription::from_string(font);
     let family = font
         .family()
@@ -2819,14 +2905,9 @@ fn chrome_font_css(font: &str, dpi_scale: f64, text_scale: f64) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
     let size = (font.size() as f64 / gtk4::pango::SCALE as f64).max(1.0);
-    let extra_scale = if (dpi_scale - text_scale).abs() < 0.01 {
-        1.0
-    } else {
-        text_scale
-    };
     format!(
         ".option-chrome {{ font-family: \"{family}\"; font-size: {}pt; }}",
-        size * extra_scale
+        size * text_scale
     )
 }
 
@@ -2866,27 +2947,13 @@ fn apply_desktop_chrome(header: &adw::HeaderBar, window: &adw::ApplicationWindow
     }
     // GNOME's text-scaling-factor (org.gnome.desktop.interface) is what the
     // system uses to scale UI text; honoring it keeps our chrome in step.
-    let gnome_interface = gio::SettingsSchemaSource::default()
-        .and_then(|source| source.lookup("org.gnome.desktop.interface", true))
-        .filter(|schema| schema.has_key("text-scaling-factor"))
-        .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
+    let gnome_interface = gnome_interface_settings("text-scaling-factor");
     let apply_font = {
         let settings = settings.clone();
         let provider = provider.clone();
-        let gnome_interface = gnome_interface.clone();
         Rc::new(move || {
             let font = settings.gtk_font_name().unwrap_or_else(|| "Sans 10".into());
-            let dpi_scale = settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0;
-            let dpi_scale = if dpi_scale <= 0.0 { 1.0 } else { dpi_scale };
-            // Multiply the DPI-derived scale by the GNOME text-scaling-factor.
-            // `value()` returns a Variant without panicking; `get::<f64>()` is
-            // fallible for a missing schema/key on non-GNOME desktops.
-            let text_scale = gnome_interface
-                .as_ref()
-                .and_then(|settings| settings.value("text-scaling-factor").get::<f64>())
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .unwrap_or(1.0);
-            let css = chrome_font_css(&font, dpi_scale, text_scale);
+            let css = chrome_font_css(&font, text_scale_factor());
             provider.load_from_string(&css);
         })
     };
@@ -3324,7 +3391,10 @@ mod tests {
 
     #[gtk4::test]
     fn desktop_css_is_valid_and_does_not_double_text_scaling() {
-        let css = chrome_font_css("Sans 11", 1.25, 1.25);
+        // Setups that fold the factor into the Xft DPI must not scale twice.
+        assert_eq!(combined_text_scale(1.25, 1.25), 1.0);
+        assert_eq!(combined_text_scale(1.0, 1.25), 1.25);
+        let css = chrome_font_css("Sans 11", 1.0);
         assert!(css.contains("11pt"));
         let provider = gtk4::CssProvider::new();
         let errors = Rc::new(Cell::new(0));
@@ -3332,7 +3402,7 @@ mod tests {
         provider.connect_parsing_error(move |_, _, _| count.set(count.get() + 1));
         provider.load_from_string(&css);
         assert_eq!(errors.get(), 0);
-        assert!(chrome_font_css("Sans 11", 1.0, 1.25).contains("13.75pt"));
+        assert!(chrome_font_css("Sans 11", 1.25).contains("13.75pt"));
     }
 
     #[test]
