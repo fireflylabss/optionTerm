@@ -212,7 +212,10 @@ impl Session {
     /// Delete a named profile. The default, unnamed session is not a profile
     /// and cannot be deleted through here.
     pub fn delete_profile(name: &str) -> Result<()> {
-        anyhow::ensure!(!name.trim().is_empty(), "the default session is not a profile");
+        anyhow::ensure!(
+            !name.trim().is_empty(),
+            "the default session is not a profile"
+        );
         let path = Self::path_for(Some(name));
         std::fs::remove_file(&path).with_context(|| format!("deleting {}", path.display()))
     }
@@ -229,7 +232,9 @@ impl Session {
             .filter_map(|entry| {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
                 } else {
                     None
                 }
