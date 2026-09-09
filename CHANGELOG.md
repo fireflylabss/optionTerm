@@ -29,6 +29,17 @@ We only call something **stable** when we mean it. While a change is being valid
 
 </details>
 
+## v0.2.12-beta · 08/09/2026
+
+Five new desktop-facing features plus a crash fix in the terminal's ctrl/shift-click link handler. This version was made for GNOME with a beta release channel on 08/09/2026 (v0.2.12-beta).
+
+- The terminal font now respects GNOME's `text-scaling-factor`: the desktop scale multiplies the configured base size when rendering, without being persisted into `config.toml`, and per-pane zoom keeps working on the unscaled base.
+- "Save Codex Thread" (Ctrl+Shift+D) now opens a searchable picker listing every indexed conversation with relative timestamps, instead of always exporting the newest one; each row can also open an already saved Markdown transcript.
+- The file explorer rows gained a right-click context menu with Open, Open in Terminal and Copy Path actions.
+- The command palette (Ctrl+Shift+P) runs arbitrary typed commands: a pinned "Run: …" row appears when the query matches no preset, parsed with shell-like quoting and escaping, launched in the focused pane's directory.
+- Named session profiles: "Save Session As…" (Ctrl+Shift+S), "Load Session…" (Ctrl+O) and "Manage Sessions…" save, load and delete whole workspaces under `~/.option/terminal/sessions/`, preserving tabs, splits, cwd and window geometry.
+- Fixed a segfault when ctrl/shift-clicking text in the terminal, caused by the broken `check_regex_simple_at` array binding; link hit-testing now uses `check_match_at` on the installed match regexes.
+
 ## v0.2.11-beta · 08/09/2026
 
 Deep stability and performance pass over state, restores and background I/O, with regression coverage up to 90 tests. This version was made for GNOME with a beta release channel on 08/09/2026 (v0.2.11-beta).
