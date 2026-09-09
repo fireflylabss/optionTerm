@@ -104,6 +104,11 @@
 - No fork VTE fixado, chamar `set_pty(None)` ao encerrar um terminal com PTY
   ativo causou SIGSEGV em `_vte_pty_get_impl`. Cancelar spawn, encerrar o filho
   próprio e liberar as referências, sem desconectar o PTY por essa chamada.
+- `check_regex_simple_at` do vte4 0.8 é quebrado: passa `&[&Regex]` onde a C
+  API quer `VteRegex*[]`, o assert de `eMatch` dispara, o retorno `-1` é lido
+  como sucesso e o binding faz `strlen(NULL)` → SIGSEGV. Para hit-test de
+  matches use `check_match_at(x, y)`, que consulta os regexes instalados via
+  `match_add_regex`.
 - `terminal-split` identifica divisores de terminais: o Paned do explorador
   não pode entrar na captura de sessão, no zoom ou na equalização.
 

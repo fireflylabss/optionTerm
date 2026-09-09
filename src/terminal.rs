@@ -90,7 +90,7 @@ impl TerminalView {
         // VTE's standard inline-image toggle.
         terminal.set_enable_sixel(true);
 
-        let url_regexes = install_url_matches(&terminal);
+        install_url_matches(&terminal);
         // Starts at 1.0; `app.rs` pushes the desktop factor in right after
         // construction (and again whenever the desktop settings change).
         let text_scale = Rc::new(Cell::new(1.0));
@@ -239,7 +239,6 @@ impl TerminalView {
         {
             let terminal_c = terminal.downgrade();
             let on_link = on_link.clone();
-            let url_regexes = url_regexes.clone();
             let initial_cwd = cwd.clone();
             let click = GestureClick::new();
             click.set_button(1);
@@ -256,15 +255,18 @@ impl TerminalView {
                 {
                     return;
                 }
+                // check_match_at looks up the regexes installed with
+                // match_add_regex. (vte4's check_regex_simple_at passes a
+                // `&[&Regex]` array where VTE wants `VteRegex*[]`, trips the
+                // eMatch assert and then strlen's the NULL-filled result —
+                // do not reintroduce it.)
                 let uri = terminal_c
                     .hyperlink_hover_uri()
                     .map(|s| s.to_string())
                     .or_else(|| {
-                        let refs: Vec<&Regex> = url_regexes.iter().collect();
-                        terminal_c
-                            .check_regex_simple_at(x, y, &refs, 0)
-                            .into_iter()
-                            .find(|value| !value.is_empty())
+                        let (matched, _tag) = terminal_c.check_match_at(x, y);
+                        matched
+                            .filter(|value| !value.is_empty())
                             .map(|s| s.to_string())
                     });
                 if let Some(uri) = uri {
@@ -937,7 +939,7 @@ fn rgba(c: RgbColor, alpha: f32) -> RGBA {
     )
 }
 
-fn install_url_matches(terminal: &VteTerminal) -> Rc<Vec<Regex>> {
+fn install_url_matches(terminal: &VteTerminal) {
     // VTE requires PCRE2_MULTILINE on match regexes (runtime assert).
     const PCRE2_MULTILINE: u32 = 0x0000_0400;
     const PATTERNS: &[&str] = &[
@@ -947,18 +949,17 @@ fn install_url_matches(terminal: &VteTerminal) -> Rc<Vec<Regex>> {
         r"mailto:[[:alnum:][:punct:]]+",
         r#"(?:file://|~?/|\./|\.\./)[^\s<>"']+|(?:[[:alnum:]_.-]+/)+[[:alnum:]_.:-]+|[[:alnum:]_.-]+\.[[:alnum:]_:-]+"#,
     ];
-    let mut out = Vec::new();
     for pat in PATTERNS {
         match Regex::for_match(pat, PCRE2_MULTILINE) {
+            // match_add_regex refs the regex internally, so the Rust
+            // wrapper can be dropped right after installing it.
             Ok(re) => {
                 let id = terminal.match_add_regex(&re, 0);
                 terminal.match_set_cursor_name(id, "pointer");
-                out.push(re);
             }
             Err(err) => tracing::debug!("url match regex failed: {err}"),
         }
     }
-    Rc::new(out)
 }
 
 fn sanitize_title(title: &str) -> String {
