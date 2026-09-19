@@ -3,22 +3,18 @@
 mod agents;
 mod app;
 mod browser;
-mod codex;
-mod config;
 mod config_watch;
-mod crash;
-mod default_terminal;
-mod keys;
-mod launch;
-mod pty;
-mod session;
-mod storage;
+mod keys_gtk;
 mod terminal;
 #[cfg(test)]
 mod test_support;
 mod tree;
 mod ui;
 mod verification;
+
+#[cfg(test)]
+use option_term_core::storage;
+use option_term_core::{codex, config, crash, default_terminal, keys, launch, pty, session};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args_os()

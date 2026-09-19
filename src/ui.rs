@@ -20,73 +20,6 @@ use crate::{
     terminal::TerminalView,
 };
 
-/// (label, action, accel) for menus and the command palette.
-pub const COMMANDS: &[(&str, &str, &str)] = &[
-    ("Command Palette", "win.command-palette", "Ctrl+Shift+P"),
-    (
-        "Resize Split Left",
-        "win.resize-split-left",
-        "Ctrl+Shift+Super+Left",
-    ),
-    (
-        "Resize Split Right",
-        "win.resize-split-right",
-        "Ctrl+Shift+Super+Right",
-    ),
-    (
-        "Resize Split Up",
-        "win.resize-split-up",
-        "Ctrl+Shift+Super+Up",
-    ),
-    (
-        "Resize Split Down",
-        "win.resize-split-down",
-        "Ctrl+Shift+Super+Down",
-    ),
-    ("New Tab", "win.new-tab", "Ctrl+Shift+T"),
-    ("Close Tab", "win.close-tab", "Ctrl+Shift+W"),
-    ("Next Tab", "win.next-tab", "Ctrl+PgDn"),
-    ("Previous Tab", "win.prev-tab", "Ctrl+PgUp"),
-    ("All Tabs", "win.tab-overview", "F1"),
-    ("Split Right", "win.split-right", "Ctrl+Shift+O"),
-    ("Split Down", "win.split-down", "Ctrl+Shift+E"),
-    ("Split Left", "win.split-left", "Ctrl+Shift+L"),
-    ("Split Up", "win.split-up", "Ctrl+Shift+U"),
-    (
-        "Toggle Split Zoom",
-        "win.toggle-split-zoom",
-        "Ctrl+Shift+Enter",
-    ),
-    ("Equalize Splits", "win.equalize-splits", ""),
-    ("Focus Split Left", "win.focus-split-left", "Ctrl+Alt+←"),
-    ("Focus Split Right", "win.focus-split-right", "Ctrl+Alt+→"),
-    ("Focus Split Up", "win.focus-split-up", "Ctrl+Alt+↑"),
-    ("Focus Split Down", "win.focus-split-down", "Ctrl+Alt+↓"),
-    ("Previous Split", "win.focus-split-previous", "Ctrl+Super+["),
-    ("Next Split", "win.focus-split-next", "Ctrl+Super+]"),
-    ("Copy", "win.copy", "Ctrl+Shift+C"),
-    ("Paste", "win.paste", "Ctrl+Shift+V"),
-    ("Select All", "win.select-all", "Ctrl+Shift+A"),
-    ("Clear Terminal", "win.clear-tab", "Ctrl+Shift+K"),
-    ("Restart Terminal", "win.restart-tab", "Ctrl+Shift+R"),
-    ("Increase Font Size", "win.zoom-in", "Ctrl++"),
-    ("Decrease Font Size", "win.zoom-out", "Ctrl+-"),
-    ("Default Font Size", "win.zoom-reset", "Ctrl+0"),
-    ("Find in Scrollback", "win.find", "Ctrl+Shift+F"),
-    ("Open Browser", "win.open-browser", "Ctrl+Shift+B"),
-    ("File Explorer", "win.file-tree", "F9"),
-    ("Save Session As…", "win.save-session-as", "Ctrl+Shift+S"),
-    ("Load Session…", "win.load-session", "Ctrl+O"),
-    ("Manage Sessions…", "win.manage-sessions", ""),
-    ("Save Codex Thread", "win.save-codex-thread", "Ctrl+Shift+D"),
-    ("Rename Tab", "win.rename-tab", "F2"),
-    ("Reload Configuration", "win.reload-config", ""),
-    ("Preferences", "win.preferences", "Ctrl+,"),
-    ("Keyboard Shortcuts", "win.shortcuts", ""),
-    ("About optionTerm", "win.about", ""),
-    ("Quit", "win.quit", "Ctrl+Shift+Q"),
-];
-
 /// Menu behind the new-tab `+` button: grouped by what it opens.
 pub fn tabs_menu(agents: &gio::Menu) -> gio::Menu {
     let menu = gio::Menu::new();
@@ -2368,6 +2301,7 @@ fn populate_agent_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use option_term_core::commands::COMMANDS;
 
     #[gtk4::test]
     fn search_tracks_panes_and_clears_on_close_and_escape() {

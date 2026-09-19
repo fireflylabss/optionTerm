@@ -19,6 +19,7 @@ use crate::{
         Config, CursorStyle, MiddleClickTab, NewTabPosition, TabOverflow, TabWidth, TabsLocation,
         Theme,
     },
+    keys_gtk::BindingsGtk,
     launch::LaunchRequest,
     session::{PaneLayout, Session as SessionState, SplitOrientation, TabKind, TabState},
     terminal::TerminalView,

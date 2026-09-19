@@ -11,8 +11,13 @@ default-run = "optionterm"
 name = "optionterm"
 path = "src/main.rs"
 
+[workspace]
+members = [".", "crates/*"]
+resolver = "3"
+
 [dependencies]
 anyhow = "1"
+option-term-core = { path = "crates/option-term-core" }
 optionSDK = "0.1.3"
 dirs = "6"
 gtk4 = { version = "0.9", features = ["v4_14"] }
@@ -24,6 +29,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 vte4 = { version = "0.8", features = ["v0_76"] }
 webkit6 = "0.4"
+
+[dev-dependencies]
+option-term-core = { path = "crates/option-term-core", features = ["test-support"] }
 
 [profile.release]
 lto = true

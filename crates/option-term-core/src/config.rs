@@ -214,7 +214,7 @@ pub struct Config {
     pub padding_x: f64,
     pub padding_y: f64,
     pub source: PathBuf,
-    pub(crate) source_text: Option<String>,
+    pub source_text: Option<String>,
 }
 
 impl Default for Config {
@@ -504,7 +504,7 @@ impl Config {
         Ok(cfg)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn save(&self) -> Result<()> {
         let path = if self.source.as_os_str().is_empty() {
             option_config_path()
@@ -526,11 +526,7 @@ impl Config {
         self.write_checked(path, previous.as_deref()).map(|_| ())
     }
 
-    pub(crate) fn write_checked(
-        &self,
-        path: &std::path::Path,
-        expected: Option<&str>,
-    ) -> Result<String> {
+    pub fn write_checked(&self, path: &std::path::Path, expected: Option<&str>) -> Result<String> {
         let previous = read_document(path)?;
         anyhow::ensure!(
             previous.as_deref() == expected,

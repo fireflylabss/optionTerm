@@ -166,10 +166,10 @@ fn run(binary: &str, args: &[&str]) -> bool {
     }
 }
 
+/// `gsettings` consults the same compiled schema list as libgio, so probing
+/// through it keeps this module free of a GLib dependency.
 fn schema_exists(schema: &str) -> bool {
-    gtk4::gio::SettingsSchemaSource::default()
-        .and_then(|source| source.lookup(schema, true))
-        .is_some()
+    probe("gsettings", &["describe", schema, "exec"]).unwrap_or(false)
 }
 
 #[cfg(test)]
