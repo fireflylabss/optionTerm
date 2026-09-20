@@ -1,11 +1,39 @@
+# Rust
 /target/
-/vte-dist/
-/.cargo/config.toml
 **/*.rs.bk
-*.swp
-.DS_Store
+
+# Secrets
 .env
 .env.*
-/dist/
-.commandcode/
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Agent tooling
+/.agents/
+/.commandcode/
+/.devin/
+/.opencode/
 command-code-session-*.html
+skills-lock.json
+
+# Temp
+/.tmp/
+
+# Project
+/vte-dist/
+/.cargo/config.toml
+/dist/
