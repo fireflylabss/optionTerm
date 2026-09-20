@@ -81,7 +81,7 @@ impl Element for TerminalElement {
         let (font, font_size) = self
             .pane
             .read_with(cx, |pane, _| (pane.font.clone(), pane.font_size));
-        let cell = metrics::cell_size(&text_system, &font, font_size);
+        let cell = metrics::cell_size(&text_system, &font, font_size, scale_factor);
         self.pane.update(cx, |pane, _| {
             pane.update_layout(bounds, cell, scale_factor);
         });
@@ -108,18 +108,20 @@ impl Element for TerminalElement {
         );
 
         // Selection drags extend even when the pointer leaves the element.
+        // A WeakEntity is required: listeners live as long as the window and a
+        // strong Entity<Pane> here would leak the pane on exit.
         window.on_mouse_event({
-            let pane = self.pane.clone();
+            let pane = self.pane.downgrade();
             move |ev: &MouseMoveEvent, phase, _window, cx| {
                 if phase.bubble() {
-                    pane.update(cx, |pane, _| pane.mouse_move(ev));
+                    let _ = pane.update(cx, |pane, _| pane.mouse_move(ev));
                 }
             }
         });
 
         window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
 
-        let (frame, cell, origin, font, font_size, theme, preedit, blink_on, focused) =
+        let (frame, cell, origin, font, font_size, theme, preedit, blink_on, focused, bg_opacity) =
             self.pane.read_with(cx, |pane, _| {
                 (
                     pane.frame.clone(),
@@ -131,13 +133,17 @@ impl Element for TerminalElement {
                     pane.preedit.clone(),
                     pane.blink_on,
                     pane.focused,
+                    pane.background_opacity,
                 )
             });
         let window_active = window.is_window_active();
         let text_system = window.text_system().clone();
 
-        // Panel background.
-        window.paint_quad(fill(bounds, theme::to_hsla(frame.default_bg)));
+        // Panel background: `background_opacity` applies here only; explicit
+        // per-cell `run.bg` colors below stay opaque (kitty behaviour).
+        let mut panel_bg = theme::to_hsla(frame.default_bg);
+        panel_bg.a *= bg_opacity;
+        window.paint_quad(fill(bounds, panel_bg));
 
         // Search-match highlights (a later phase wires the search UI, but the
         // emulator already reports matches — paint them now).
@@ -203,29 +209,17 @@ impl Element for TerminalElement {
                 if run.style.contains(CellStyle::ITALIC) {
                     font.style = FontStyle::Italic;
                 }
-                let shaped = text_system.shape_line(
-                    run.text.clone().into(),
-                    font_size,
-                    &[TextRun {
-                        len: run.text.len(),
-                        font,
-                        color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    Some(cell.width),
-                );
-                if let Err(err) = shaped.paint(
-                    run_origin,
-                    cell.height,
-                    TextAlign::Left,
-                    Some(run_width),
+                self.paint_run_text(
                     window,
+                    &text_system,
+                    run,
+                    run_origin,
+                    cell,
+                    &font,
+                    font_size,
+                    color,
                     cx,
-                ) {
-                    tracing::warn!("failed to paint text run: {err}");
-                }
+                );
                 self.paint_decorations(window, run_bounds, run.style, run.underline_color, run.fg);
             }
         }
@@ -313,6 +307,158 @@ impl Element for TerminalElement {
 }
 
 impl TerminalElement {
+    /// Paint a run's text, splitting out block-element characters which are
+    /// drawn geometrically (fonts rasterize them with gaps and wrong metrics).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_run_text(
+        &self,
+        window: &mut Window,
+        text_system: &Arc<gpui::WindowTextSystem>,
+        run: &option_term_vt::frame::Run,
+        run_origin: gpui::Point<Pixels>,
+        cell: gpui::Size<Pixels>,
+        font: &gpui::Font,
+        font_size: Pixels,
+        color: Hsla,
+        cx: &mut App,
+    ) {
+        let mut text_seg = String::new();
+        let mut text_seg_col = run.col;
+        let mut block_seg: Vec<char> = Vec::new();
+        let mut block_seg_col = run.col;
+        let mut col = run.col;
+
+        let mut flush_text =
+            |this: &Self, window: &mut Window, text: &mut String, start_col: u16, end_col: u16| {
+                if !text.is_empty() {
+                    this.shape_and_paint(
+                        window,
+                        text_system,
+                        text,
+                        run_origin + point(cell.width * f32::from(start_col - run.col), px(0.0)),
+                        cell.width * f32::from(end_col - start_col),
+                        cell,
+                        font,
+                        font_size,
+                        color,
+                        cx,
+                    );
+                    text.clear();
+                }
+            };
+
+        for ch in run.text.chars() {
+            if is_block_element(ch) {
+                flush_text(self, window, &mut text_seg, text_seg_col, col);
+                if block_seg.is_empty() {
+                    block_seg_col = col;
+                }
+                block_seg.push(ch);
+                col += 1;
+            } else {
+                if !block_seg.is_empty() {
+                    self.paint_block_segment(
+                        window,
+                        &block_seg,
+                        block_seg_col,
+                        run_origin,
+                        run.col,
+                        cell,
+                        color,
+                    );
+                    block_seg.clear();
+                }
+                if text_seg.is_empty() {
+                    text_seg_col = col;
+                }
+                text_seg.push(ch);
+                col += char_cells(ch);
+            }
+        }
+        flush_text(self, window, &mut text_seg, text_seg_col, col);
+        if !block_seg.is_empty() {
+            self.paint_block_segment(
+                window,
+                &block_seg,
+                block_seg_col,
+                run_origin,
+                run.col,
+                cell,
+                color,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn shape_and_paint(
+        &self,
+        window: &mut Window,
+        text_system: &Arc<gpui::WindowTextSystem>,
+        text: &str,
+        origin: gpui::Point<Pixels>,
+        width: Pixels,
+        cell: gpui::Size<Pixels>,
+        font: &gpui::Font,
+        font_size: Pixels,
+        color: Hsla,
+        cx: &mut App,
+    ) {
+        let shaped = text_system.shape_line(
+            text.to_string().into(),
+            font_size,
+            &[TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            Some(cell.width),
+        );
+        if let Err(err) = shaped.paint(
+            origin,
+            cell.height,
+            TextAlign::Left,
+            Some(width),
+            window,
+            cx,
+        ) {
+            tracing::warn!("failed to paint text run: {err}");
+        }
+    }
+
+    /// Paint consecutive block-element chars as geometric quads, one cell each.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_block_segment(
+        &self,
+        window: &mut Window,
+        chars: &[char],
+        start_col: u16,
+        run_origin: gpui::Point<Pixels>,
+        run_col: u16,
+        cell: gpui::Size<Pixels>,
+        color: Hsla,
+    ) {
+        for (index, ch) in chars.iter().enumerate() {
+            let cell_bounds = Bounds::new(
+                run_origin
+                    + point(
+                        cell.width * (f32::from(start_col - run_col) + index as f32),
+                        px(0.0),
+                    ),
+                cell,
+            );
+            if let Some(rects) = block_element_rects(*ch, cell_bounds) {
+                for (rect, alpha) in rects {
+                    let mut color = color;
+                    color.a *= alpha;
+                    window.paint_quad(fill(rect, color));
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn paint_cursor_text(
         &self,
@@ -493,5 +639,138 @@ impl TerminalElement {
                 },
             );
         }
+    }
+}
+
+fn is_block_element(ch: char) -> bool {
+    (0x2580..=0x259F).contains(&(ch as u32))
+}
+
+/// Geometry for block-element chars (U+2580..=U+259F) inside `cell`, as
+/// `(rect, alpha)` pairs; `alpha` multiplies the run's fg color. Quadrant
+/// letters below follow the Unicode chart: TL/TR/BL/BR half-cell quadrants.
+fn block_element_rects(ch: char, cell: Bounds<Pixels>) -> Option<Vec<(Bounds<Pixels>, f32)>> {
+    let code = ch as u32;
+    if !is_block_element(ch) {
+        return None;
+    }
+    let x = f32::from(cell.origin.x);
+    let y = f32::from(cell.origin.y);
+    let w = f32::from(cell.size.width);
+    let h = f32::from(cell.size.height);
+    let rect =
+        |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+    // n/8 fractions measured from each edge.
+    let lower = |n: f32| rect(x, y + h * (8.0 - n) / 8.0, w, h * n / 8.0);
+    let upper = |n: f32| rect(x, y, w, h * n / 8.0);
+    let left = |n: f32| rect(x, y, w * n / 8.0, h);
+    let right = |n: f32| rect(x + w * (8.0 - n) / 8.0, y, w * n / 8.0, h);
+    let tl = rect(x, y, w / 2.0, h / 2.0);
+    let tr = rect(x + w / 2.0, y, w / 2.0, h / 2.0);
+    let bl = rect(x, y + h / 2.0, w / 2.0, h / 2.0);
+    let br = rect(x + w / 2.0, y + h / 2.0, w / 2.0, h / 2.0);
+
+    let rects = match code {
+        0x2580 => vec![(upper(4.0), 1.0)],
+        0x2581..=0x2588 => vec![(lower((code - 0x2580) as f32), 1.0)],
+        0x2589..=0x258F => vec![(left((8 - (code - 0x2588)) as f32), 1.0)],
+        0x2590 => vec![(right(4.0), 1.0)],
+        0x2591 => vec![(rect(x, y, w, h), 0.25)],
+        0x2592 => vec![(rect(x, y, w, h), 0.5)],
+        0x2593 => vec![(rect(x, y, w, h), 0.75)],
+        0x2594 => vec![(upper(1.0), 1.0)],
+        0x2595 => vec![(right(1.0), 1.0)],
+        0x2596 => vec![(bl, 1.0)],
+        0x2597 => vec![(br, 1.0)],
+        0x2598 => vec![(tl, 1.0)],
+        0x2599 => vec![(tl, 1.0), (bl, 1.0), (br, 1.0)],
+        0x259A => vec![(tl, 1.0), (br, 1.0)],
+        0x259B => vec![(tl, 1.0), (tr, 1.0), (bl, 1.0)],
+        0x259C => vec![(tl, 1.0), (tr, 1.0), (br, 1.0)],
+        0x259D => vec![(tr, 1.0)],
+        0x259E => vec![(tr, 1.0), (bl, 1.0)],
+        0x259F => vec![(tr, 1.0), (bl, 1.0), (br, 1.0)],
+        _ => return None,
+    };
+    Some(rects)
+}
+
+/// Approximate terminal cell width of a char without pulling in unicode-width:
+/// combining marks take 0 cells, East-Asian wide ranges take 2, the rest 1.
+/// Only used to position block-element quads inside mixed runs.
+fn char_cells(ch: char) -> u16 {
+    match ch as u32 {
+        0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F => 0,
+        0x1100..=0x115F
+        | 0x2329..=0x232A
+        | 0x2E80..=0x303E
+        | 0x3040..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x2FFFD
+        | 0x30000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell() -> Bounds<Pixels> {
+        Bounds::new(point(px(4.0), px(8.0)), size(px(10.0), px(20.0)))
+    }
+
+    #[test]
+    fn block_upper_half() {
+        // U+2580 ▀: top half.
+        let rects = block_element_rects('\u{2580}', cell()).unwrap();
+        assert_eq!(rects.len(), 1);
+        let (r, alpha) = rects[0];
+        assert_eq!(alpha, 1.0);
+        assert_eq!(r.origin, point(px(4.0), px(8.0)));
+        assert_eq!(r.size, size(px(10.0), px(10.0)));
+    }
+
+    #[test]
+    fn block_lower_half() {
+        // U+2584 ▄: bottom half.
+        let rects = block_element_rects('\u{2584}', cell()).unwrap();
+        assert_eq!(rects.len(), 1);
+        let (r, _) = rects[0];
+        assert_eq!(r.origin, point(px(4.0), px(18.0)));
+        assert_eq!(r.size, size(px(10.0), px(10.0)));
+    }
+
+    #[test]
+    fn block_full_and_shade() {
+        // U+2588 █: full cell.
+        let (r, alpha) = block_element_rects('\u{2588}', cell()).unwrap()[0];
+        assert_eq!(r, cell());
+        assert_eq!(alpha, 1.0);
+        // U+2591 ░: full cell at 25% alpha.
+        let (r, alpha) = block_element_rects('\u{2591}', cell()).unwrap()[0];
+        assert_eq!(r, cell());
+        assert_eq!(alpha, 0.25);
+    }
+
+    #[test]
+    fn block_quadrants() {
+        // U+259F ▟ = TR + BL + BR.
+        let rects = block_element_rects('\u{259F}', cell()).unwrap();
+        assert_eq!(rects.len(), 3);
+        let origins: Vec<_> = rects.iter().map(|(r, _)| r.origin).collect();
+        assert!(origins.contains(&point(px(9.0), px(8.0)))); // TR
+        assert!(origins.contains(&point(px(4.0), px(18.0)))); // BL
+        assert!(origins.contains(&point(px(9.0), px(18.0)))); // BR
+    }
+
+    #[test]
+    fn non_block_returns_none() {
+        assert!(block_element_rects('a', cell()).is_none());
+        assert!(block_element_rects('╱', cell()).is_none());
     }
 }

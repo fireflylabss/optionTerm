@@ -60,7 +60,11 @@ pub fn open_main_window(cx: &mut App, config: &Config) {
         app_id: Some("optionterm".to_string()),
         kind: WindowKind::Normal,
         focus: true,
-        window_background: WindowBackgroundAppearance::Opaque,
+        window_background: if config.background_opacity < 1.0 {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
         ..Default::default()
     };
     let config = config.clone();
@@ -73,6 +77,9 @@ pub fn open_main_window(cx: &mut App, config: &Config) {
                 Pane::without_thread(&config, cx)
             }
         });
+        // A terminal must be typeable the moment it opens (kitty behaviour);
+        // nothing else ever focuses the pane if the user never clicks it.
+        pane.read(cx).focus_handle().focus(window, cx);
         cx.new(|_| Root { pane })
     }) {
         tracing::error!("failed to open window: {err}");

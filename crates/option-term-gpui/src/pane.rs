@@ -35,6 +35,11 @@ use crate::theme::{self, Theme};
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const ZOOM_STEP: f32 = 1.1;
 
+/// `Config::font_size` is in *points* (GTK/Pango semantics); GPUI works in px.
+fn font_size_px(config: &Config) -> f32 {
+    config.font_size * 96.0 / 72.0
+}
+
 fn empty_frame(palette: &Palette) -> Frame {
     Frame {
         cols: 80,
@@ -79,9 +84,12 @@ pub struct Pane {
     pub(crate) title: String,
 
     pub(crate) font: gpui::Font,
+    /// Effective font size in px (zoom applied).
     pub(crate) font_size: Pixels,
+    /// Configured font size in px (no zoom).
     base_font_size: f32,
     zoom_steps: i32,
+    pub(crate) background_opacity: f32,
     pub(crate) padding: Size<Pixels>,
     /// Cell metrics and content origin, refreshed by `TerminalElement` prepaint.
     pub(crate) cell: Size<Pixels>,
@@ -113,8 +121,9 @@ impl Pane {
         // `resolve_font` falls back to GPUI's default font stack if the
         // configured family is missing, so a bad `font_family` cannot panic.
         let font = base_font(config);
-        let cell = crate::metrics::cell_size(window.text_system(), &font, px(config.font_size));
+        let font_size = font_size_px(config);
         let scale = window.scale_factor();
+        let cell = crate::metrics::cell_size(window.text_system(), &font, px(font_size), scale);
         let options = PaneOptions {
             emulator: EmulatorOptions {
                 cols: 80,
@@ -235,9 +244,10 @@ impl Pane {
             theme: Theme::from(&palette),
             title: String::new(),
             font,
-            font_size: px(config.font_size),
-            base_font_size: config.font_size,
+            font_size: px(font_size_px(config)),
+            base_font_size: font_size_px(config),
             zoom_steps: 0,
+            background_opacity: config.background_opacity as f32,
             padding: size(px(config.padding_x as f32), px(config.padding_y as f32)),
             cell: size(px(9.6), px(20.0)),
             content_origin: point(px(0.0), px(0.0)),
@@ -322,6 +332,13 @@ impl Pane {
             Event::Link(None) => {}
             Event::Exited { status } => {
                 tracing::info!(?status, "pane exited");
+                // Drop the window before quitting so entity handles rooted in
+                // it (including this Pane) are released instead of leaking.
+                if let Some(handle) = self.window_handle
+                    && let Err(err) = handle.update(cx, |_, window, _| window.remove_window())
+                {
+                    tracing::warn!("failed to remove window on exit: {err}");
+                }
                 cx.quit();
             }
             Event::Error(msg) => tracing::error!("pane: {msg}"),
@@ -360,7 +377,12 @@ impl Pane {
     ) {
         self.bounds = bounds;
         self.cell = cell;
-        self.content_origin = bounds.origin + point(self.padding.width, self.padding.height);
+        // Snap the content origin to the device-pixel grid so every cell (and
+        // thus every glyph) lands on whole device pixels.
+        self.content_origin = crate::metrics::snap_point_to_device_px(
+            bounds.origin + point(self.padding.width, self.padding.height),
+            scale_factor,
+        );
         let (cols, rows) = crate::metrics::grid_for(bounds.size, cell, self.padding);
         let cell_w = (f32::from(cell.width) * scale_factor).round().max(1.0) as u16;
         let cell_h = (f32::from(cell.height) * scale_factor).round().max(1.0) as u16;
@@ -642,8 +664,9 @@ impl Pane {
         cx.stop_propagation();
     }
 
-    fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         self.send(Input::Shutdown);
+        window.remove_window();
         cx.quit();
     }
 }
